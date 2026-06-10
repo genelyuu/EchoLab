@@ -76,7 +76,7 @@ from echo_bench.metrics.aggregate import (
     aggregate_metric_dicts,
     rank_stability_by_metric,
 )
-from echo_bench.metrics.compare import compare_reference_to_others
+from echo_bench.metrics.compare import compare_reference_to_others, effect_size_summary
 from echo_bench.metrics.utility import (
     METRIC_KEYS,
     _achieved_coordinate_novelty,
@@ -490,6 +490,19 @@ def run_e2_policy(
         }
     )
 
+    # Effect-size summary table (Task D-014, TRD V-011): consolidated d_z /
+    # mean_diff / CI / adjusted-p / magnitude for every comparison reference vs
+    # other pair. Computed from the SAME per-seed values as `comparisons` and
+    # `rankStability`. Purely additive; seeded bootstrap CI is deterministic,
+    # so the inline replay re-run reproduces it bit-identically.
+    effect_sizes_block = None
+    if COMPARISON_REFERENCE_POLICY in per_seed_by_policy:
+        effect_sizes_block = effect_size_summary(
+            per_seed_by_policy,
+            reference=COMPARISON_REFERENCE_POLICY,
+            metric_keys=E2_METRIC_KEYS,
+        )
+
     results_body = {
         "config": run_params,
         "metricKeys": list(E2_METRIC_KEYS),
@@ -497,6 +510,7 @@ def run_e2_policy(
         "table": table,
         "comparisons": comparisons,
         "rankStability": rank_stability_block,
+        "effectSizes": effect_sizes_block,
     }
     output_hash = canonical_hash(results_body)
 
@@ -537,6 +551,7 @@ def run_e2_policy(
         "table": table,
         "comparisons": comparisons,
         "rankStability": rank_stability_block,
+        "effectSizes": effect_sizes_block,
     }
     report_hash = canonical_hash(report)
     report["reportHash"] = report_hash

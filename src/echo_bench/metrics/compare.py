@@ -1,4 +1,4 @@
-"""Paired policy-comparison statistics (Task D-007).
+"""Paired policy-comparison statistics (Tasks D-007, D-014).
 
 Deterministic, *seeded* significance tooling for comparing trace-only policies on
 the same seed batch. Because every policy in a run is evaluated over the SAME
@@ -20,6 +20,31 @@ What this module provides
 - :func:`compare_reference_to_others` — the top-level: compare one reference
   policy (e.g. ``TRACE_GREEDY``) against every other policy across a set of
   metrics, with per-metric multiple-comparison correction.
+- :func:`effect_size_summary` — D-014 consolidated effect-size table: for each
+  non-reference policy and each metric, ``d_z``, ``mean_diff`` (reference −
+  other), bootstrap CI of the paired diffs, Holm-adjusted p, ``n``, and a
+  magnitude label from :data:`COHEN_MAGNITUDE_THRESHOLDS`. Reuses
+  :func:`compare_reference_to_others` internals so statistical logic is never
+  duplicated.
+
+Magnitude labels (:data:`COHEN_MAGNITUDE_THRESHOLDS`)
+======================================================
+Standard Cohen thresholds applied to ``|d_z|``:
+
++-------------+-----------------------------+
+| label       | condition                   |
++=============+=============================+
+| negligible  | ``|d_z| < 0.2``             |
+| small       | ``0.2 ≤ |d_z| < 0.5``       |
+| medium      | ``0.5 ≤ |d_z| < 0.8``       |
+| large       | ``|d_z| ≥ 0.8``             |
++-------------+-----------------------------+
+
+Boundaries are **lower-inclusive / upper-exclusive** at each step (i.e. exactly
+``0.2`` is "small", exactly ``0.5`` is "medium", exactly ``0.8`` is "large").
+The constant :data:`COHEN_MAGNITUDE_THRESHOLDS` is a tuple of
+``(upper_exclusive_bound, label)`` pairs in ascending bound order; the final
+``(None, "large")`` entry signals "no upper bound".
 
 Scope and guardrails
 ====================
@@ -34,7 +59,7 @@ from __future__ import annotations
 
 import itertools
 import math
-from typing import Any, Dict, List, Mapping, Sequence
+from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
 import numpy as np
 
@@ -49,9 +74,11 @@ __all__ = [
     "multiple_comparison_correction",
     "rank_stability",
     "compare_reference_to_others",
+    "effect_size_summary",
     "PERMUTATION_RESAMPLES",
     "PERMUTATION_EXACT_MAX_N",
     "DEFAULT_ALPHA",
+    "COHEN_MAGNITUDE_THRESHOLDS",
 ]
 
 _logger = get_logger(__name__)
@@ -65,6 +92,23 @@ DEFAULT_ALPHA = 0.05
 
 # Salt mixed into the permutation seed derivation; bumping it changes every test.
 _PERMUTATION_SALT = "compare-permutation-h1"
+
+# Cohen's d_z magnitude thresholds (D-014, TRD V-011).
+#
+# Applied to |d_z|; boundaries are lower-inclusive / upper-exclusive:
+#   < 0.2          → "negligible"
+#   0.2 ≤ |d_z| < 0.5  → "small"
+#   0.5 ≤ |d_z| < 0.8  → "medium"
+#   |d_z| ≥ 0.8       → "large"
+#
+# Format: tuple of (upper_exclusive_bound, label) in ascending bound order.
+# The final entry uses None to signal "no upper bound".
+COHEN_MAGNITUDE_THRESHOLDS: Tuple[Tuple[object, str], ...] = (
+    (0.2, "negligible"),
+    (0.5, "small"),
+    (0.8, "medium"),
+    (None, "large"),
+)
 
 
 def _as_floats(values: Sequence[float]) -> List[float]:
@@ -407,4 +451,141 @@ def compare_reference_to_others(
         "correction": correction,
         "others": others,
         "byMetric": by_metric,
+    }
+
+
+def _magnitude_label(abs_dz: float) -> str:
+    """Map ``|d_z|`` to a Cohen magnitude label using :data:`COHEN_MAGNITUDE_THRESHOLDS`.
+
+    Boundaries are lower-inclusive / upper-exclusive at each step.
+    """
+    for upper, label in COHEN_MAGNITUDE_THRESHOLDS:
+        if upper is None or abs_dz < float(upper):
+            return label
+    # Fallback (unreachable given the None sentinel, but makes mypy happy).
+    return "large"  # pragma: no cover
+
+
+def effect_size_summary(
+    per_seed_by_policy: Mapping[str, Sequence[Mapping[str, Any]]],
+    *,
+    reference: str,
+    metric_keys: Sequence[str],
+    alpha: float = DEFAULT_ALPHA,
+    correction: str = "holm",
+) -> Dict[str, Any]:
+    """Consolidated effect-size table for the paper (Task D-014, TRD V-011).
+
+    For each non-reference policy and each metric key, produces::
+
+        {
+          "reference": <name>,
+          "byPolicy": {
+            <policy>: {
+              "byMetric": {
+                <key>: {
+                  "d_z":        float,   # cohens_dz(reference, policy)
+                  "mean_diff":  float,   # paired mean diff: reference − other
+                  "ci_low":     float,   # seeded bootstrap 95 % CI of the diffs
+                  "ci_high":    float,
+                  "p_adjusted": float,   # Holm-adjusted permutation p-value
+                  "n":          int,     # number of aligned paired observations
+                  "magnitude":  str,     # Cohen label ("negligible"/"small"/
+                                         #               "medium"/"large")
+                }, ...
+              }
+            }, ...
+          }
+        }
+
+    **Sign convention:** ``mean_diff = mean(reference_i − other_i)``, so a
+    positive value means the reference policy outperforms on this metric.
+
+    **Statistical logic reuse:** internally calls :func:`compare_reference_to_others`
+    and extracts ``cohens_dz``, ``mean_diff``, and ``p_adjusted`` from its output
+    (no duplication of permutation / correction logic). The bootstrap CI is the only
+    addition: :func:`echo_bench.metrics.aggregate.aggregate_values` is applied to
+    the paired diffs for a deterministic seeded bootstrap CI at the module-level
+    ``CI_LEVEL = 0.95`` (same machinery as seed-batch aggregation).
+
+    Deterministic: the seeded bootstrap uses ``canonical_hash`` of the diffs + a
+    distinguishing ``key`` string; identical inputs yield bit-identical output.
+    """
+    # Lazy import to avoid a circular dependency (aggregate imports nothing from
+    # compare; compare would import from aggregate only here — no cycle in practice
+    # because compare does not re-export aggregate symbols, but the lazy import
+    # makes the dependency direction explicit at the call site).
+    from echo_bench.metrics.aggregate import aggregate_values  # noqa: PLC0415
+
+    if reference not in per_seed_by_policy:
+        raise ValueError(
+            f"effect_size_summary: reference={reference!r} 가 "
+            "per_seed_by_policy 에 없습니다"
+        )
+
+    # Run the full comparison to extract p_adjusted and d_z / mean_diff.
+    cmp = compare_reference_to_others(
+        per_seed_by_policy,
+        metric_keys=metric_keys,
+        reference=reference,
+        alpha=alpha,
+        correction=correction,
+    )
+
+    others = cmp["others"]
+    ref_vals_by_key: Dict[str, List[float]] = {
+        key: _metric_values(per_seed_by_policy[reference], key)
+        for key in metric_keys
+    }
+
+    by_policy: Dict[str, Any] = {}
+    for other in others:
+        other_by_metric: Dict[str, Any] = {}
+        for key in metric_keys:
+            # Extract pre-computed d_z / mean_diff / p_adjusted from compare block.
+            comp_rows = {
+                row["policy"]: row
+                for row in cmp["byMetric"][key]["comparisons"]
+            }
+            comp_row = comp_rows[other]
+
+            ref_v = ref_vals_by_key[key]
+            other_v = _metric_values(per_seed_by_policy[other], key)
+
+            # CI of paired diffs via seeded bootstrap (aggregate_values).
+            if len(ref_v) >= 2 and len(other_v) == len(ref_v):
+                diffs = paired_diffs(ref_v, other_v)
+                ci_agg = aggregate_values(diffs, key=f"effect_size_diff:{key}:{other}")
+                ci_low = ci_agg["ci_low"]
+                ci_high = ci_agg["ci_high"]
+            else:
+                # Degenerate: not enough paired observations for CI.
+                md = comp_row["mean_diff"]
+                ci_low = md
+                ci_high = md
+
+            abs_dz = abs(comp_row["cohens_dz"])
+            magnitude = _magnitude_label(abs_dz)
+
+            other_by_metric[key] = {
+                "d_z": float(comp_row["cohens_dz"]),
+                "mean_diff": float(comp_row["mean_diff"]),
+                "ci_low": float(ci_low),
+                "ci_high": float(ci_high),
+                "p_adjusted": float(comp_row["p_adjusted"]),
+                "n": int(comp_row["n"]),
+                "magnitude": magnitude,
+            }
+
+        by_policy[other] = {"byMetric": other_by_metric}
+
+    _logger.info(
+        "효과 크기 요약 테이블을 계산했습니다 (reference=%s, policies=%d, metrics=%d)",
+        reference,
+        len(others),
+        len(list(metric_keys)),
+    )
+    return {
+        "reference": reference,
+        "byPolicy": by_policy,
     }
