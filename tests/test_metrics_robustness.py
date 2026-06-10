@@ -143,6 +143,14 @@ def test_robustness_metadata_carries_both_trace_hashes():
     assert md["faultedTraceHash"] == "hash-b"
     assert md["sharedKeys"] == ["m"]
     assert abs(md["value"] - 0.6) < 1e-12
+    # D-012: primary label and legacy alias must be present in metadata.
+    assert md["metric"] == "sensitivity_score", (
+        f"robustness_score_with_metadata must set metric='sensitivity_score', got {md['metric']!r}"
+    )
+    assert md["legacyAlias"] == "robustness_score", (
+        f"robustness_score_with_metadata must set legacyAlias='robustness_score', "
+        f"got {md['legacyAlias']!r}"
+    )
 
 
 def test_sensitivity_score_is_identical_to_robustness_score():

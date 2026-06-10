@@ -65,7 +65,7 @@ _METRIC_DESC = [
     ("strategy_sensitivity", "통제된 프로브에 따른 관측 트레이스의 변화량"),
     ("regret_to_oracle", "C-007 오라클 기준 대비 정규화 후회 (좌표 신규성)"),
     ("leakage_proxy", "관측 분포가 프로브 정체성과 공변하는 정도 (PROXY; 보증 아님)"),
-    ("robustness_score", "통제된 결함 하 시스템 수준 민감도"),
+    ("sensitivity_score (legacy: robustness_score)", "통제된 결함 하 시스템 수준 민감도"),
     ("replay_consistency", "config + seed 로부터의 정확 재현 (재현 불가 시 주장 불가)"),
 ]
 
@@ -379,9 +379,13 @@ def generate_report_pdf(out_path: Optional[Path] = None) -> str:
                 col_widths=[0.24, 0.22, 0.14],
             )
 
-            rcol = ["fault", "robustness_score", "faultedPoolSize"]
-            rrows = [[r["fault"], _fmt(r["robustness_score"]), str(r.get("faultedPoolSize", ""))]
-                     for r in sorted(e3["robustness"]["table"], key=lambda x: x["fault"])]
+            rcol = ["fault", "sensitivity_score (legacy: robustness_score)", "faultedPoolSize"]
+            rrows = [
+                [r["fault"],
+                 _fmt(r.get("sensitivity_score", r.get("robustness_score"))),
+                 str(r.get("faultedPoolSize", ""))]
+                for r in sorted(e3["robustness"]["table"], key=lambda x: x["fault"])
+            ]
             replay = e3.get("replayAudit", {})
             _table_page(
                 pdf, f"8b. 실험 내용 — E3 강건성/리플레이 (정책: {e3['robustness']['policy']})",

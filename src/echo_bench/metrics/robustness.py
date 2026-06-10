@@ -75,7 +75,8 @@ _logger = get_logger(__name__)
 # magnitude: larger means the fault moved the metrics more. Surfacing this
 # verbatim in reports removes the "is high good or bad?" ambiguity.
 # The phrase "0.0 = max robustness" is machine-readable and must be preserved
-# verbatim for the claim validator and report self-description (D-012 V-015).
+# verbatim; its presence is pinned by tests and by report self-description
+# (D-012).  The claim validator does NOT scan this constant.
 ROBUSTNESS_DIRECTION = (
     "0.0 = max robustness (fault changed no shared metric); "
     "higher = more sensitive = less robust"
@@ -249,8 +250,7 @@ def _effective_keys(
     When ``keys`` is not ``None`` (pinned mode), returns only the keys from
     the supplied tuple that exist in both dicts with non-bool numeric values.
     The order follows the supplied ``keys`` tuple (i.e. ``CORE_METRIC_KEYS``
-    order in the typical pinned call), **not** sorted — note that "sorted"
-    does not apply in pinned mode (unlike the dynamic intersection path).
+    order in the typical pinned call), **not** sorted.
 
     When ``keys`` is ``None`` (dynamic mode), delegates to
     :func:`_shared_numeric_keys`, which returns sorted keys.
@@ -259,7 +259,7 @@ def _effective_keys(
         # Pinned mode: follow the supplied key order (CORE_METRIC_KEYS order).
         # Skip any key absent from either dict or with a non-numeric value
         # (defensive; the pinned key set should always be present in
-        # compute_all dicts). The result is NOT sorted — it follows keys order.
+        # compute_all dicts).
         effective: List[str] = []
         for k in keys:
             bv = baseline.get(k)
@@ -321,7 +321,8 @@ def robustness_score(
         total += abs(float(baseline_metrics[key]) - float(faulted_metrics[key]))
     value = _clamp(total / len(effective_keys), 0.0, 1.0)
     _logger.info(
-        "강건성 점수(robustness_score)를 계산했습니다 (shared_keys=%d, pinned=%s, value=%.6f)",
+        "민감도 점수(sensitivity_score, legacy robustness_score)를 계산했습니다 "
+        "(shared_keys=%d, pinned=%s, value=%.6f)",
         len(effective_keys),
         keys is not None,
         value,

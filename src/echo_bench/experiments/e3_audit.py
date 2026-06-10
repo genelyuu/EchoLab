@@ -375,14 +375,14 @@ def run_e3_audit(
     # pool / probe family above). The reference's own delta is exactly 0.0.
     # D-012 ride-along: explicit guard so a missing RANDOM reference raises a
     # clear error instead of an opaque StopIteration.
-    _ref_matches = [row for row in leakage_rows if row["policy"] == E3_LEAKAGE_DELTA_REFERENCE]
-    if not _ref_matches:
+    ref_matches = [row for row in leakage_rows if row["policy"] == E3_LEAKAGE_DELTA_REFERENCE]
+    if not ref_matches:
         raise ValueError(
             f"E3 감사: leakage_rows 에서 deltaReference 정책을 찾을 수 없습니다 "
             f"(E3_LEAKAGE_DELTA_REFERENCE={E3_LEAKAGE_DELTA_REFERENCE!r}). "
             "E3_LEAKAGE_POLICIES 에 해당 정책이 포함되어 있는지 확인하세요."
         )
-    reference_row = _ref_matches[0]
+    reference_row = ref_matches[0]
     reference_leakage = reference_row["leakage_proxy"]
     for row in leakage_rows:
         row["leakage_delta_vs_random"] = leakage_delta_vs_random(

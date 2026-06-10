@@ -397,6 +397,7 @@ def run_s3_coordinate_scramble(
             "scramble_shift": mean_shift,
             "round0_selection_divergence": round0_divergence,
             "stats": {
+                # Key stays "scramble_shift" for test_supplement_scaleup.py compatibility.
                 "scramble_shift": aggregate_values(per_seed_shifts, "scramble_shift")
             },
             "baselineTraceHashes": cell_baseline_hashes,
@@ -408,7 +409,7 @@ def run_s3_coordinate_scramble(
             _logger,
             "S3 정책 완료: "
             f"policy={name}, seedBatchId={batch_id[:12]}, "
-            f"scramble_shift={mean_shift:.6f}, "
+            f"sensitivity_score={mean_shift:.6f}, "
             f"round0_selection_divergence={round0_divergence:.4f}, "
             f"isCoordinatePolicy={name in COORDINATE_POLICIES}",
         )
