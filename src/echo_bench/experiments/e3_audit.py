@@ -72,15 +72,22 @@ from echo_bench.logging.repro_pack import ReproducibilityPack
 from echo_bench.logging.replay_validator import validate_replay
 from echo_bench.metrics.leakage import (
     IS_PROXY,
+    LEAKAGE_RATIO_FLOOR,
     PROXY_DISCLAIMER,
+    leakage_delta_vs_random,
     leakage_proxy_with_metadata,
+    utility_per_leakage,
 )
 from echo_bench.metrics.robustness import (
     FAULTS,
     ROBUSTNESS_DIRECTION,
     robustness_score_with_metadata,
 )
-from echo_bench.metrics.utility import CORE_METRIC_KEYS, compute_all
+from echo_bench.metrics.utility import (
+    CORE_METRIC_KEYS,
+    compute_all,
+    coordinate_coverage,
+)
 from echo_bench.policies.fixed_balanced import FixedBalancedPolicy
 from echo_bench.policies.fixed_low_to_high import FixedLowToHighPolicy
 from echo_bench.policies.random import RandomPolicy
@@ -93,6 +100,7 @@ __all__ = [
     "run_e3_audit",
     "main",
     "E3_LEAKAGE_POLICIES",
+    "E3_LEAKAGE_DELTA_REFERENCE",
     "E3_ROBUSTNESS_POLICY",
     "FAULT_PARAMS",
 ]
@@ -112,6 +120,23 @@ E3_LEAKAGE_POLICIES = {
     "TRACE_GREEDY": (TraceGreedyPolicy, "trace_greedy.yaml"),
     "TRACE_LIN_UCB": (TraceLinUcbPolicy, "trace_lin_ucb.yaml"),
 }
+
+# D-011 (TRD alias D-010): the reference policy for the RELATIVE leakage claim.
+# Every leakage row reports ``leakage_delta_vs_random`` = leakage(policy) -
+# leakage(reference), seed-aligned; the reference's own delta is exactly 0.0.
+E3_LEAKAGE_DELTA_REFERENCE = "RANDOM"
+
+# D-011: why the leakage delta carries no confidence interval in this report.
+# leakage_proxy is ONE scalar per policy (pooled NMI over the probe-keyed trace
+# family at a single base seed) — there are no per-seed leakage values to pair,
+# so the bootstrap CI machinery (metrics/aggregate.py) has nothing to resample.
+# leakage_proxy is NOT redefined to manufacture per-seed values.
+_E3_LEAKAGE_CI_UNAVAILABLE_REASON = (
+    "leakage_proxy is a single scalar per policy (pooled NMI over the "
+    "probe-keyed trace family at one base seed); no per-seed leakage values "
+    "exist to pair, so no bootstrap CI can be computed without redefining the "
+    "metric."
+)
 
 # The policy whose robustness to each controlled fault is audited.
 E3_ROBUSTNESS_POLICY = ("TRACE_GREEDY", "trace_greedy.yaml")
@@ -318,12 +343,22 @@ def run_e3_audit(
             )
 
         leak = leakage_proxy_with_metadata(traces_by_probe, probe_versions)
+        # D-011: mean coordinate_coverage over this policy's E3-aligned
+        # per-probe traces — the numerator of utility_per_leakage.
+        coverages = [
+            coordinate_coverage(traces_by_probe[pn]) for pn in probe_names
+        ]
+        mean_coverage = sum(coverages) / len(coverages) if coverages else 0.0
         leakage_rows.append(
             {
                 "policy": name,
                 "policyVersion": cls(dict(cfg)).policy_version(),
                 "leakage_proxy": leak["value"],
                 "isProxy": leak["isProxy"],
+                "mean_coordinate_coverage": mean_coverage,
+                "utility_per_leakage": utility_per_leakage(
+                    mean_coverage, leak["value"]
+                ),
                 "traceHashes": leak["traceHashes"],
                 "probeVersions": leak["probeVersions"],
             }
@@ -335,11 +370,40 @@ def run_e3_audit(
             "(이는 PROXY 이며 프라이버시/법적 보증이 아닙니다)",
         )
 
+    # D-011 (TRD alias D-010): second pass — RELATIVE delta vs the RANDOM
+    # reference (seed-aligned: every policy ran the identical seed / horizon /
+    # pool / probe family above). The reference's own delta is exactly 0.0.
+    reference_row = next(
+        row for row in leakage_rows if row["policy"] == E3_LEAKAGE_DELTA_REFERENCE
+    )
+    reference_leakage = reference_row["leakage_proxy"]
+    for row in leakage_rows:
+        row["leakage_delta_vs_random"] = leakage_delta_vs_random(
+            row["leakage_proxy"], reference_leakage
+        )
+        log_ko(
+            _logger,
+            "E3 누출 상대 지표(D-011): "
+            f"policy={row['policy']}, "
+            f"leakage_delta_vs_random={row['leakage_delta_vs_random']:+.6f} "
+            f"(기준={E3_LEAKAGE_DELTA_REFERENCE}), "
+            f"utility_per_leakage={row['utility_per_leakage']:.6f} "
+            f"(floor={LEAKAGE_RATIO_FLOOR}) — 상대 비교용 PROXY 통계입니다",
+        )
+
     leakage_section = {
         "metric": "leakage_proxy",
         "isProxy": IS_PROXY,
         "disclaimer": PROXY_DISCLAIMER,
         "policies": sorted(E3_LEAKAGE_POLICIES),
+        # D-011 self-describing comparison fields: the delta reference policy,
+        # the documented ratio floor + utility metric, and the explicit
+        # statement that no CI is structurally available (with the reason).
+        "deltaReference": E3_LEAKAGE_DELTA_REFERENCE,
+        "ratioFloor": LEAKAGE_RATIO_FLOOR,
+        "ratioUtilityMetric": "coordinate_coverage",
+        "ciAvailable": False,
+        "ciUnavailableReason": _E3_LEAKAGE_CI_UNAVAILABLE_REASON,
         "probeVersions": {
             pn: get_probe(pn).probe_version() for pn in probe_names
         },

@@ -63,9 +63,12 @@ from echo_bench.utils.hash import canonical_hash
 __all__ = [
     "leakage_proxy",
     "leakage_proxy_with_metadata",
+    "leakage_delta_vs_random",
+    "utility_per_leakage",
     "METRIC_NAME",
     "IS_PROXY",
     "PROXY_DISCLAIMER",
+    "LEAKAGE_RATIO_FLOOR",
 ]
 
 _logger = get_logger(__name__)
@@ -86,10 +89,85 @@ PROXY_DISCLAIMER = (
     "generalization claim."
 )
 
+# D-011 (TRD alias D-010): denominator floor for :func:`utility_per_leakage`.
+# A leakage value below this floor is replaced by the floor before dividing, so
+# a near-zero leakage cannot explode the ratio. Documented constant — every E3
+# report section that carries the ratio also records this floor (``ratioFloor``)
+# so the reported number is self-describing.
+LEAKAGE_RATIO_FLOOR = 0.05
+
 # Fields the metric is permitted to read from a round record. Reading anything
 # outside this set (in particular any latent/user field) is a contract
 # violation; tests assert the implementation honours it.
 _OBSERVABLE_ROUND_FIELDS = ("slate", "selectedCardId")
+
+
+def _clamp01(value: float) -> float:
+    """Clamp ``value`` into the closed unit interval ``[0.0, 1.0]``."""
+    v = float(value)
+    if v <= 0.0:
+        return 0.0
+    if v >= 1.0:
+        return 1.0
+    return v
+
+
+def leakage_delta_vs_random(
+    policy_leakage: float, random_leakage: float
+) -> float:
+    """RELATIVE leakage-proxy delta of a policy vs the RANDOM reference (D-011).
+
+    ``leakage_delta_vs_random = leakage(policy) - leakage(RANDOM)``, computed
+    over seed-aligned runs (same base seed / horizon / pool / probes for both
+    policies). Both inputs are :func:`leakage_proxy` values and are clamped into
+    ``[0.0, 1.0]`` before differencing, so the delta is bounded to
+    ``[-1.0, 1.0]``.
+
+    This is a **relative, comparison-ready** statistic — the supported claim is
+    "policy X's leakage proxy is lower/higher than RANDOM's under identical
+    controlled conditions", never an absolute leakage level. A negative delta
+    means the policy's observable behaviour is LESS separable by controlled
+    probe identity than the RANDOM reference's; positive means MORE separable.
+    The reference compared with itself yields exactly ``0.0``.
+
+    Both operands are PROXY values (see :data:`PROXY_DISCLAIMER`): the delta is
+    likewise a proxy statistic over the controlled testbed and is NOT a privacy
+    guarantee, anonymity proof, identifiability bound, or legal/compliance
+    claim.
+    """
+    return _clamp01(policy_leakage) - _clamp01(random_leakage)
+
+
+def utility_per_leakage(
+    mean_utility: float,
+    leakage: float,
+    floor: float = LEAKAGE_RATIO_FLOOR,
+) -> float:
+    """Descriptive utility/leakage trade-off ratio for one policy (D-011).
+
+    ``utility_per_leakage = mean_utility / max(leakage, floor)`` where
+    ``mean_utility`` is the mean ``coordinate_coverage`` over the policy's
+    seed-aligned E3 runs and ``leakage`` is its :func:`leakage_proxy` value.
+    Both numerator and denominator inputs are clamped into ``[0.0, 1.0]``
+    before the ratio; the denominator is then floored at
+    :data:`LEAKAGE_RATIO_FLOOR` (default ``0.05``) so a near-zero leakage proxy
+    cannot explode the ratio. Bounds: ``[0.0, 1.0 / floor]`` (``[0.0, 20.0]``
+    at the default floor); continuous at the floor.
+
+    Higher = a better observed utility-per-leakage trade-off **within the
+    controlled testbed**. This is a descriptive, relative ranking aid only: the
+    denominator is a PROXY (see :data:`PROXY_DISCLAIMER`), so the ratio
+    inherits every proxy limitation and is NOT a privacy guarantee or any
+    absolute leakage/utility claim. Report sections carrying this ratio must
+    also record the floor (``ratioFloor``) so the number is self-describing.
+
+    Raises ``ValueError`` if ``floor`` is not strictly positive.
+    """
+    if floor <= 0.0:
+        raise ValueError(
+            f"utility_per_leakage: floor 는 양수여야 합니다 (받은 값: {floor!r})"
+        )
+    return _clamp01(mean_utility) / max(_clamp01(leakage), float(floor))
 
 
 def _selection_signature(record: Mapping[str, Any]) -> str:

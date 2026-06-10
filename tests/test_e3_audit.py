@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from echo_bench.experiments.e3_audit import (
+    E3_LEAKAGE_DELTA_REFERENCE,
     E3_LEAKAGE_POLICIES,
     _REPORTS_DIR,
     run_e3_audit,
 )
-from echo_bench.metrics.leakage import PROXY_DISCLAIMER
+from echo_bench.metrics.leakage import LEAKAGE_RATIO_FLOOR, PROXY_DISCLAIMER
 from echo_bench.metrics.robustness import FAULTS
 from echo_bench.metrics.utility import CORE_METRIC_KEYS
 
@@ -133,6 +136,55 @@ def test_e3_leakage_section_is_proxy_with_disclaimer():
         assert row["isProxy"] is True
         assert isinstance(row["leakage_proxy"], float)
         assert 0.0 <= row["leakage_proxy"] <= 1.0
+
+
+def test_e3_leakage_delta_and_ratio_fields():
+    """D-011 (TRD alias D-010): comparison-ready leakage fields in the report."""
+    report = run_e3_audit(dry_run=False, **_KW)
+    leakage = report["leakage"]
+
+    # Section-level self-describing fields: the RANDOM reference, the documented
+    # ratio floor, the utility metric used, and the explicit no-CI statement.
+    assert leakage["deltaReference"] == E3_LEAKAGE_DELTA_REFERENCE == "RANDOM"
+    assert leakage["ratioFloor"] == LEAKAGE_RATIO_FLOOR
+    assert leakage["ratioUtilityMetric"] == "coordinate_coverage"
+    assert leakage["ciAvailable"] is False
+    reason = leakage["ciUnavailableReason"]
+    assert isinstance(reason, str) and "scalar" in reason.lower()
+
+    rows = {row["policy"]: row for row in leakage["table"]}
+    assert E3_LEAKAGE_DELTA_REFERENCE in rows
+    random_leak = rows[E3_LEAKAGE_DELTA_REFERENCE]["leakage_proxy"]
+
+    for name, row in rows.items():
+        # Delta = leakage(policy) - leakage(RANDOM), bounded to [-1, 1].
+        assert row["leakage_delta_vs_random"] == pytest.approx(
+            row["leakage_proxy"] - random_leak
+        )
+        assert -1.0 <= row["leakage_delta_vs_random"] <= 1.0
+        # Mean coordinate_coverage over the policy's E3-aligned per-probe traces.
+        assert 0.0 <= row["mean_coordinate_coverage"] <= 1.0
+        # Ratio = mean coverage / max(leakage, floor); self-describing via the
+        # section-level ratioFloor.
+        expected_ratio = row["mean_coordinate_coverage"] / max(
+            row["leakage_proxy"], LEAKAGE_RATIO_FLOOR
+        )
+        assert row["utility_per_leakage"] == pytest.approx(expected_ratio)
+
+    # The RANDOM reference's own delta is 0.0 by definition (exact).
+    assert rows[E3_LEAKAGE_DELTA_REFERENCE]["leakage_delta_vs_random"] == 0.0
+
+
+def test_e3_trace_greedy_delta_vs_random_is_negative():
+    """Sanity (D-011 acceptance): TRACE_GREEDY leaks LESS than RANDOM here.
+
+    Consistent with the known n=10 result (TRACE_GREEDY 0.737 < RANDOM 0.947);
+    at the deterministic small test config (seed=42, H=4, k=4, pool=16) the
+    delta is exactly reproducible and negative.
+    """
+    report = run_e3_audit(dry_run=False, **_KW)
+    rows = {row["policy"]: row for row in report["leakage"]["table"]}
+    assert rows["TRACE_GREEDY"]["leakage_delta_vs_random"] < 0.0
 
 
 def test_e3_robustness_section_per_fault():
