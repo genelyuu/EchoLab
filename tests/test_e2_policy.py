@@ -131,7 +131,7 @@ def test_e2_all_policies_present_with_metrics():
     assert len(table) == len(E2_POLICIES) == 11
 
     for row in table:
-        # Every policy row carries the four trace-only metrics +
+        # Every policy row carries the trace-only metrics +
         # strategy_sensitivity + regret_to_oracle.
         for key in E2_METRIC_KEYS:
             assert isinstance(row[key], float)

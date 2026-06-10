@@ -24,7 +24,7 @@ For each ablation arm (a basis subset):
 3. Run :func:`coverage_report` over the arm's archive (basis distribution,
    complexity-band spread, coordinate coverage / cell occupancy = diversity).
 4. Run a small seed batch of ``n`` child seeds of ``TRACE_GREEDY`` through
-   :func:`run_episode` and aggregate the four trace-only utility metrics (mean).
+   :func:`run_episode` and aggregate the seven trace-only utility metrics (mean).
 
 Comparing the full arm to each drop-one arm shows the contribution of the
 dropped basis to coverage and diversity.

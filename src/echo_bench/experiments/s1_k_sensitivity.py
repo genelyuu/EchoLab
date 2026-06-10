@@ -35,7 +35,7 @@ Pipeline (mirrors ``experiments/e1_horizon.py`` / ``experiments/e2_policy.py``)
    pool is shared across every ``(k, policy)`` cell.
 3. For each ``(k, policy)`` cell, run a small seed batch of ``n`` child seeds
    through :func:`run_episode` (default Phase-1 slot-0 selection), compute the
-   four trace-only metrics per seed via :func:`compute_all`, and aggregate
+   seven trace-only metrics per seed via :func:`compute_all`, and aggregate
    (mean) them plus a ``compute_cost`` proxy (total rounds = ``H * n``).
 4. Assemble a results table (one row per ``k x policy``), hash everything, build
    a :class:`ReproducibilityPack`, and write
@@ -167,7 +167,7 @@ def run_s1_k_sensitivity(
 
     For every ``k`` in :data:`S1_K_SWEEP` and every policy in
     :data:`S1_POLICIES`, run a seed batch of ``n`` child seeds over the shared
-    pool and aggregate the four trace-only utility metrics (mean) plus a
+    pool and aggregate the seven trace-only utility metrics (mean) plus a
     ``compute_cost`` proxy. The pool size is fixed at 64 by E-004.
 
     Args:

@@ -1,9 +1,10 @@
 """Tests for echo_bench.metrics.utility (Task D-001, Phase 1 subset).
 
-Covers the four trace-only utility metrics, their determinism and bounds, the
-``compute_all`` contract (correct ``traceHash`` + exactly the four metric keys,
-no invocation of deferred metrics), and that the two deferred metrics raise
-``NotImplementedError``.
+Covers the original four trace-only utility metrics, their determinism and
+bounds, the ``compute_all`` contract (correct ``traceHash`` + exactly the
+``METRIC_KEYS`` set, no invocation of deferred metrics), and that the two
+deferred metrics raise ``NotImplementedError``. The D-010 (TRD alias D-009)
+coverage-distribution metrics are covered in tests/test_metrics_distribution.py.
 """
 
 from __future__ import annotations
@@ -180,7 +181,15 @@ def test_compute_all_keys_are_exactly_metrics_plus_trace_hash():
     result = compute_all(_build_trace())
     expected_keys = {"traceHash", *METRIC_KEYS}
     assert set(result.keys()) == expected_keys
-    assert len(METRIC_KEYS) == 4
+    # D-010 (TRD alias D-009) appended three coverage-distribution metrics to
+    # the original four trace-only metrics (additive; original order kept).
+    assert len(METRIC_KEYS) == 7
+    assert METRIC_KEYS[:4] == (
+        "coordinate_coverage",
+        "artifact_diversity",
+        "redundancy_rate",
+        "round_coherence",
+    )
 
 
 def test_compute_all_carries_correct_trace_hash():

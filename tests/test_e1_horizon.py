@@ -66,7 +66,7 @@ def test_e1_sweeps_all_h_and_policies():
     assert {row["H"] for row in table} == _EXPECTED_H
     assert {row["policy"] for row in table} == set(E1_POLICIES)
 
-    # Every cell carries the four trace-only metrics + a compute_cost proxy.
+    # Every cell carries the trace-only metrics + a compute_cost proxy.
     for row in table:
         for key in E1_METRIC_KEYS:
             assert isinstance(row[key], float)

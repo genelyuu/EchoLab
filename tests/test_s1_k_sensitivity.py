@@ -111,7 +111,7 @@ def test_s1_all_three_k_values_present():
     assert ks_present == set(S1_K_SWEEP)
     assert len(table) == len(S1_K_SWEEP) * len(S1_POLICIES)
 
-    # Each (k, policy) cell carries the four trace-only metrics, bounded [0, 1],
+    # Each (k, policy) cell carries the trace-only metrics, bounded [0, 1],
     # and the documented per-k basis-diversity requirement.
     for row in table:
         for key in S1_METRIC_KEYS:

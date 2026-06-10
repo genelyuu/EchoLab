@@ -13,7 +13,7 @@ Pipeline (mirrors ``experiments/smoke.py``)
    ``pool_size`` cards as the deterministic candidate pool (``poolHash``).
 3. For each ``(H, policy)`` cell: run a small seed batch of ``n`` child seeds
    through :func:`run_episode` (no probe -> the default, Phase-1 slot-0
-   selection), compute the four trace-only metrics per seed via
+   selection), compute the seven trace-only metrics per seed via
    :func:`compute_all`, and aggregate (mean) them, plus a ``compute_cost``
    proxy (total rounds = ``H * n``).
 4. Assemble a results table (one row per ``H x policy``), hash everything
@@ -137,7 +137,7 @@ def run_e1_horizon(
 
     For every ``H`` in the horizon config's allowed set and every policy in
     :data:`E1_POLICIES`, run a seed batch of ``n`` child seeds and aggregate the
-    four trace-only utility metrics (mean) plus a ``compute_cost`` proxy.
+    seven trace-only utility metrics (mean) plus a ``compute_cost`` proxy.
 
     Args:
         base_seed: base integer seed; child seeds are derived from it.

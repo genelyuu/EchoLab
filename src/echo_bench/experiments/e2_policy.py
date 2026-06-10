@@ -23,7 +23,7 @@ probe** in :data:`echo_bench.probes.strategy_probes.PROBES` (threading the probe
 as the round runner's ``select_fn``) plus one episode under the default,
 controlled Phase-1 slot-0 selection. The default-selection trace is the row's
 canonical trace; the per-probe traces feed
-:func:`compute_all_with_oracle`, so each row carries the four trace-only
+:func:`compute_all_with_oracle`, so each row carries the seven trace-only
 metrics + ``strategy_sensitivity`` + ``regret_to_oracle``.
 
 Regret to oracle
@@ -164,7 +164,7 @@ ORACLE_POLICIES = frozenset(DISPLAY_NAMES)
 # (TRACE_GREEDY vs every other policy on each reported metric).
 COMPARISON_REFERENCE_POLICY = "TRACE_GREEDY"
 
-# The reported metric keys: the four trace-only metrics + strategy_sensitivity +
+# The reported metric keys: the seven trace-only metrics + strategy_sensitivity +
 # regret_to_oracle.
 E2_METRIC_KEYS = tuple(METRIC_KEYS) + ("strategy_sensitivity", "regret_to_oracle")
 
@@ -217,7 +217,7 @@ def run_e2_policy(
     (default selection) and taking ``oracle_reference_from_objectives`` of its
     achieved coordinate-novelty objective; then run -- at that seed and horizon --
     one episode per strategy probe (probe threaded as ``select_fn``) plus one
-    episode under the default selection, and compute the four trace-only metrics +
+    episode under the default selection, and compute the seven trace-only metrics +
     ``strategy_sensitivity`` + ``regret_to_oracle`` via
     :func:`compute_all_with_oracle` (the oracle's own self-regret is ~0). The
     per-seed metric dicts are aggregated into a ``stats`` block (mean ± CI via
@@ -483,7 +483,7 @@ def run_e2_policy(
         "phaseNote": (
             "Phase 3 complete: E2 compares all 7 policies (RANDOM, "
             "FIXED_LOW_TO_HIGH, FIXED_BALANCED, TRACE_GREEDY, TRACE_LIN_UCB, "
-            "PSEUDO_USER_MODEL, ORACLE_STRATEGY) on the four trace-only metrics + "
+            "PSEUDO_USER_MODEL, ORACLE_STRATEGY) on the seven trace-only metrics + "
             "strategy_sensitivity + regret_to_oracle. regret_to_oracle is measured "
             "against the ORACLE_STRATEGY per-round coordinate-novelty reference "
             "(oracle self-regret ~0). PSEUDO_USER_MODEL is an ISOLATED CONTRAST "
