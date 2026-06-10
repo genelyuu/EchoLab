@@ -59,11 +59,12 @@ from __future__ import annotations
 
 import itertools
 import math
-from typing import Any, Dict, List, Mapping, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
 from echo_bench.logging import get_logger
+from echo_bench.metrics.aggregate import aggregate_values
 from echo_bench.utils.hash import canonical_hash
 
 __all__ = [
@@ -103,7 +104,7 @@ _PERMUTATION_SALT = "compare-permutation-h1"
 #
 # Format: tuple of (upper_exclusive_bound, label) in ascending bound order.
 # The final entry uses None to signal "no upper bound".
-COHEN_MAGNITUDE_THRESHOLDS: Tuple[Tuple[object, str], ...] = (
+COHEN_MAGNITUDE_THRESHOLDS: Tuple[Tuple[Optional[float], str], ...] = (
     (0.2, "negligible"),
     (0.5, "small"),
     (0.8, "medium"),
@@ -460,7 +461,7 @@ def _magnitude_label(abs_dz: float) -> str:
     Boundaries are lower-inclusive / upper-exclusive at each step.
     """
     for upper, label in COHEN_MAGNITUDE_THRESHOLDS:
-        if upper is None or abs_dz < float(upper):
+        if upper is None or abs_dz < upper:
             return label
     # Fallback (unreachable given the None sentinel, but makes mypy happy).
     return "large"  # pragma: no cover
@@ -473,6 +474,7 @@ def effect_size_summary(
     metric_keys: Sequence[str],
     alpha: float = DEFAULT_ALPHA,
     correction: str = "holm",
+    precomputed: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Consolidated effect-size table for the paper (Task D-014, TRD V-011).
 
@@ -484,14 +486,16 @@ def effect_size_summary(
             <policy>: {
               "byMetric": {
                 <key>: {
-                  "d_z":        float,   # cohens_dz(reference, policy)
-                  "mean_diff":  float,   # paired mean diff: reference − other
-                  "ci_low":     float,   # seeded bootstrap 95 % CI of the diffs
-                  "ci_high":    float,
-                  "p_adjusted": float,   # Holm-adjusted permutation p-value
-                  "n":          int,     # number of aligned paired observations
-                  "magnitude":  str,     # Cohen label ("negligible"/"small"/
-                                         #               "medium"/"large")
+                  "d_z":         float,   # cohens_dz(reference, policy)
+                  "mean_diff":   float,   # paired mean diff: reference − other
+                  "ci_low":      float,   # seeded bootstrap 95 % CI of the diffs
+                  "ci_high":     float,
+                  "p_adjusted":  float,   # Holm-adjusted permutation p-value
+                  "n":           int,     # number of aligned paired observations
+                  "magnitude":   str,     # Cohen label ("negligible"/"small"/
+                                          #               "medium"/"large")
+                  "ci_method":   str,     # "bootstrap" | "degenerate"
+                  "sufficient_n": bool,   # True iff n >= MIN_SUFFICIENT_N
                 }, ...
               }
             }, ...
@@ -501,40 +505,58 @@ def effect_size_summary(
     **Sign convention:** ``mean_diff = mean(reference_i − other_i)``, so a
     positive value means the reference policy outperforms on this metric.
 
-    **Statistical logic reuse:** internally calls :func:`compare_reference_to_others`
-    and extracts ``cohens_dz``, ``mean_diff``, and ``p_adjusted`` from its output
-    (no duplication of permutation / correction logic). The bootstrap CI is the only
-    addition: :func:`echo_bench.metrics.aggregate.aggregate_values` is applied to
-    the paired diffs for a deterministic seeded bootstrap CI at the module-level
-    ``CI_LEVEL = 0.95`` (same machinery as seed-batch aggregation).
+    **Statistical logic reuse and avoiding double computation:** when
+    ``precomputed`` is provided, it must be the output of
+    :func:`compare_reference_to_others` called on the **same**
+    ``per_seed_by_policy`` / ``reference`` / ``metric_keys`` combination — the
+    internal :func:`compare_reference_to_others` call is then skipped entirely
+    (no runtime duplication). When ``precomputed`` is ``None`` (the default),
+    :func:`compare_reference_to_others` is called internally so the function
+    works standalone. In both cases, ``cohens_dz``, ``mean_diff``, and
+    ``p_adjusted`` come from the comparison block; the seeded bootstrap CI
+    (via :func:`echo_bench.metrics.aggregate.aggregate_values`) is the only
+    addition.
 
     Deterministic: the seeded bootstrap uses ``canonical_hash`` of the diffs + a
     distinguishing ``key`` string; identical inputs yield bit-identical output.
+    ``ci_method`` and ``sufficient_n`` are passed through from
+    :func:`aggregate_values` so degenerate CIs (``n < MIN_SUFFICIENT_N``,
+    zero-width) are self-documenting in every entry.
     """
-    # Lazy import to avoid a circular dependency (aggregate imports nothing from
-    # compare; compare would import from aggregate only here — no cycle in practice
-    # because compare does not re-export aggregate symbols, but the lazy import
-    # makes the dependency direction explicit at the call site).
-    from echo_bench.metrics.aggregate import aggregate_values  # noqa: PLC0415
-
     if reference not in per_seed_by_policy:
         raise ValueError(
             f"effect_size_summary: reference={reference!r} 가 "
             "per_seed_by_policy 에 없습니다"
         )
 
-    # Run the full comparison to extract p_adjusted and d_z / mean_diff.
-    cmp = compare_reference_to_others(
-        per_seed_by_policy,
-        metric_keys=metric_keys,
-        reference=reference,
-        alpha=alpha,
-        correction=correction,
-    )
+    # Use the caller-supplied comparison block when provided (avoids double
+    # computation in E2 where compare_reference_to_others was already called);
+    # otherwise compute it now for standalone use.
+    cmp: Mapping[str, Any]
+    if precomputed is not None:
+        cmp = precomputed
+    else:
+        cmp = compare_reference_to_others(
+            per_seed_by_policy,
+            metric_keys=metric_keys,
+            reference=reference,
+            alpha=alpha,
+            correction=correction,
+        )
 
     others = cmp["others"]
     ref_vals_by_key: Dict[str, List[float]] = {
         key: _metric_values(per_seed_by_policy[reference], key)
+        for key in metric_keys
+    }
+    # Build the {policy: row} index once per metric key — O(metrics), not
+    # O(policies² × metrics). Hoisted outside the outer `for other` loop so it
+    # is never rebuilt for the same key across different `other` policies.
+    comp_rows_by_key: Dict[str, Dict[str, Any]] = {
+        key: {
+            row["policy"]: row
+            for row in cmp["byMetric"][key]["comparisons"]
+        }
         for key in metric_keys
     }
 
@@ -542,27 +564,28 @@ def effect_size_summary(
     for other in others:
         other_by_metric: Dict[str, Any] = {}
         for key in metric_keys:
-            # Extract pre-computed d_z / mean_diff / p_adjusted from compare block.
-            comp_rows = {
-                row["policy"]: row
-                for row in cmp["byMetric"][key]["comparisons"]
-            }
-            comp_row = comp_rows[other]
+            comp_row = comp_rows_by_key[key][other]
 
             ref_v = ref_vals_by_key[key]
             other_v = _metric_values(per_seed_by_policy[other], key)
 
             # CI of paired diffs via seeded bootstrap (aggregate_values).
+            # Pass through ci_method and sufficient_n so degenerate CIs are
+            # self-documenting in each entry.
             if len(ref_v) >= 2 and len(other_v) == len(ref_v):
                 diffs = paired_diffs(ref_v, other_v)
                 ci_agg = aggregate_values(diffs, key=f"effect_size_diff:{key}:{other}")
                 ci_low = ci_agg["ci_low"]
                 ci_high = ci_agg["ci_high"]
+                ci_method = ci_agg["ci_method"]
+                sufficient_n = ci_agg["sufficient_n"]
             else:
                 # Degenerate: not enough paired observations for CI.
                 md = comp_row["mean_diff"]
                 ci_low = md
                 ci_high = md
+                ci_method = "degenerate"
+                sufficient_n = False
 
             abs_dz = abs(comp_row["cohens_dz"])
             magnitude = _magnitude_label(abs_dz)
@@ -575,6 +598,8 @@ def effect_size_summary(
                 "p_adjusted": float(comp_row["p_adjusted"]),
                 "n": int(comp_row["n"]),
                 "magnitude": magnitude,
+                "ci_method": ci_method,
+                "sufficient_n": bool(sufficient_n),
             }
 
         by_policy[other] = {"byMetric": other_by_metric}

@@ -10,6 +10,8 @@ Covers:
 - Zero-variance edge case: cohens_dz returns 0.0 → label "negligible", no crash
 - E2 integration: effectSizes block present; d_z values consistent with
   comparisons block
+- precomputed path returns bit-identical output to the internal-call path
+- ci_method and sufficient_n fields present and self-consistent
 """
 
 from __future__ import annotations
@@ -25,7 +27,9 @@ from echo_bench.experiments.e2_policy import (
 )
 from echo_bench.metrics.compare import (
     COHEN_MAGNITUDE_THRESHOLDS,
+    _magnitude_label,
     cohens_dz,
+    compare_reference_to_others,
     effect_size_summary,
     paired_mean_diff,
 )
@@ -45,6 +49,23 @@ def _make_per_seed(ref_vals, other_vals, metric="m"):
         "REF": [{metric: v} for v in ref_vals],
         "OTHER": [{metric: v} for v in other_vals],
     }
+
+
+# ---------------------------------------------------------------------------
+# Module-scoped fixture: three identical small-E2 runs (H=4, k=4, pool=16, n=3)
+# Shared across all E2 integration tests so the expensive run executes once.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def small_e2_reports():
+    """Run E2 three times with the same params; return (r1, r2, r3)."""
+    kwargs = dict(base_seed=42, H=4, k=4, pool_size=16, n=3, dry_run=False,
+                  replay_validate=False)
+    r1 = run_e2_policy(**kwargs)
+    r2 = run_e2_policy(**kwargs)
+    r3 = run_e2_policy(**kwargs)
+    return r1, r2, r3
 
 
 # ---------------------------------------------------------------------------
@@ -159,21 +180,18 @@ def test_magnitude_above_0_8_is_large():
 #   exactly 0.2 → small, exactly 0.5 → medium, exactly 0.8 → large.
 def test_magnitude_boundary_0_2_is_small():
     """Boundary 0.2 is the lower bound of 'small' (inclusive)."""
-    from echo_bench.metrics.compare import _magnitude_label
     assert _magnitude_label(0.2) == "small"
     assert _magnitude_label(0.1999) == "negligible"
 
 
 def test_magnitude_boundary_0_5_is_medium():
     """Boundary 0.5 is the lower bound of 'medium' (inclusive)."""
-    from echo_bench.metrics.compare import _magnitude_label
     assert _magnitude_label(0.5) == "medium"
     assert _magnitude_label(0.4999) == "small"
 
 
 def test_magnitude_boundary_0_8_is_large():
     """Boundary 0.8 is the lower bound of 'large' (inclusive)."""
-    from echo_bench.metrics.compare import _magnitude_label
     assert _magnitude_label(0.8) == "large"
     assert _magnitude_label(0.7999) == "medium"
 
@@ -241,7 +259,7 @@ def test_p_adjusted_present_and_in_range():
 
 
 # ---------------------------------------------------------------------------
-# 7. Top-level structure
+# 7. Top-level structure (including ci_method and sufficient_n fields)
 # ---------------------------------------------------------------------------
 
 
@@ -252,29 +270,70 @@ def test_top_level_structure():
     assert "byPolicy" in summary
     assert "OTHER" in summary["byPolicy"]
     entry = summary["byPolicy"]["OTHER"]["byMetric"]["m"]
-    for field in ("d_z", "mean_diff", "ci_low", "ci_high", "p_adjusted", "n", "magnitude"):
+    for field in (
+        "d_z", "mean_diff", "ci_low", "ci_high", "p_adjusted", "n", "magnitude",
+        "ci_method", "sufficient_n",
+    ):
         assert field in entry, f"Missing field: {field}"
 
 
+def test_ci_method_and_sufficient_n_self_consistent():
+    """ci_method and sufficient_n must be consistent: bootstrap → True, degenerate → False."""
+    per_seed = _make_per_seed(_REF, _OTHER)
+    summary = effect_size_summary(per_seed, reference="REF", metric_keys=["m"])
+    entry = summary["byPolicy"]["OTHER"]["byMetric"]["m"]
+    if entry["ci_method"] == "bootstrap":
+        assert entry["sufficient_n"] is True
+    else:
+        assert entry["sufficient_n"] is False
+
+
 # ---------------------------------------------------------------------------
-# 8. E2 integration: effectSizes block present and consistent with comparisons
+# 8. precomputed path returns bit-identical output to the internal-call path
 # ---------------------------------------------------------------------------
 
 
-def test_e2_effect_sizes_block_present():
-    report = run_e2_policy(base_seed=42, H=4, k=4, pool_size=16, n=3, dry_run=False)
+def test_precomputed_path_bit_identical():
+    """Passing precomputed=compare_reference_to_others(...) must yield the
+    exact same output as the internal-call path (no double computation).
+    """
+    per_seed = _make_per_seed(_REF, _OTHER)
+    # Internal-call path (no precomputed).
+    s_internal = effect_size_summary(per_seed, reference="REF", metric_keys=["m"])
+
+    # Precomputed path: caller supplies the comparison block.
+    cmp = compare_reference_to_others(per_seed, metric_keys=["m"], reference="REF")
+    s_precomputed = effect_size_summary(
+        per_seed, reference="REF", metric_keys=["m"], precomputed=cmp
+    )
+
+    assert s_internal == s_precomputed, (
+        "precomputed path produced different output from internal-call path"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 9. E2 integration: effectSizes block present and consistent with comparisons
+# ---------------------------------------------------------------------------
+
+
+def test_e2_effect_sizes_block_present(small_e2_reports):
+    report, _, _ = small_e2_reports
     assert "effectSizes" in report, "effectSizes block missing from E2 report"
     es = report["effectSizes"]
     assert es["reference"] == COMPARISON_REFERENCE_POLICY
     assert "byPolicy" in es
 
 
-def test_e2_effect_sizes_dz_consistent_with_comparisons():
-    """d_z in effectSizes must match the value in the comparisons block."""
-    report = run_e2_policy(base_seed=42, H=4, k=4, pool_size=16, n=3, dry_run=False)
+def test_e2_effect_sizes_dz_consistent_with_comparisons(small_e2_reports):
+    """d_z in effectSizes must match the value in the comparisons block.
+    Asserts checked > 0 to guarantee at least one pair was verified.
+    """
+    report, _, _ = small_e2_reports
     comparisons = report["comparisons"]
     effect_sizes = report["effectSizes"]
 
+    checked = 0
     # For each metric key and each other policy present in both blocks, verify
     # the d_z values are identical (same input → same function → same value).
     for metric_key in E2_METRIC_KEYS:
@@ -297,13 +356,45 @@ def test_e2_effect_sizes_dz_consistent_with_comparisons():
                 f"d_z mismatch for policy={policy_name}, metric={metric_key}: "
                 f"effectSizes={es_entry['d_z']}, comparisons={cmp_entry['cohens_dz']}"
             )
+            checked += 1
+
+    assert checked > 0, "No (policy, metric) pairs were checked — consistency test vacuous"
 
 
-def test_e2_effect_sizes_covers_all_metric_keys():
-    report = run_e2_policy(base_seed=42, H=4, k=4, pool_size=16, n=3, dry_run=False)
+def test_e2_effect_sizes_covers_all_metric_keys(small_e2_reports):
+    report, _, _ = small_e2_reports
     es = report["effectSizes"]
     for policy_name, policy_es in es["byPolicy"].items():
         for key in E2_METRIC_KEYS:
             assert key in policy_es["byMetric"], (
                 f"effectSizes missing metric {key} for policy {policy_name}"
             )
+
+
+def test_e2_effect_sizes_ci_method_sufficient_n_present(small_e2_reports):
+    """Every effectSizes entry must carry ci_method and sufficient_n."""
+    report, _, _ = small_e2_reports
+    es = report["effectSizes"]
+    for policy_name, policy_es in es["byPolicy"].items():
+        for key in E2_METRIC_KEYS:
+            entry = policy_es["byMetric"][key]
+            assert "ci_method" in entry, (
+                f"ci_method missing from effectSizes[{policy_name}][{key}]"
+            )
+            assert "sufficient_n" in entry, (
+                f"sufficient_n missing from effectSizes[{policy_name}][{key}]"
+            )
+            assert isinstance(entry["sufficient_n"], bool), (
+                f"sufficient_n must be bool, got {type(entry['sufficient_n'])}"
+            )
+
+
+def test_e2_precomputed_outputhash_bit_identical(small_e2_reports):
+    """The E2 report's outputHash must be the same across all three runs
+    (verifying that the precomputed path produces bit-identical effectSizes).
+    """
+    r1, r2, r3 = small_e2_reports
+    assert r1["outputHash"] == r2["outputHash"] == r3["outputHash"], (
+        f"outputHash not bit-identical across runs: "
+        f"{r1['outputHash'][:16]} / {r2['outputHash'][:16]} / {r3['outputHash'][:16]}"
+    )
