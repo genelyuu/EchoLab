@@ -2,7 +2,7 @@
 
 A card is a seed-generated stimulus object produced from ``basis / seed /
 params`` only. It carries EXACTLY the eleven fields fixed by the Card / Basis
-Invariants in CLAUDE.md and docs/04_BASIS_CARD_GENERATION.md:
+invariants:
 
     cardId, basis, seed, params, visualMetrics, coordinateContribution,
     complexityScore, complexityBand, salienceScore, renderHash, rendererVersion

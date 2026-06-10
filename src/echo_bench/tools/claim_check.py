@@ -2,8 +2,7 @@
 
 This module is the *automated* form of the ``validate-claims`` guardrail check.
 It scans English claim text in ``docs/`` and ``outputs/reports/`` for the
-forbidden-phrase set sourced from ``docs/01_GUARDRAILS.md`` and
-``.claude/commands/validate-claims.md`` (plus the CLAUDE.md guardrail tokens) and
+forbidden-phrase set defined in this module (the project guardrail tokens) and
 reports each genuine, **assertion-style** violation with its file, line number,
 matched phrase, and the line text.
 
@@ -72,9 +71,8 @@ __all__ = [
 # ---------------------------------------------------------------------------
 # Forbidden-phrase set
 # ---------------------------------------------------------------------------
-# Sourced from .claude/commands/validate-claims.md and docs/01_GUARDRAILS.md,
-# plus the CLAUDE.md guardrail tokens (emotion / persona / preference used as a
-# CLAIM). Matched case-insensitively as whole words/phrases. Suppression of
+# The project guardrail forbidden-claim tokens (emotion / persona / preference
+# used as a CLAIM). Matched case-insensitively as whole words/phrases. Suppression of
 # disclaimers, enumerations, and identifiers is handled by the context heuristic
 # below, NOT by removing phrases from this list (allowlisting a phrase to pass is
 # forbidden by G-005).
@@ -90,7 +88,7 @@ FORBIDDEN_PHRASES: tuple[str, ...] = (
     "diagnosis",
     "meaning-free",
     "interpretation-free",
-    # guardrail claim tokens (CLAUDE.md / 01_GUARDRAILS.md)
+    # guardrail claim tokens
     "emotion",
     "persona",
     "preference",

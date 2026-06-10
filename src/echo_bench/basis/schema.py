@@ -31,7 +31,7 @@ from typing import Any, Mapping
 
 # Any config key whose lowercase form contains one of these tokens is rejected
 # on load. This is a fail-closed defence against personal / semantic fields
-# leaking into the controlled action space (CLAUDE.md guardrail 1).
+# leaking into the controlled action space (guardrail: no latent/user fields).
 FORBIDDEN_FIELD_TOKENS = (
     "user_id",
     "user",

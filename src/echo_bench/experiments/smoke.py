@@ -10,8 +10,8 @@ pack. It exists to prove that the Phase 1 modules wire together and that a run
 
 Phase scope
 -----------
-This runner executes **RANDOM only** (Phase 1). The full smoke flow described
-in ``.claude/commands/run-smoke.md`` -- which additionally runs
+This runner executes **RANDOM only** (Phase 1). The full smoke flow -- which
+additionally runs
 ``TRACE_GREEDY`` and a cross-policy replay validation -- activates in **Phase
 2**, once the TRACE_GREEDY policy (C-004) lands. Until then the runner is
 intentionally single-policy so it stays CPU-replayable and free of any

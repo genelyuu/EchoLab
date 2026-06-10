@@ -1,6 +1,6 @@
 """Tests for the RANDOM policy (Task C-001, RANDOM portion).
 
-Exercises the contract from C-001 / CLAUDE.md:
+Exercises the contract from C-001:
 
 - the returned slate has length ``k``, all cardIds come from the pool and are
   distinct;

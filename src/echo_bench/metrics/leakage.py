@@ -13,7 +13,7 @@ means the observable behaviour is harder to distinguish across probes.
 
 This number must never be interpreted as "the system protects privacy",
 "users cannot be identified", or "this is GDPR-compliant". Those framings are
-forbidden (see CLAUDE.md guardrails, docs/01_GUARDRAILS.md). The metric reads
+forbidden by the project guardrails. The metric reads
 **only** observable fields — ``slate`` and ``selectedCardId`` from the trace
 rounds, plus the probe *name/version* used as a label — and never reads any
 latent / user / persona / emotion / preference field (the trace schema has none;

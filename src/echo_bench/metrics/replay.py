@@ -7,7 +7,7 @@ which they diverge.
 
 Why exact
 =========
-The reproducibility invariant (CLAUDE.md, docs/09_REPRODUCIBILITY.md) is that a
+The reproducibility invariant is that a
 run is reproducible only if it replays to identical hashes. Any tolerance would
 silently smooth over non-determinism; non-determinism must instead be **reported
 as a value**. So the comparison is plain ``==`` over hash strings, and a single

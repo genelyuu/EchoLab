@@ -15,7 +15,7 @@ from echo_bench.experiments import smoke
 from echo_bench.experiments.smoke import run_smoke
 
 # Forbidden user-model / persona / emotion / preference fields. None of these
-# may appear anywhere in the serialized report (CLAUDE.md guardrail 1).
+# may appear anywhere in the serialized report (guardrail: no forbidden fields).
 FORBIDDEN_FIELDS = {"user_id", "persona", "emotion", "preference", "user_model"}
 
 # Small, fast smoke parameters shared by the tests.

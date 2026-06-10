@@ -13,7 +13,7 @@ bands are, how often selections repeat, and how smooth the round-to-round
 progression is. They are **not** measures of user satisfaction, emotion,
 wellbeing, preference, privacy, or legal compliance, and they make **no**
 ecological / real-world generalization claim. Interpretation stays strictly
-inside the controlled testbed (see CLAUDE.md guardrails and docs/01_GUARDRAILS).
+inside the controlled testbed (per the project guardrails).
 
 Phase scope
 -----------
