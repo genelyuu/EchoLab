@@ -109,7 +109,11 @@ def test_is_reference_policy_false_for_non_oracle(policy_name):
 
 
 def _run_e2_small():
-    """Run E2 with the smallest valid parameters (same as other E2 tests)."""
+    """Run E2 with the smallest valid parameters.
+
+    Uses lighter settings than the main E2 test suite (``n=1``,
+    ``replay_validate=False``) to keep this integration test fast.
+    """
     from echo_bench.experiments.e2_policy import run_e2_policy
 
     return run_e2_policy(base_seed=42, H=4, k=4, pool_size=16, n=1,
@@ -168,15 +172,21 @@ def test_e2_top_level_oracle_display_fields():
     assert report["oracleNote"] == REFERENCE_NOTE
 
 
-def test_e2_report_reference_note_exact_string_present():
-    """The REFERENCE_NOTE string must appear verbatim somewhere in oracle rows."""
-    report = _run_e2_small()
-    oracle_names = {"ORACLE_COVERAGE", "ORACLE_DIVERSITY", "ORACLE_STRATEGY"}
-    notes = [
-        r.get("referenceNote", "")
-        for r in report["table"]
-        if r["policy"] in oracle_names
-    ]
-    assert all(n == REFERENCE_NOTE for n in notes), (
-        f"Not all oracle rows have the exact REFERENCE_NOTE. Got: {notes}"
+# ---------------------------------------------------------------------------
+# Cross-check: ORACLE_POLICIES in e2_policy derives from DISPLAY_NAMES (C-014)
+# ---------------------------------------------------------------------------
+
+
+def test_oracle_policies_derived_from_display_names():
+    """e2_policy.ORACLE_POLICIES must equal set(DISPLAY_NAMES).
+
+    Verifies the single-source-of-truth invariant: ORACLE_POLICIES is derived
+    from DISPLAY_NAMES so that adding a new oracle policy in display_names.py
+    is automatically reflected in the E2 runner without a separate edit.
+    """
+    from echo_bench.experiments.e2_policy import ORACLE_POLICIES
+
+    assert set(DISPLAY_NAMES) == ORACLE_POLICIES, (
+        "e2_policy.ORACLE_POLICIES must equal frozenset(DISPLAY_NAMES). "
+        f"Difference: {set(DISPLAY_NAMES) ^ set(ORACLE_POLICIES)}"
     )

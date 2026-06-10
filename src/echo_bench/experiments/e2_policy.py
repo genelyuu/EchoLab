@@ -81,6 +81,7 @@ from echo_bench.metrics.utility import (
     oracle_reference_from_objectives,
 )
 from echo_bench.policies.display_names import (
+    DISPLAY_NAMES,
     REFERENCE_NOTE,
     display_name,
     is_reference_policy,
@@ -153,7 +154,11 @@ CONTRAST_BASELINE_POLICIES = {
     "PSEUDO_USER_MODEL_DIVERSITY_REG",
     "PSEUDO_USER_MODEL_SESSION_EMBEDDING",
 }
-ORACLE_POLICIES = {"ORACLE_STRATEGY", "ORACLE_COVERAGE", "ORACLE_DIVERSITY"}
+# Derived from DISPLAY_NAMES (C-014): every key in that mapping is an oracle /
+# objective-specific reference policy. Using frozenset(DISPLAY_NAMES) keeps this
+# set as the single source of truth — add a new oracle policy only in
+# display_names.py and it is automatically reflected here.
+ORACLE_POLICIES = frozenset(DISPLAY_NAMES)
 
 # The reference policy the D-007 paired comparison statistics are computed for
 # (TRACE_GREEDY vs every other policy on each reported metric).
@@ -416,7 +421,7 @@ def run_e2_policy(
         # the reference note; non-oracle rows carry displayName == policy name
         # with no referenceNote (so the field is only present where meaningful).
         row["displayName"] = display_name(name)
-        if is_reference_policy(name):
+        if is_oracle:  # already computed at row-start; avoids a second predicate call
             row["referenceNote"] = REFERENCE_NOTE
         table.append(row)
 
