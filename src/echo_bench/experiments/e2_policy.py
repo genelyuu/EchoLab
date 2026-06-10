@@ -72,7 +72,10 @@ from echo_bench.env.seed_batch import derive_child_seeds, seed_batch_id
 from echo_bench.logging import get_logger, log_ko
 from echo_bench.logging.repro_pack import ReproducibilityPack
 from echo_bench.logging.replay_validator import inline_replay_audit
-from echo_bench.metrics.aggregate import aggregate_metric_dicts
+from echo_bench.metrics.aggregate import (
+    aggregate_metric_dicts,
+    rank_stability_by_metric,
+)
 from echo_bench.metrics.compare import compare_reference_to_others
 from echo_bench.metrics.utility import (
     METRIC_KEYS,
@@ -466,12 +469,30 @@ def run_e2_policy(
             reference=COMPARISON_REFERENCE_POLICY,
         )
 
+    # Rank-stability block (Task D-013): per reported metric, rank all policies
+    # within each resampling UNIT (here: each child seed of the shared batch —
+    # the same function ranks seed families in E-014 / larger batches in E-015)
+    # using the documented METRIC_DIRECTIONS, and report top-rank probability,
+    # mean rank, and the rank distribution per policy. Computed from the SAME
+    # per-seed values the comparisons block uses. Purely additive; RNG-free, so
+    # the inline replay re-run reproduces it bit-identically.
+    rank_stability_block = rank_stability_by_metric(
+        {
+            key: {
+                name: [float(d[key]) for d in per_seed]
+                for name, per_seed in per_seed_by_policy.items()
+            }
+            for key in E2_METRIC_KEYS
+        }
+    )
+
     results_body = {
         "config": run_params,
         "metricKeys": list(E2_METRIC_KEYS),
         "n": int(n),
         "table": table,
         "comparisons": comparisons,
+        "rankStability": rank_stability_block,
     }
     output_hash = canonical_hash(results_body)
 
@@ -511,6 +532,7 @@ def run_e2_policy(
         "outputHash": output_hash,
         "table": table,
         "comparisons": comparisons,
+        "rankStability": rank_stability_block,
     }
     report_hash = canonical_hash(report)
     report["reportHash"] = report_hash
