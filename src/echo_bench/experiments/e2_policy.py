@@ -80,6 +80,11 @@ from echo_bench.metrics.utility import (
     compute_all_with_oracle,
     oracle_reference_from_objectives,
 )
+from echo_bench.policies.display_names import (
+    REFERENCE_NOTE,
+    display_name,
+    is_reference_policy,
+)
 from echo_bench.policies.fixed_balanced import FixedBalancedPolicy
 from echo_bench.policies.fixed_low_to_high import FixedLowToHighPolicy
 from echo_bench.policies.oracle_strategy import OracleStrategyPolicy
@@ -407,6 +412,12 @@ def run_e2_policy(
         # Keep a flat mean per metric for back-compat with existing readers.
         for key in E2_METRIC_KEYS:
             row[key] = stats[key]["mean"]
+        # C-014 display-name layer: oracle rows get a mapped display name and
+        # the reference note; non-oracle rows carry displayName == policy name
+        # with no referenceNote (so the field is only present where meaningful).
+        row["displayName"] = display_name(name)
+        if is_reference_policy(name):
+            row["referenceNote"] = REFERENCE_NOTE
         table.append(row)
 
         log_ko(
@@ -481,6 +492,10 @@ def run_e2_policy(
         "metricKeys": list(E2_METRIC_KEYS),
         "contrastBaselinePolicy": CONTRAST_BASELINE_POLICY,
         "oraclePolicy": ORACLE_POLICY,
+        # C-014: display name for the canonical oracle + the reference note so
+        # paper artifacts are not misread as global upper bounds.
+        "oraclePolicyDisplayName": display_name(ORACLE_POLICY),
+        "oracleNote": REFERENCE_NOTE,
         "seedBatchId": exp_seed_batch_id,
         "perPolicySeedBatchIds": seed_batch_ids,
         "configHash": config_hash,
