@@ -129,12 +129,8 @@ _FROZEN_MANIFEST_PATH = (
 _REPORTS_DIR = _REPO_ROOT / "outputs" / "reports"
 
 # The E2 run-level k the C-011 manifest was frozen at is read from the frozen
-# manifest itself (effectiveConfig.k), so the gate can never drift from the
-# artifact it validates.  Set lazily in verify_trace_greedy_freeze() from
-# the loaded manifest; _FREEZE_K is the module-level placeholder used only
-# when the manifest hasn't been loaded yet (tests that monkeypatch
-# _load_frozen_manifest supply their own k).
-_FREEZE_K: int | None = None  # resolved from manifest at runtime
+# manifest itself (effectiveConfig.k) inside verify_trace_greedy_freeze(), so
+# the gate can never drift from the artifact it validates.
 
 
 def _load_yaml(path: Path) -> Dict[str, Any]:
