@@ -1,0 +1,9 @@
+# ECHO-Bench candidate archive configuration (Task A-008).
+#
+# The archive is reproducible from this config plus a base seed. Generation
+# order is deterministic (seeds iterated in order). Only card records plus the
+# archive hash are stored.
+pool_size: 64              # max accepted cards kept in the archive
+base_seed: 42             # default base seed (overridable by caller)
+candidates_to_generate: 128  # candidates rendered before filtering (>= pool_size; headroom for the degenerate filter so the archive can fill pool_size)
+filter_config: "configs/archive/filter.yaml"

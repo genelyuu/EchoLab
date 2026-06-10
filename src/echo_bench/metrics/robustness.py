@@ -1,0 +1,285 @@
+"""Robustness metrics: controlled fault transforms + sensitivity (Task D-003).
+
+This module defines a small registry of **controlled, deterministic FAULT
+TRANSFORMS** over a candidate pool (a list of card dicts) and a bounded
+**sensitivity score** that compares a baseline metric dict against a faulted
+metric dict for the same seed batch.
+
+Scope and guardrails
+====================
+These are *system-level* robustness statistics over the controlled testbed only.
+They quantify how much a policy's already-computed utility metrics move under an
+injected, fully-specified fault — nothing about users, emotion, wellbeing,
+privacy, or legal compliance, and they make **no** real-world robustness /
+generalization claim. The fault transforms here are the controlled definitions
+also consumed by the E-003 (E3) audit; the coordinate-scramble pattern in E-006
+reuses the same pure-transform shape.
+
+Fault transforms
+================
+Each fault is a **pure function** ``pool -> new_pool`` (the input pool is never
+mutated) that is fully determined by its arguments (including an explicit
+``seed`` where randomness is involved — a *local* ``random.Random`` only, never
+the global RNG or wall-clock):
+
+- :func:`pool_shrink` — drop a deterministic fraction of cards (distribution
+  shift: fewer candidates per round).
+- :func:`basis_dropout` — remove every card whose ``basis`` is in a dropped set
+  (structural shift: a whole basis becomes unavailable).
+- :func:`salience_perturb` — add a bounded deterministic perturbation to each
+  card's ``salienceScore`` (measurement shift on the salience channel).
+
+They are enumerated in the :data:`FAULTS` registry so the E3 audit can iterate
+them by name.
+
+Sensitivity score
+=================
+:func:`robustness_score` takes two metric dicts (the kind returned by
+``echo_bench.metrics.utility.compute_all``) for the same seed batch and returns
+a bounded sensitivity in ``[0.0, 1.0]``: the **mean absolute difference over the
+shared numeric metric keys**. Because the utility metrics are each bounded to
+``[0, 1]``, the per-key absolute difference is already in ``[0, 1]`` and so is
+their mean. ``0.0`` means the fault left every shared metric unchanged (maximal
+robustness); larger values mean greater sensitivity to the fault. The result
+carries both ``traceHash`` references.
+
+Determinism: every transform and the score are pure deterministic functions of
+their inputs. Identifiers/keys stay English; runtime logs are Korean. Hashing is
+delegated to :func:`echo_bench.utils.hash.canonical_hash`.
+"""
+
+from __future__ import annotations
+
+import random
+from typing import Any, Callable, Dict, List, Mapping, Sequence
+
+from echo_bench.logging import get_logger
+from echo_bench.utils.hash import canonical_hash
+
+__all__ = [
+    "pool_shrink",
+    "basis_dropout",
+    "salience_perturb",
+    "FAULTS",
+    "robustness_score",
+    "robustness_score_with_metadata",
+    "SALIENCE_SCORE_MIN",
+    "SALIENCE_SCORE_MAX",
+]
+
+_logger = get_logger(__name__)
+
+# Bounds the salience channel is clamped to after perturbation, matching the
+# card schema's salience range ([0, 1]).
+SALIENCE_SCORE_MIN = 0.0
+SALIENCE_SCORE_MAX = 1.0
+
+
+def _clamp(value: float, lo: float, hi: float) -> float:
+    """Clamp ``value`` into ``[lo, hi]``."""
+    if value <= lo:
+        return lo
+    if value >= hi:
+        return hi
+    return float(value)
+
+
+def _card_key(card: Mapping[str, Any]) -> str:
+    """Stable per-card key for deterministic ordering (cardId, else hash)."""
+    cid = card.get("cardId")
+    if cid is not None:
+        return str(cid)
+    return canonical_hash(dict(card))
+
+
+def pool_shrink(
+    pool: Sequence[Mapping[str, Any]], frac: float, seed: Any
+) -> List[Dict[str, Any]]:
+    """Deterministically drop a ``frac`` fraction of the pool.
+
+    Keeps ``round((1 - frac) * len(pool))`` cards, selected by a *local* seeded
+    RNG over the cards ordered by their stable :func:`_card_key`. Pure: the input
+    ``pool`` is never mutated; each kept card is shallow-copied.
+
+    Parameters
+    ----------
+    pool
+        List of card dicts.
+    frac
+        Fraction to drop, clamped to ``[0.0, 1.0]``. ``0.0`` keeps the whole
+        pool; ``1.0`` drops everything.
+    seed
+        Seed for the *local* ``random.Random`` (mixed via ``canonical_hash`` so
+        it is platform-stable). The global RNG is never touched.
+
+    Returns
+    -------
+    list[dict]
+        A new list of kept card dicts, in their original pool order.
+    """
+    frac = _clamp(float(frac), 0.0, 1.0)
+    n = len(pool)
+    keep_n = round((1.0 - frac) * n)
+    if keep_n >= n:
+        return [dict(c) for c in pool]
+    if keep_n <= 0:
+        return []
+
+    ordered_idx = sorted(range(n), key=lambda i: _card_key(pool[i]))
+    rng = random.Random(int(canonical_hash({"seed": seed, "fault": "pool_shrink"}), 16))
+    kept_idx = set(rng.sample(ordered_idx, keep_n))
+    # Preserve original pool order among kept cards.
+    return [dict(pool[i]) for i in range(n) if i in kept_idx]
+
+
+def basis_dropout(
+    pool: Sequence[Mapping[str, Any]], drop_basis: Any
+) -> List[Dict[str, Any]]:
+    """Remove every card whose observable ``basis`` is in ``drop_basis``.
+
+    Structural shift: one or more whole bases become unavailable. Pure: the
+    input pool is never mutated; surviving cards are shallow-copied.
+
+    Parameters
+    ----------
+    pool
+        List of card dicts.
+    drop_basis
+        A single basis label (str) or an iterable of basis labels to drop.
+
+    Returns
+    -------
+    list[dict]
+        Cards whose ``basis`` is not dropped, in original order.
+    """
+    if isinstance(drop_basis, str):
+        dropped = {drop_basis}
+    else:
+        dropped = set(drop_basis)
+    return [dict(c) for c in pool if c.get("basis") not in dropped]
+
+
+def salience_perturb(
+    pool: Sequence[Mapping[str, Any]], delta: float, seed: Any
+) -> List[Dict[str, Any]]:
+    """Add a bounded deterministic perturbation to each card's salience.
+
+    Measurement shift on the salience channel: each card's ``salienceScore`` is
+    shifted by a per-card value drawn from ``[-delta, +delta]`` by a *local*
+    seeded RNG, then clamped to ``[SALIENCE_SCORE_MIN, SALIENCE_SCORE_MAX]``.
+    Pure: the input pool is never mutated; each card is shallow-copied. The
+    per-card draw is keyed by the card's stable key so the perturbation is
+    reproducible regardless of pool order.
+
+    Parameters
+    ----------
+    pool
+        List of card dicts.
+    delta
+        Maximum absolute perturbation magnitude (clamped to ``>= 0``).
+    seed
+        Seed for the *local* ``random.Random``. The global RNG is never touched.
+
+    Returns
+    -------
+    list[dict]
+        New card dicts with perturbed, clamped ``salienceScore``.
+    """
+    delta = abs(float(delta))
+    out: List[Dict[str, Any]] = []
+    for card in pool:
+        new_card = dict(card)
+        base = float(card.get("salienceScore", 0.0))
+        # Per-card deterministic draw, order-independent (keyed by card key).
+        local_seed = canonical_hash(
+            {"seed": seed, "fault": "salience_perturb", "card": _card_key(card)}
+        )
+        rng = random.Random(int(local_seed, 16))
+        shift = rng.uniform(-delta, delta) if delta > 0.0 else 0.0
+        new_card["salienceScore"] = _clamp(
+            base + shift, SALIENCE_SCORE_MIN, SALIENCE_SCORE_MAX
+        )
+        out.append(new_card)
+    return out
+
+
+# Registry of controlled fault transforms, by English machine-read name. The E3
+# audit (E-003) iterates these; each value is the pure transform callable.
+FAULTS: Dict[str, Callable[..., List[Dict[str, Any]]]] = {
+    "pool_shrink": pool_shrink,
+    "basis_dropout": basis_dropout,
+    "salience_perturb": salience_perturb,
+}
+
+
+def _shared_numeric_keys(
+    baseline: Mapping[str, Any], faulted: Mapping[str, Any]
+) -> List[str]:
+    """Return sorted keys present in both dicts with numeric (non-bool) values."""
+    shared = []
+    for key in baseline.keys() & faulted.keys():
+        bv = baseline[key]
+        fv = faulted[key]
+        if isinstance(bv, bool) or isinstance(fv, bool):
+            continue
+        if isinstance(bv, (int, float)) and isinstance(fv, (int, float)):
+            shared.append(key)
+    return sorted(shared)
+
+
+def robustness_score(
+    baseline_metrics: Mapping[str, Any], faulted_metrics: Mapping[str, Any]
+) -> float:
+    """Bounded sensitivity of metrics to a fault, in ``[0.0, 1.0]``.
+
+    Computes the **mean absolute difference over the shared numeric metric
+    keys** between two metric dicts (the kind returned by
+    ``utility.compute_all``) for the same seed batch. Non-numeric keys (e.g.
+    ``traceHash``) and booleans are ignored. Because each utility metric is
+    bounded to ``[0, 1]``, the per-key absolute difference and thus their mean
+    lie in ``[0, 1]``; the result is clamped defensively.
+
+    ``0.0`` means the fault changed no shared metric (maximal robustness); a
+    larger value means greater sensitivity. Returns ``0.0`` when there are no
+    shared numeric keys. Deterministic: identical inputs -> identical value.
+    """
+    keys = _shared_numeric_keys(baseline_metrics, faulted_metrics)
+    if not keys:
+        return 0.0
+    total = 0.0
+    for key in keys:
+        total += abs(float(baseline_metrics[key]) - float(faulted_metrics[key]))
+    value = _clamp(total / len(keys), 0.0, 1.0)
+    _logger.info(
+        "강건성 점수(robustness_score)를 계산했습니다 (shared_keys=%d, value=%.6f)",
+        len(keys),
+        value,
+    )
+    return value
+
+
+def robustness_score_with_metadata(
+    baseline_metrics: Mapping[str, Any], faulted_metrics: Mapping[str, Any]
+) -> Dict[str, Any]:
+    """Compute :func:`robustness_score` and carry both ``traceHash`` references.
+
+    Returns::
+
+        {
+            "metric": "robustness_score",
+            "value": float in [0, 1],
+            "baselineTraceHash": baseline_metrics.get("traceHash"),
+            "faultedTraceHash":  faulted_metrics.get("traceHash"),
+            "sharedKeys": [...],   # the numeric keys compared, sorted
+        }
+
+    Deterministic: identical inputs -> identical dict.
+    """
+    keys = _shared_numeric_keys(baseline_metrics, faulted_metrics)
+    return {
+        "metric": "robustness_score",
+        "value": robustness_score(baseline_metrics, faulted_metrics),
+        "baselineTraceHash": baseline_metrics.get("traceHash"),
+        "faultedTraceHash": faulted_metrics.get("traceHash"),
+        "sharedKeys": keys,
+    }

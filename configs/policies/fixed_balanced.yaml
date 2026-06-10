@@ -1,0 +1,21 @@
+# ECHO-Bench FIXED_BALANCED policy configuration (Task C-003).
+#
+# Non-adaptive coverage baseline: every slate targets a configured balanced mix
+# over bases and complexity bands, independent of the trace. Proportions are
+# apportioned to integer quotas summing to k (largest-remainder), with at least
+# the constraint-required number of distinct bases guaranteed. No user / persona
+# / emotion / preference / free-text field may appear here.
+policy: FIXED_BALANCED
+k: 4
+# Relative weights per basis (apportioned to k slots). Uniform => one card per
+# basis for k=4 (satisfies the >=3-distinct-bases rule).
+basis_targets:
+  B1: 1.0
+  B2: 1.0
+  B3: 1.0
+  B4: 1.0
+# Relative weights per complexity band (documented ordinal bands).
+band_targets:
+  low: 1.0
+  mid: 1.0
+  high: 1.0

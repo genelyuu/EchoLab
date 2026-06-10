@@ -1,0 +1,15 @@
+# ECHO-Bench TRACE_GREEDY policy configuration (Task C-004).
+#
+# Trace-only greedy policy: scores candidates using ONLY observable trace fields
+# (accumulated coordinateContribution, complexityBand progress, in-slate
+# redundancy). It must NEVER read latent / persona / emotion / preference /
+# demographic / free-text signals. Score weights live here.
+policy: TRACE_GREEDY
+k: 4
+weights:
+  # Reward distance from the accumulated trace coordinate centroid (coverage).
+  novelty: 1.0
+  # Reward alignment with the next complexity band after the highest seen.
+  progression: 0.5
+  # Penalize closeness to cards already chosen within the slate being built.
+  redundancy: 1.0

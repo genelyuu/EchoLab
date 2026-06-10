@@ -1,0 +1,14 @@
+# ECHO-Bench ORACLE_STRATEGY policy configuration (Task C-007).
+#
+# Oracle slate selection against a KNOWN controlled strategy probe. The probe is
+# a controlled, instrumented INPUT policy — NOT a synthetic user and NOT a model
+# of a person. Given the probe, the oracle selects the constraint-satisfying
+# k-slate that maximizes the documented system-level objective the probe encodes.
+# Oracle access to the probe is explicit and confined to the policy module; no
+# other policy is granted probe internals. This defines the regret_to_oracle
+# reference consumed by D-001.
+policy: ORACLE_STRATEGY
+k: 4
+# Registered strategy probe name (see echo_bench.probes.strategy_probes.PROBES):
+#   PREFER_COORD_NOVELTY | PREFER_HIGH_COMPLEXITY | PREFER_LOW_SALIENCE
+probe: PREFER_COORD_NOVELTY

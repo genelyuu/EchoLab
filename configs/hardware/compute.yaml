@@ -1,0 +1,9 @@
+# configs/hardware/compute.yaml
+# Optional GPU compute policy (Task F-007). The ECHO-Bench core is CPU-replayable;
+# GPU is OPT-IN and permitted ONLY for the whitelisted, non-replay-chain tasks.
+prefer_gpu: false                      # master switch; false => always CPU
+allow_gpu_for:                         # whitelist; must be a subset of GPU_ELIGIBLE_TASKS
+  - batch_card_generation
+  - neural_baseline
+require_cpu_equivalence: true          # GPU artifacts must bit-match a CPU reference
+gpu_backend: cupy                      # array module name attempted when GPU is allowed

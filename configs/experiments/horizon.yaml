@@ -1,0 +1,12 @@
+# ECHO-Bench experiment horizon configuration (Task B-005).
+#
+# The horizon H is the number of adaptation decision steps (rounds) in an
+# episode. It is bounded to a small declared set — never unbounded or
+# open-ended — so that every run references a versioned, replayable H. The
+# selected H is recordable for the run manifest (F-003) and drives the E1
+# horizon sweep (E-001).
+#
+# Keys stay English (machine-read config keys); any runtime log lines remain
+# Korean per the project logging convention.
+H_allowed: [4, 6, 8, 12, 16, 20]
+H_default: 8

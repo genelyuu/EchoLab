@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "echo-bench"
+version = "0.0.0"
+description = "User-Model-Free Adaptation Benchmark (controlled procedural k-slate action space)"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24", "pyyaml>=6.0"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+gpu = ["cupy-cuda12x>=12.0"]
+viz = ["matplotlib>=3.7"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

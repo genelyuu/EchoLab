@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# Virtual env (working test env; recreate with: python -m venv .venv && .venv/bin/pip install -e ".[dev]")
+.venv/
+
+# Generated benchmark outputs (regenerable from config + seed; replay-validated)
+outputs/runs/*
+outputs/reports/*
+outputs/artifacts/*
+!outputs/runs/.gitkeep
+!outputs/reports/.gitkeep
+!outputs/artifacts/.gitkeep
+
+# OS
+.DS_Store

@@ -1,0 +1,31 @@
+# ECHO-Bench salience-audit thresholds (Task D-005).
+#
+# Drives the S4 salience audit (E-007). These are OBJECTIVE image/structure
+# thresholds over the observable `salienceScore` field (an A-006 statistic) —
+# NOT aesthetic, user-preference, emotion, or wellbeing judgments, and the audit
+# carries no privacy/legal-compliance framing.
+#
+# Keys stay English (machine-read config keys); any runtime log lines remain
+# Korean per the project logging convention.
+
+# salience_outlier_rate: a slated/selected card is an OUTLIER when its observable
+# salienceScore strictly exceeds this threshold. The metric reports the fraction
+# of slated/selected cards that are outliers, in [0, 1].
+outlier_threshold: 0.85
+
+# salience_control: gap from a configured TARGET salience distribution. The
+# observed salienceScores (of slated/selected cards) are binned into the bands
+# below (closed-open edges) and compared to the target probability mass per band.
+# The metric is half the total-variation distance (L1/2) between observed and
+# target distributions, in [0, 1] (0 = perfect match to target).
+target_distribution:
+  # Band edges partition [0, 1] into contiguous [lo, hi) intervals; the last is
+  # closed on the right so salienceScore == 1.0 lands in the top band.
+  bands:
+    - {lo: 0.0, hi: 0.33}
+    - {lo: 0.33, hi: 0.66}
+    - {lo: 0.66, hi: 1.0}
+  # Target probability mass per band (must align 1:1 with `bands`). A roughly
+  # balanced target so over-concentration on the high-salience band registers
+  # as a positive control gap. Need not sum to exactly 1.0; it is normalized.
+  weights: [0.34, 0.33, 0.33]

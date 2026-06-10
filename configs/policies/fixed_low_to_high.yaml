@@ -1,0 +1,19 @@
+# ECHO-Bench FIXED_LOW_TO_HIGH policy configuration (Task C-002).
+#
+# Non-adaptive schedule: the target complexity band is a fixed function of the
+# round index (taken purely as a counter from len(trace.rounds())), NOT of trace
+# content. The schedule walks low -> mid -> high across the horizon. Index past
+# the schedule end clamps to the last entry. No user / persona / emotion /
+# preference / free-text field may appear here.
+policy: FIXED_LOW_TO_HIGH
+k: 4
+horizon: 6
+# Explicit per-round target bands (index = round counter). Bands are the
+# documented ordinal bands from cards/metrics.py: low -> mid -> high.
+schedule:
+  - low
+  - low
+  - mid
+  - mid
+  - high
+  - high

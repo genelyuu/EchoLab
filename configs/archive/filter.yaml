@@ -1,0 +1,17 @@
+# ECHO-Bench degenerate-candidate filter thresholds (Task A-007).
+#
+# A card is rejected if any threshold below is violated. All criteria are
+# objective image/structure statistics — no subjective / aesthetic / preference
+# based rejection, and reason codes never reference users or semantics.
+thresholds:
+  # Blank: too little structural contrast (near-uniform raster).
+  min_std_intensity: 0.02
+  # Blank: too little dynamic range.
+  min_dynamic_range: 0.05
+  # Saturated: too many pixels pinned to 0 or 255.
+  max_saturation_fraction: 0.85
+  # Out-of-band complexity: keep cards within a usable complexity window.
+  min_complexity_score: 0.05
+  max_complexity_score: 0.99
+  # Salience floor: reject structurally flat cards.
+  min_salience_score: 0.01

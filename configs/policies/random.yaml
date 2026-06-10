@@ -1,0 +1,9 @@
+# ECHO-Bench RANDOM policy configuration (Task C-001).
+#
+# RANDOM selects a constraint-satisfying slate of size k uniformly at random
+# from the candidate pool via a seeded local RNG (rejection sampling bounded by
+# max_attempts). No user / persona / emotion / preference / free-text field may
+# appear here.
+policy: RANDOM
+k: 4
+max_attempts: 200

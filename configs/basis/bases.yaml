@@ -1,0 +1,38 @@
+# ECHO-Bench basis configuration (Task A-001).
+#
+# Declares exactly the four procedural bases B1..B4. Every parameter carries an
+# explicit [min, max] numeric bound; sampling outside these bounds raises a
+# validation error. No personal / user / semantic / preference / free-text field
+# may appear here (enforced on load by echo_bench.basis.schema).
+#
+# rendererVersion tags the real Phase 2 per-basis renderers (A-002..A-005).
+# Bumping any version string deterministically changes that basis's renderHash.
+bases:
+  B1:  # Branching
+    rendererVersion: "b1-r1"
+    param_ranges:
+      depth: [3, 9]
+      branch_angle: [10.0, 60.0]
+      branch_ratio: [0.4, 0.8]
+      jitter: [0.0, 0.5]
+  B2:  # Reaction-Diffusion
+    rendererVersion: "b2-r1"
+    param_ranges:
+      feed_rate: [0.02, 0.07]
+      kill_rate: [0.045, 0.07]
+      diffusion_u: [0.1, 0.3]
+      iterations: [50, 400]
+  B3:  # Topographic fBM
+    rendererVersion: "b3-r1"
+    param_ranges:
+      octaves: [2, 8]
+      lacunarity: [1.5, 3.0]
+      gain: [0.3, 0.7]
+      scale: [1.0, 8.0]
+  B4:  # Flow-Attractor
+    rendererVersion: "b4-r1"
+    param_ranges:
+      coeff_a: [-2.0, 2.0]
+      coeff_b: [-2.0, 2.0]
+      steps: [200, 1200]
+      step_size: [0.005, 0.05]

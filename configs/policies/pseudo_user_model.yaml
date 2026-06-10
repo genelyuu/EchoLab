@@ -1,0 +1,15 @@
+# ECHO-Bench PSEUDO_USER_MODEL policy configuration (Task C-006).
+#
+# ISOLATED CONTRAST BASELINE. This is the ONLY policy permitted a latent vector,
+# and it exists PURELY as a contrast baseline. The latent vector is a SYNTHETIC
+# SCORING CONSTRUCT (a fixed, seeded numeric vector used to weight observable
+# card features) — it is NOT a model of a real person and implies NO claim about
+# any user's preference, persona, emotion, wellbeing, or demographics. The latent
+# vector lives only inside the module: it is never written into the trace and
+# never read by any other policy.
+policy: PSEUDO_USER_MODEL
+k: 4
+# Dimensionality parameter for the synthetic latent scoring vector.
+latent_dim: 6
+# Seed for the synthetic latent scoring vector (deterministic construction).
+latent_seed: 12345

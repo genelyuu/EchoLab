@@ -1,0 +1,24 @@
+# ECHO-Bench TRACE_LIN_UCB policy configuration (Task C-005).
+#
+# Trace-only linear-UCB contextual bandit. Every context feature is computed
+# EXCLUSIVELY from observable trace fields (accumulated coordinate centroid,
+# complexity-band progress) and observable card fields. There is NO latent user
+# vector in this policy and it must NEVER read latent / persona / emotion /
+# preference / demographic / free-text signals. alpha and the feature set live
+# here.
+policy: TRACE_LIN_UCB
+k: 4
+# UCB exploration coefficient: score = mean + alpha * bonus.
+alpha: 1.0
+# Ridge regularizer seeding A = lambda_reg * I.
+lambda_reg: 1.0
+# Ordered active feature blocks (all observable / trace-only):
+#   coordinate_gap  -> per-dimension |card coord - trace centroid| (4 dims)
+#   band_progress   -> alignment with the next complexity band
+#   redundancy      -> closeness to the trace centroid (coverage duplication)
+#   bias            -> constant term
+features:
+  - coordinate_gap
+  - band_progress
+  - redundancy
+  - bias
