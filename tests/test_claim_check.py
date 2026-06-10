@@ -7,10 +7,20 @@ Covers the acceptance criteria:
 (c) the docs/01_GUARDRAILS.md "Forbidden Claims" enumeration is NOT flagged;
 (d) the identifier PSEUDO_USER_MODEL / key "user_model" is NOT flagged;
 (e) the live docs/ + outputs/reports/ tree returns NO genuine findings.
+
+G-008 / TRD G-012 additions:
+(f) oracle-terminology phrases ("global upper bound", "global optimum",
+    "globally optimal") are FLAGGED as assertion-style claims;
+(g) negated forms (e.g. the exact REFERENCE_NOTE string) are NOT flagged;
+(h) JSON oracle-note rule: post-C-014 reports with wrong/missing oracleNote
+    fail; legacy reports (no oraclePolicyDisplayName) only warn; compliant
+    reports pass.
 """
 
 from __future__ import annotations
 
+import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -22,7 +32,10 @@ from echo_bench.tools.claim_check import (
     scan_path,
     scan_paths,
     scan_text,
+    check_oracle_note,
+    OracleNoteViolation,
 )
+from echo_bench.policies.display_names import REFERENCE_NOTE
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DOCS_DIR = _REPO_ROOT / "docs"
@@ -222,3 +235,197 @@ def test_phrase_list_matches_sources():
         "interpretation-free",
     ):
         assert p in FORBIDDEN_PHRASES
+
+
+# --------------------------------------------------------------------------- #
+# (f) G-008: Oracle-terminology phrases are FLAGGED.                          #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "text, phrase",
+    [
+        (
+            "The oracle provides a global upper bound on performance.",
+            "global upper bound",
+        ),
+        (
+            "ORACLE_STRATEGY achieves the global optimum for coverage.",
+            "global optimum",
+        ),
+        (
+            "The reference policy is globally optimal.",
+            "globally optimal",
+        ),
+        (
+            "This policy reaches a global upper bound across seeds.",
+            "global upper bound",
+        ),
+    ],
+)
+def test_oracle_terminology_flagged(text, phrase):
+    findings = scan_text(text)
+    assert any(f.phrase == phrase for f in findings), (
+        f"expected oracle phrase {phrase!r} to be flagged in {text!r}"
+    )
+
+
+def test_oracle_phrases_in_forbidden_list():
+    for p in ("global upper bound", "global optimum", "globally optimal"):
+        assert p in FORBIDDEN_PHRASES, f"{p!r} must be in FORBIDDEN_PHRASES"
+
+
+# --------------------------------------------------------------------------- #
+# (g) G-008: Negated oracle-terminology is NOT flagged.                       #
+# --------------------------------------------------------------------------- #
+
+
+def test_reference_note_not_flagged():
+    # The exact REFERENCE_NOTE constant must never be flagged (it contains
+    # "not global optimum" which the existing negator suppression should catch).
+    assert scan_text(REFERENCE_NOTE) == [], (
+        f"REFERENCE_NOTE must not be flagged: {REFERENCE_NOTE!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Various negated forms that must not be flagged.
+        "This is not a global upper bound.",
+        "The oracle is not globally optimal.",
+        "No global optimum is claimed here.",
+        "The policy never reaches global optimum.",
+        "objective-specific reference, not global optimum",
+        "This reference is not the global optimum for all tasks.",
+        "These are objective-specific references, not global upper bounds.",
+    ],
+)
+def test_negated_oracle_terminology_not_flagged(text):
+    assert scan_text(text) == [], (
+        f"negated oracle terminology must not be flagged: {text!r}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# (h) G-008: JSON oracle-note rule via check_oracle_note.                     #
+# --------------------------------------------------------------------------- #
+
+
+def _make_report(*, oracle_policy=None, display_name=None, note=None):
+    """Build a minimal report dict for oracle-note tests."""
+    d = {}
+    if oracle_policy is not None:
+        d["oraclePolicy"] = oracle_policy
+    if display_name is not None:
+        d["oraclePolicyDisplayName"] = display_name
+    if note is not None:
+        d["oracleNote"] = note
+    return d
+
+
+def test_oracle_note_compliant_passes():
+    report = _make_report(
+        oracle_policy="ORACLE_STRATEGY",
+        display_name="STRATEGY_OBJECTIVE_REFERENCE",
+        note=REFERENCE_NOTE,
+    )
+    # Must not raise.
+    check_oracle_note(report, file="test.json")
+
+
+def test_oracle_note_wrong_value_raises():
+    report = _make_report(
+        oracle_policy="ORACLE_STRATEGY",
+        display_name="STRATEGY_OBJECTIVE_REFERENCE",
+        note="this is the global optimum",
+    )
+    with pytest.raises(OracleNoteViolation):
+        check_oracle_note(report, file="test.json")
+
+
+def test_oracle_note_missing_raises():
+    report = _make_report(
+        oracle_policy="ORACLE_STRATEGY",
+        display_name="STRATEGY_OBJECTIVE_REFERENCE",
+        # no note key
+    )
+    with pytest.raises(OracleNoteViolation):
+        check_oracle_note(report, file="test.json")
+
+
+def test_oracle_note_legacy_no_display_name_warns_not_raises():
+    """Legacy report (oraclePolicy present, oraclePolicyDisplayName absent) => warning only."""
+    from unittest.mock import patch
+    import echo_bench.tools.claim_check as cc_mod
+
+    report = _make_report(oracle_policy="ORACLE_STRATEGY")
+    # Patch _logger.warning so we can assert it was called even though
+    # the logger has propagate=False (which prevents caplog from capturing).
+    with patch.object(cc_mod._logger, "warning") as mock_warn:
+        check_oracle_note(report, file="legacy.json")  # must NOT raise
+    # A warning log must have been emitted (Korean text expected).
+    mock_warn.assert_called_once()
+    # The message should mention the legacy report (Korean).
+    call_args = mock_warn.call_args
+    assert "레거시" in str(call_args) or "legacy.json" in str(call_args)
+
+
+def test_oracle_note_no_oracle_policy_passes():
+    """Report without oraclePolicy key: nothing to check, passes silently."""
+    report = {"experiment": "e2", "table": []}
+    check_oracle_note(report, file="no_oracle.json")  # must not raise
+
+
+def test_oracle_note_scan_on_compliant_report_json(tmp_path):
+    """scan_path on a compliant post-C-014 report JSON exits cleanly."""
+    report = _make_report(
+        oracle_policy="ORACLE_COVERAGE",
+        display_name="COVERAGE_GREEDY_REFERENCE",
+        note=REFERENCE_NOTE,
+    )
+    p = tmp_path / "e2_compliant.json"
+    p.write_text(json.dumps(report), encoding="utf-8")
+    findings = scan_path(p)
+    assert findings == [], f"compliant report should not produce findings: {findings}"
+
+
+def test_oracle_note_scan_on_bad_report_json_flagged(tmp_path):
+    """scan_path on a post-C-014 report with bad oracleNote produces a Finding."""
+    report = _make_report(
+        oracle_policy="ORACLE_COVERAGE",
+        display_name="COVERAGE_GREEDY_REFERENCE",
+        note="wrong note — global upper bound",
+    )
+    p = tmp_path / "e2_bad.json"
+    p.write_text(json.dumps(report), encoding="utf-8")
+    findings = scan_path(p)
+    assert findings, "bad oracleNote in post-C-014 report must produce a Finding"
+    assert any(f.phrase == "oracleNote" for f in findings)
+
+
+def test_oracle_note_scan_on_legacy_report_json_clean(tmp_path):
+    """scan_path on a legacy report (no oraclePolicyDisplayName) => no Finding."""
+    from unittest.mock import patch
+    import echo_bench.tools.claim_check as cc_mod
+
+    report = _make_report(oracle_policy="ORACLE_COVERAGE")
+    p = tmp_path / "e2_legacy.json"
+    p.write_text(json.dumps(report), encoding="utf-8")
+    with patch.object(cc_mod._logger, "warning"):
+        findings = scan_path(p)
+    assert findings == [], "legacy report must not produce a Finding"
+
+
+# --------------------------------------------------------------------------- #
+# (i) G-008: Live reports directory is clean.                                 #
+# --------------------------------------------------------------------------- #
+
+
+def test_live_reports_oracle_notes_clean():
+    """All post-C-014 E2 reports in outputs/reports/ have correct oracleNote."""
+    findings = scan_paths([_REPORTS_DIR])
+    oracle_findings = [f for f in findings if f.phrase == "oracleNote"]
+    assert oracle_findings == [], (
+        f"live reports/ have oracle-note violations: {oracle_findings}"
+    )

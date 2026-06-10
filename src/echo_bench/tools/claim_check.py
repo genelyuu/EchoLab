@@ -40,6 +40,21 @@ This is a **guardrail aid, not a guarantee**: it is a deterministic heuristic
 that catches the common claim-style violations and suppresses the known
 legitimate constructs. It does not replace human review of novel phrasings.
 
+G-008 / TRD G-012 — Oracle-terminology guardrail
+-------------------------------------------------
+Oracle policies are **objective-specific references**, never global optima. The
+phrase set ``"global upper bound"``, ``"global optimum"``, ``"globally optimal"``
+is forbidden in assertion-style claim text (docs / reports). Negated forms (e.g.
+the exact ``REFERENCE_NOTE`` string ``"objective-specific reference, not global
+optimum"``) are suppressed by the existing negator heuristic.
+
+In addition, when scanning a JSON report file the function
+:func:`check_oracle_note` enforces a JSON-level rule: if a report carries both
+``oraclePolicy`` and ``oraclePolicyDisplayName`` (post-C-014 format), the
+``oracleNote`` field must equal ``REFERENCE_NOTE`` exactly. Legacy reports that
+have ``oraclePolicy`` but no ``oraclePolicyDisplayName`` emit a Korean warning
+log but do NOT fail.
+
 CLI
 ---
 ``python -m echo_bench.tools.claim_check [paths...]`` scans the default targets
@@ -53,20 +68,28 @@ the project logging convention.
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Sequence
 
+from echo_bench.logging import get_logger, log_ko
+from echo_bench.policies.display_names import REFERENCE_NOTE
+
 __all__ = [
     "FORBIDDEN_PHRASES",
+    "OracleNoteViolation",
     "Finding",
+    "check_oracle_note",
     "scan_text",
     "scan_path",
     "scan_paths",
     "main",
 ]
+
+_logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Forbidden-phrase set
@@ -92,7 +115,23 @@ FORBIDDEN_PHRASES: tuple[str, ...] = (
     "emotion",
     "persona",
     "preference",
+    # G-008 / TRD G-012: oracle-terminology tokens.
+    # Oracle policies are objective-specific references, never global optima.
+    # Negated forms (e.g. REFERENCE_NOTE: "...not global optimum") are
+    # suppressed by the existing negator heuristic.
+    "global upper bound",
+    "global optimum",
+    "globally optimal",
 )
+
+
+class OracleNoteViolation(ValueError):
+    """Raised when a post-C-014 JSON report has a missing or wrong oracleNote.
+
+    This is a hard failure: the report carries ``oraclePolicy`` and
+    ``oraclePolicyDisplayName`` (post-C-014 format) but the ``oracleNote``
+    field is absent or does not equal ``REFERENCE_NOTE`` exactly.
+    """
 
 
 @dataclass(frozen=True)
@@ -308,6 +347,52 @@ def _is_denial_enumeration(line: str, start: int, end: int) -> bool:
     return any(word in low for word in _ENUM_DENIAL_WORDS)
 
 
+def check_oracle_note(report: dict, *, file: str = "<report>") -> None:
+    """Validate the oracle-note field in a parsed JSON report (G-008 / TRD G-012).
+
+    Rules:
+    - If the report has **neither** ``oraclePolicy`` **nor**
+      ``oraclePolicyDisplayName``, there is nothing to check and the function
+      returns silently.
+    - If the report has ``oraclePolicy`` but **no** ``oraclePolicyDisplayName``
+      (legacy pre-C-014 format), a Korean warning log line is emitted but the
+      function does **not** raise (legacy reports are not retroactively failed).
+    - If the report has **both** ``oraclePolicy`` and
+      ``oraclePolicyDisplayName`` (post-C-014 format), the ``oracleNote``
+      field MUST be present and equal :data:`REFERENCE_NOTE` exactly;
+      otherwise :class:`OracleNoteViolation` is raised.
+
+    Args:
+        report: parsed JSON report dict.
+        file: label used in log/error messages (English identifier).
+
+    Raises:
+        OracleNoteViolation: when the post-C-014 oracle-note rule is violated.
+    """
+    has_oracle_policy = "oraclePolicy" in report
+    has_display_name = "oraclePolicyDisplayName" in report
+
+    if not has_oracle_policy:
+        return  # no oracle policy; nothing to check.
+
+    if not has_display_name:
+        # Legacy report: emit Korean warning, do not fail.
+        _logger.warning(
+            "[경고] 레거시 리포트 감지: oraclePolicyDisplayName 없음 — %s "
+            "(C-014 이전 형식; oracleNote 검증 생략)",
+            file,
+        )
+        return
+
+    # Post-C-014 format: oracleNote must equal REFERENCE_NOTE exactly.
+    note = report.get("oracleNote")
+    if note != REFERENCE_NOTE:
+        raise OracleNoteViolation(
+            f"{file}: oracleNote 불일치 — "
+            f"예상: {REFERENCE_NOTE!r}, 실제: {note!r}"
+        )
+
+
 def scan_text(text: str, *, file: str = "<text>") -> List[Finding]:
     """Scan ``text`` and return genuine assertion-style forbidden-claim findings.
 
@@ -412,15 +497,41 @@ def scan_text(text: str, *, file: str = "<text>") -> List[Finding]:
 def scan_path(path: str | Path) -> List[Finding]:
     """Scan a single file and return its genuine findings.
 
-    Non-text / unreadable files are skipped (returns an empty list). The file
-    path string is recorded on each finding.
+    For JSON files the function additionally runs the G-008 oracle-note rule
+    via :func:`check_oracle_note`. A post-C-014 violation is converted to a
+    :class:`Finding` with ``phrase="oracleNote"`` and ``line=0``; a legacy
+    warning is logged but produces no Finding. Non-text / unreadable files are
+    skipped (returns an empty list). The file path string is recorded on each
+    finding.
     """
     p = Path(path)
     try:
         text = p.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return []
-    return scan_text(text, file=str(p))
+
+    findings = scan_text(text, file=str(p))
+
+    # G-008: run oracle-note JSON rule on .json files.
+    if p.suffix.lower() == ".json":
+        try:
+            report = json.loads(text)
+        except json.JSONDecodeError:
+            report = None
+        if isinstance(report, dict):
+            try:
+                check_oracle_note(report, file=str(p))
+            except OracleNoteViolation as exc:
+                findings.append(
+                    Finding(
+                        file=str(p),
+                        line=0,
+                        phrase="oracleNote",
+                        text=str(exc),
+                    )
+                )
+
+    return findings
 
 
 # File suffixes scanned by default (claim text lives in markdown + JSON reports).
