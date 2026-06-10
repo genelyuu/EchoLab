@@ -1,0 +1,19 @@
+{
+  "policyName": "TRACE_GREEDY",
+  "effectiveConfig": {
+    "policy": "TRACE_GREEDY",
+    "k": 4,
+    "weights": {
+      "novelty": 1.0,
+      "progression": 0.5,
+      "redundancy": 1.0,
+      "session_coverage": 2.0,
+      "cell_repulsion": 0.75,
+      "exploration": 0.1
+    }
+  },
+  "policyEffectiveConfigHash": "3fd5566288b4490ec19491aa0f6b5f74f98d4dca76a29c3b14ca6c3fa1eb3f7e",
+  "frozenAt": "2026-06-11",
+  "taskId": "C-011",
+  "note": "This hash is binding. The C-009 session-level objective weights (novelty=1.0, progression=0.5, redundancy=1.0, session_coverage=2.0, cell_repulsion=0.75, exploration=0.1) and class name TraceGreedyPolicy are frozen for n=50/100 scale experiments. Do not silently regenerate this manifest. Any change to a weight, the class name, or the yaml config requires an explicit decision and a documented update to this file."
+}
