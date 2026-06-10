@@ -20,7 +20,6 @@ G-008 / TRD G-012 additions:
 from __future__ import annotations
 
 import json
-import logging
 from pathlib import Path
 
 import pytest
@@ -366,9 +365,14 @@ def test_oracle_note_legacy_no_display_name_warns_not_raises():
         check_oracle_note(report, file="legacy.json")  # must NOT raise
     # A warning log must have been emitted (Korean text expected).
     mock_warn.assert_called_once()
-    # The message should mention the legacy report (Korean).
+    # Both the Korean legacy marker AND the file label must appear in the call.
     call_args = mock_warn.call_args
-    assert "레거시" in str(call_args) or "legacy.json" in str(call_args)
+    assert "레거시" in str(call_args), (
+        "warning must contain the Korean legacy marker '레거시'"
+    )
+    assert "legacy.json" in str(call_args), (
+        "warning must reference the file label 'legacy.json'"
+    )
 
 
 def test_oracle_note_no_oracle_policy_passes():

@@ -75,7 +75,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Sequence
 
-from echo_bench.logging import get_logger, log_ko
+from echo_bench.logging import get_logger
 from echo_bench.policies.display_names import REFERENCE_NOTE
 
 __all__ = [
@@ -140,9 +140,15 @@ class Finding:
 
     Attributes:
         file: path to the file the hit was found in (English).
-        line: 1-based line number.
-        phrase: the forbidden phrase that matched (from FORBIDDEN_PHRASES).
-        text: the full text of the offending line (stripped of trailing newline).
+        line: 1-based line number for phrase-match findings; ``0`` for
+            structural JSON rule violations (G-008 oracle-note rule, see
+            :func:`check_oracle_note`).
+        phrase: the forbidden phrase that matched (from :data:`FORBIDDEN_PHRASES`
+            for phrase-match findings); the sentinel ``"oracleNote"`` for
+            structural JSON rule violations produced by :func:`scan_path`.
+        text: the full text of the offending line (stripped of trailing newline)
+            for phrase-match findings; the :class:`OracleNoteViolation` message
+            string for oracle-note sentinel findings.
     """
 
     file: str
@@ -347,6 +353,9 @@ def _is_denial_enumeration(line: str, start: int, end: int) -> bool:
     return any(word in low for word in _ENUM_DENIAL_WORDS)
 
 
+# --- G-008 oracle-note rule ---
+
+
 def check_oracle_note(report: dict, *, file: str = "<report>") -> None:
     """Validate the oracle-note field in a parsed JSON report (G-008 / TRD G-012).
 
@@ -388,7 +397,7 @@ def check_oracle_note(report: dict, *, file: str = "<report>") -> None:
     note = report.get("oracleNote")
     if note != REFERENCE_NOTE:
         raise OracleNoteViolation(
-            f"{file}: oracleNote 불일치 — "
+            f"oracleNote 불일치 — "
             f"예상: {REFERENCE_NOTE!r}, 실제: {note!r}"
         )
 
