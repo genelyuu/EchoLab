@@ -1,4 +1,4 @@
-"""Tests for the E3 leakage/robustness/replay audit runner (Task E-003)."""
+"""Tests for the E3 leakage/robustness/replay audit runner (Tasks E-003, D-011, D-012)."""
 
 from __future__ import annotations
 
@@ -180,7 +180,7 @@ def test_e3_trace_greedy_delta_vs_random_is_negative():
 
     Consistent with the known n=10 result (TRACE_GREEDY 0.737 < RANDOM 0.947);
     at the deterministic small test config (seed=42, H=4, k=4, pool=16) the
-    delta is exactly reproducible and negative.
+    delta is negative (sign asserted; exact value may vary with pool/H).
     """
     report = run_e3_audit(dry_run=False, **_KW)
     rows = {row["policy"]: row for row in report["leakage"]["table"]}
@@ -194,8 +194,12 @@ def test_e3_robustness_section_per_fault():
     faults = {row["fault"] for row in robustness["table"]}
     assert faults == set(FAULTS)
     for row in robustness["table"]:
+        # D-012: primary label is sensitivity_score; legacy robustness_score kept.
+        assert isinstance(row["sensitivity_score"], float)
+        assert 0.0 <= row["sensitivity_score"] <= 1.0
+        # Legacy field must still be present and equal.
         assert isinstance(row["robustness_score"], float)
-        assert 0.0 <= row["robustness_score"] <= 1.0
+        assert row["robustness_score"] == row["sensitivity_score"]
         assert isinstance(row["baselineTraceHash"], str) and row["baselineTraceHash"]
         assert isinstance(row["faultedTraceHash"], str) and row["faultedTraceHash"]
         # Each row records which keys were used — self-describing report (D-010 review).
@@ -210,6 +214,37 @@ def test_e3_robustness_section_per_fault():
         f"E3 robustness section must record metricKeys={list(CORE_METRIC_KEYS)!r}, "
         f"got {robustness.get('metricKeys')!r}"
     )
+
+
+def test_e3_robustness_sensitivity_naming_fields():
+    """D-012: robustness section carries sensitivity_score primary label + legacy alias.
+
+    The exact phrase '0.0 = max robustness' must be present in the direction
+    field (machine-readable claim text for the report).
+    """
+    report = run_e3_audit(dry_run=False, **_KW)
+    robustness = report["robustness"]
+
+    # Section-level: primary label, legacy alias, direction phrase.
+    assert robustness["metric"] == "sensitivity_score", (
+        f"E3 robustness section metric must be 'sensitivity_score', "
+        f"got {robustness.get('metric')!r}"
+    )
+    assert robustness["legacyAlias"] == "robustness_score", (
+        f"E3 robustness section legacyAlias must be 'robustness_score', "
+        f"got {robustness.get('legacyAlias')!r}"
+    )
+    assert "0.0 = max robustness" in robustness["direction"], (
+        f"E3 robustness direction must contain '0.0 = max robustness', "
+        f"got {robustness.get('direction')!r}"
+    )
+
+    # Per-row: same fields.
+    for row in robustness["table"]:
+        assert row["legacyAlias"] == "robustness_score", (
+            f"E3 robustness row legacyAlias must be 'robustness_score', "
+            f"got {row.get('legacyAlias')!r} (fault={row.get('fault')})"
+        )
 
 
 def test_e3_replay_audit_reports_replayable_true():

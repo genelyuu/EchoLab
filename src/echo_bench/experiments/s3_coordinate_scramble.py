@@ -89,7 +89,7 @@ from echo_bench.logging import get_logger, log_ko
 from echo_bench.logging.repro_pack import ReproducibilityPack
 from echo_bench.metrics.aggregate import aggregate_values
 from echo_bench.metrics.robustness import ROBUSTNESS_DIRECTION, robustness_score
-from echo_bench.metrics.utility import CORE_METRIC_KEYS, METRIC_KEYS, compute_all
+from echo_bench.metrics.utility import CORE_METRIC_KEYS, compute_all
 from echo_bench.policies.random import RandomPolicy
 from echo_bench.policies.trace_greedy import TraceGreedyPolicy
 from echo_bench.policies.trace_lin_ucb import TraceLinUcbPolicy
@@ -126,7 +126,6 @@ S3_POLICIES = {
 # denominator of four keys across the C-011 freeze boundary; the D-010
 # distribution metrics (coordinate_entropy, cell_visit_gini,
 # time_to_saturation) are excluded from the scramble-shift denominator.
-# METRIC_KEYS is still imported for report completeness where needed.
 S3_METRIC_KEYS = CORE_METRIC_KEYS
 
 # Repo-rooted config locations (resolved relative to the package, not the cwd).
@@ -391,6 +390,10 @@ def run_s3_coordinate_scramble(
             "isCoordinatePolicy": name in COORDINATE_POLICIES,
             "seedBatchId": batch_id,
             "n": n,
+            # D-012: primary label is sensitivity_score; scramble_shift is the
+            # legacy field name and is kept for backward compatibility.
+            "sensitivity_score": mean_shift,
+            "legacyAlias": "scramble_shift",
             "scramble_shift": mean_shift,
             "round0_selection_divergence": round0_divergence,
             "stats": {
@@ -459,8 +462,9 @@ def run_s3_coordinate_scramble(
             "S3 applies a deterministic seeded permutation of the "
             "coordinateContribution vectors across pool cards (structure "
             "preserved, card->coordinate semantics broken). It reports the mean "
-            "full-episode baseline-vs-scrambled metric shift (robustness_score) "
-            "as the magnitude, and the round-0 selection-divergence rate as the "
+            "full-episode baseline-vs-scrambled metric shift (sensitivity_score, "
+            "legacyAlias: scramble_shift / robustness_score units) as the "
+            "magnitude, and the round-0 selection-divergence rate as the "
             "clean direction signal. Coordinate-driven policies (TRACE_GREEDY, "
             "TRACE_LIN_UCB) are expected to diverge at least as much as the "
             "RANDOM control at round 0 (direction, not magnitude); the asserted "
@@ -469,9 +473,15 @@ def run_s3_coordinate_scramble(
         ),
         "config": run_params,
         "metricKeys": list(S3_METRIC_KEYS),
+        # D-012: primary label is sensitivity_score; legacy field name is
+        # scramble_shift. Direction note contains the machine-readable phrase
+        # "0.0 = max robustness" (from ROBUSTNESS_DIRECTION).
+        "scrambleShiftMetric": "sensitivity_score",
+        "scrambleShiftLegacyAlias": "scramble_shift",
         "scrambleShiftDirection": (
-            "scramble_shift is the mean full-episode baseline-vs-scrambled "
-            "sensitivity magnitude (robustness_score units): " + ROBUSTNESS_DIRECTION
+            "sensitivity_score (legacyAlias: scramble_shift) is the mean "
+            "full-episode baseline-vs-scrambled sensitivity magnitude: "
+            + ROBUSTNESS_DIRECTION
         ),
         "seedBatchId": exp_seed_batch_id,
         "perPolicySeedBatchIds": seed_batch_ids,

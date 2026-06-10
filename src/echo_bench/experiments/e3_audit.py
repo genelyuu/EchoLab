@@ -373,9 +373,16 @@ def run_e3_audit(
     # D-011 (TRD alias D-010): second pass — RELATIVE delta vs the RANDOM
     # reference (seed-aligned: every policy ran the identical seed / horizon /
     # pool / probe family above). The reference's own delta is exactly 0.0.
-    reference_row = next(
-        row for row in leakage_rows if row["policy"] == E3_LEAKAGE_DELTA_REFERENCE
-    )
+    # D-012 ride-along: explicit guard so a missing RANDOM reference raises a
+    # clear error instead of an opaque StopIteration.
+    _ref_matches = [row for row in leakage_rows if row["policy"] == E3_LEAKAGE_DELTA_REFERENCE]
+    if not _ref_matches:
+        raise ValueError(
+            f"E3 감사: leakage_rows 에서 deltaReference 정책을 찾을 수 없습니다 "
+            f"(E3_LEAKAGE_DELTA_REFERENCE={E3_LEAKAGE_DELTA_REFERENCE!r}). "
+            "E3_LEAKAGE_POLICIES 에 해당 정책이 포함되어 있는지 확인하세요."
+        )
+    reference_row = _ref_matches[0]
     reference_leakage = reference_row["leakage_proxy"]
     for row in leakage_rows:
         row["leakage_delta_vs_random"] = leakage_delta_vs_random(
@@ -450,8 +457,11 @@ def run_e3_audit(
                 "fault": fault_name,
                 "faultParams": FAULT_PARAMS[fault_name],
                 "faultedPoolSize": len(faulted_pool),
+                # D-012: primary label is sensitivity_score; legacy alias kept for
+                # backward compatibility.
+                "sensitivity_score": score["value"],
+                "legacyAlias": "robustness_score",
                 "robustness_score": score["value"],
-                "sensitivity_score": score["sensitivityScore"],
                 "baselineTraceHash": score["baselineTraceHash"],
                 "faultedTraceHash": score["faultedTraceHash"],
                 "sharedKeys": score["sharedKeys"],
@@ -462,19 +472,22 @@ def run_e3_audit(
             _logger,
             "E3 강건성 완료: "
             f"policy={rob_name}, fault={fault_name}, "
-            f"robustness_score={score['value']:.6f} (controlled fault)",
+            f"sensitivity_score={score['value']:.6f} (controlled fault)",
         )
 
     robustness_section = {
-        "metric": "robustness_score",
+        # D-012: primary metric label is sensitivity_score; legacy alias kept for
+        # backward compatibility.
+        "metric": "sensitivity_score",
+        "legacyAlias": "robustness_score",
         "direction": ROBUSTNESS_DIRECTION,
         "policy": rob_name,
         "policyVersion": rob_policy_cls(dict(rob_cfg)).policy_version(),
         "note": (
             "Controlled, fully-specified fault transforms (FAULTS), NOT "
             "real-world distribution shift; system-level sensitivity over a "
-            "controlled testbed. robustness_score is a SENSITIVITY magnitude "
-            "(equivalently surfaced as sensitivity_score): "
+            "controlled testbed. sensitivity_score (legacyAlias: robustness_score) "
+            "is a SENSITIVITY magnitude: "
             + ROBUSTNESS_DIRECTION
             + "."
         ),

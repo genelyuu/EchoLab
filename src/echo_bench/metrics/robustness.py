@@ -71,11 +71,13 @@ __all__ = [
 
 _logger = get_logger(__name__)
 
-# Explicit direction note (Task D-008). The score is a SENSITIVITY magnitude:
-# larger means the fault moved the metrics more. Surfacing this verbatim in
-# reports removes the "is high good or bad?" ambiguity.
+# Explicit direction note (Tasks D-008, D-012). The score is a SENSITIVITY
+# magnitude: larger means the fault moved the metrics more. Surfacing this
+# verbatim in reports removes the "is high good or bad?" ambiguity.
+# The phrase "0.0 = max robustness" is machine-readable and must be preserved
+# verbatim for the claim validator and report self-description (D-012 V-015).
 ROBUSTNESS_DIRECTION = (
-    "0.0 = fault changed no shared metric = maximal robustness; "
+    "0.0 = max robustness (fault changed no shared metric); "
     "higher = more sensitive = less robust"
 )
 
@@ -237,6 +239,41 @@ def _shared_numeric_keys(
     return sorted(shared)
 
 
+def _effective_keys(
+    baseline: Mapping[str, Any],
+    faulted: Mapping[str, Any],
+    keys: Optional[Tuple[str, ...]],
+) -> List[str]:
+    """Return the list of metric keys to compare in the sensitivity score.
+
+    When ``keys`` is not ``None`` (pinned mode), returns only the keys from
+    the supplied tuple that exist in both dicts with non-bool numeric values.
+    The order follows the supplied ``keys`` tuple (i.e. ``CORE_METRIC_KEYS``
+    order in the typical pinned call), **not** sorted — note that "sorted"
+    does not apply in pinned mode (unlike the dynamic intersection path).
+
+    When ``keys`` is ``None`` (dynamic mode), delegates to
+    :func:`_shared_numeric_keys`, which returns sorted keys.
+    """
+    if keys is not None:
+        # Pinned mode: follow the supplied key order (CORE_METRIC_KEYS order).
+        # Skip any key absent from either dict or with a non-numeric value
+        # (defensive; the pinned key set should always be present in
+        # compute_all dicts). The result is NOT sorted — it follows keys order.
+        effective: List[str] = []
+        for k in keys:
+            bv = baseline.get(k)
+            fv = faulted.get(k)
+            if bv is None or fv is None:
+                continue
+            if isinstance(bv, bool) or isinstance(fv, bool):
+                continue
+            if isinstance(bv, (int, float)) and isinstance(fv, (int, float)):
+                effective.append(k)
+        return effective
+    return _shared_numeric_keys(baseline, faulted)
+
+
 def robustness_score(
     baseline_metrics: Mapping[str, Any],
     faulted_metrics: Mapping[str, Any],
@@ -255,6 +292,12 @@ def robustness_score(
     larger value means greater sensitivity. Returns ``0.0`` when there are no
     shared numeric keys. Deterministic: identical inputs -> identical value.
 
+    This function is also exposed as :func:`sensitivity_score` — a
+    clearly-named alias where the direction is immediately legible: higher =
+    more sensitive = less robust. The ``ROBUSTNESS_DIRECTION`` constant states
+    the direction verbatim. The report-level primary label for this score is
+    ``sensitivity_score`` (with ``legacyAlias: "robustness_score"``).
+
     Parameters
     ----------
     baseline_metrics
@@ -270,23 +313,7 @@ def robustness_score(
         original four utility keys to preserve comparability across the C-011
         freeze boundary (e.g. E3 robustness audit and S3 scramble sensitivity).
     """
-    if keys is not None:
-        # Pinned mode: use only the explicitly supplied key list. Skip any key
-        # absent from either dict or with a non-numeric value (defensive, but
-        # the pinned key set should always be present in compute_all dicts).
-        effective_keys: List[str] = []
-        for k in keys:
-            bv = baseline_metrics.get(k)
-            fv = faulted_metrics.get(k)
-            if bv is None or fv is None:
-                continue
-            if isinstance(bv, bool) or isinstance(fv, bool):
-                continue
-            if isinstance(bv, (int, float)) and isinstance(fv, (int, float)):
-                effective_keys.append(k)
-    else:
-        effective_keys = _shared_numeric_keys(baseline_metrics, faulted_metrics)
-
+    effective_keys = _effective_keys(baseline_metrics, faulted_metrics, keys)
     if not effective_keys:
         return 0.0
     total = 0.0
@@ -307,12 +334,20 @@ def sensitivity_score(
     faulted_metrics: Mapping[str, Any],
     keys: Optional[Tuple[str, ...]] = None,
 ) -> float:
-    """Unambiguously-named alias of :func:`robustness_score` (Task D-008).
+    """Unambiguously-named alias of :func:`robustness_score` (Tasks D-008, D-012).
 
-    Returns the IDENTICAL value as :func:`robustness_score` — this is a *naming*
-    convenience so reports can say "sensitivity" (where higher means more
-    affected) without readers second-guessing the direction. It must never
-    diverge from :func:`robustness_score`. See :data:`ROBUSTNESS_DIRECTION`.
+    Returns the IDENTICAL value as :func:`robustness_score` — this is the
+    *primary report label* so papers and artifacts read "sensitivity_score"
+    (where **higher = more sensitive = less robust**) without readers
+    second-guessing the direction. It must never diverge from
+    :func:`robustness_score`. The direction is stated verbatim in
+    :data:`ROBUSTNESS_DIRECTION`, which contains the machine-readable phrase
+    ``"0.0 = max robustness"``.
+
+    Naming relationship: ``sensitivity_score`` is the report-level primary
+    label; ``robustness_score`` is the legacy code-level name and is recorded
+    in reports as ``legacyAlias: "robustness_score"`` for backward
+    compatibility.
 
     The optional ``keys`` parameter is passed through to :func:`robustness_score`
     unchanged (see that function's documentation).
@@ -330,15 +365,20 @@ def robustness_score_with_metadata(
     Returns::
 
         {
-            "metric": "robustness_score",
+            "metric": "sensitivity_score",         # D-012: primary report label
+            "legacyAlias": "robustness_score",      # backward-compatibility alias
             "value": float in [0, 1],
-            "sensitivityScore": float in [0, 1],  # == value, clearer name (D-008)
-            "direction": ROBUSTNESS_DIRECTION,     # explicit reading of the value
+            "sensitivityScore": float in [0, 1],   # == value, clearer name (D-008)
+            "direction": ROBUSTNESS_DIRECTION,     # contains "0.0 = max robustness"
             "baselineTraceHash": baseline_metrics.get("traceHash"),
             "faultedTraceHash":  faulted_metrics.get("traceHash"),
-            "sharedKeys": [...],   # the numeric keys compared, sorted
+            "sharedKeys": [...],   # the numeric keys compared
             "metricKeys": [...],   # the pinned keys used, or None if dynamic
         }
+
+    In pinned mode (``keys`` not None), ``sharedKeys`` follows the order of the
+    supplied ``keys`` tuple (e.g. ``CORE_METRIC_KEYS`` order) — it is **not**
+    sorted. In dynamic mode (``keys`` is None) it is sorted.
 
     Deterministic: identical inputs -> identical dict. The ``sensitivityScore``
     and ``direction`` fields (Task D-008) are additive clarity only — ``value``
@@ -349,23 +389,11 @@ def robustness_score_with_metadata(
     returned dict records the pinned key list, making the report self-describing
     about which keys were used in the denominator.
     """
-    if keys is not None:
-        effective_keys: List[str] = []
-        for k in keys:
-            bv = baseline_metrics.get(k)
-            fv = faulted_metrics.get(k)
-            if bv is None or fv is None:
-                continue
-            if isinstance(bv, bool) or isinstance(fv, bool):
-                continue
-            if isinstance(bv, (int, float)) and isinstance(fv, (int, float)):
-                effective_keys.append(k)
-    else:
-        effective_keys = _shared_numeric_keys(baseline_metrics, faulted_metrics)
-
+    effective_keys = _effective_keys(baseline_metrics, faulted_metrics, keys)
     value = robustness_score(baseline_metrics, faulted_metrics, keys=keys)
     return {
-        "metric": "robustness_score",
+        "metric": "sensitivity_score",
+        "legacyAlias": "robustness_score",
         "value": value,
         "sensitivityScore": value,
         "direction": ROBUSTNESS_DIRECTION,

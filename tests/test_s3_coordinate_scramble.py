@@ -215,6 +215,45 @@ def test_s3_replay_identical_report_hash():
     assert r1["scramblePermutationHash"] == r2["scramblePermutationHash"]
 
 
+def test_s3_sensitivity_naming_fields():
+    """D-012: S3 report carries sensitivity_score primary label + legacy alias.
+
+    The direction note must contain '0.0 = max robustness' and the per-row
+    label must be sensitivity_score with legacyAlias: scramble_shift.
+    """
+    report = run_s3_coordinate_scramble(dry_run=False, **_KW)
+
+    # Section-level: new sensitivity naming fields.
+    assert report["scrambleShiftMetric"] == "sensitivity_score", (
+        f"S3 report scrambleShiftMetric must be 'sensitivity_score', "
+        f"got {report.get('scrambleShiftMetric')!r}"
+    )
+    assert report["scrambleShiftLegacyAlias"] == "scramble_shift", (
+        f"S3 report scrambleShiftLegacyAlias must be 'scramble_shift', "
+        f"got {report.get('scrambleShiftLegacyAlias')!r}"
+    )
+    assert "0.0 = max robustness" in report["scrambleShiftDirection"], (
+        f"S3 scrambleShiftDirection must contain '0.0 = max robustness', "
+        f"got {report.get('scrambleShiftDirection')!r}"
+    )
+
+    # Per-row: primary label + legacy alias + equal values.
+    for row in report["table"]:
+        assert "sensitivity_score" in row, (
+            f"S3 row for policy={row.get('policy')} missing sensitivity_score"
+        )
+        assert "scramble_shift" in row, (
+            f"S3 row for policy={row.get('policy')} missing legacy scramble_shift"
+        )
+        assert row["sensitivity_score"] == row["scramble_shift"], (
+            f"S3 sensitivity_score != scramble_shift for policy={row.get('policy')}"
+        )
+        assert row["legacyAlias"] == "scramble_shift", (
+            f"S3 row legacyAlias must be 'scramble_shift', "
+            f"got {row.get('legacyAlias')!r} (policy={row.get('policy')})"
+        )
+
+
 def test_s3_no_forbidden_fields_in_report():
     report = run_s3_coordinate_scramble(dry_run=False, **_KW)
 

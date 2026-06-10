@@ -146,8 +146,12 @@ def utility_per_leakage(
     """Descriptive utility/leakage trade-off ratio for one policy (D-011).
 
     ``utility_per_leakage = mean_utility / max(leakage, floor)`` where
-    ``mean_utility`` is the mean ``coordinate_coverage`` over the policy's
-    seed-aligned E3 runs and ``leakage`` is its :func:`leakage_proxy` value.
+    ``mean_utility`` is e.g. the mean ``coordinate_coverage`` over the
+    policy's per-probe traces (the caller supplies any ``[0,1]``-bounded
+    utility aggregate) and ``leakage`` is its :func:`leakage_proxy` value.
+    Note: E3 pools per-probe traces at ONE base seed — there are no multiple
+    seed-aligned runs to average; the numerator is the per-probe trace mean
+    over the probe family at that base seed.
     Both numerator and denominator inputs are clamped into ``[0.0, 1.0]``
     before the ratio; the denominator is then floored at
     :data:`LEAKAGE_RATIO_FLOOR` (default ``0.05``) so a near-zero leakage proxy
