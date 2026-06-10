@@ -62,7 +62,10 @@ __all__ = [
     "compute_all_with_oracle",
     "strategy_sensitivity",
     "regret_to_oracle",
+    "regret_to_oracle_for",
+    "OBJECTIVE_ACHIEVERS",
     "oracle_reference_from_objectives",
+    "coordinate_cell",
     "METRIC_KEYS",
     "COORDINATE_GRID_BINS",
     "REDUNDANCY_NEAR_DUP_EPS",
@@ -85,6 +88,25 @@ METRIC_KEYS = (
 # Number of bins per coordinate dimension used to discretize the coordinate
 # space for :func:`coordinate_coverage`. Deterministic, fixed constant.
 COORDINATE_GRID_BINS = 8
+
+
+def coordinate_cell(vec, bins: int = COORDINATE_GRID_BINS) -> tuple:
+    """Map a ``coordinateContribution`` vector to its uniform-grid cell.
+
+    Each component is clamped to ``[0, 1]`` and binned into one of ``bins`` bins
+    (the ``1.0`` edge maps into the last bin). Returns the per-dimension bin-index
+    tuple — the single source of truth for the coordinate discretization shared by
+    :func:`coordinate_coverage`, the C-008 diversity-regularized contrast
+    baseline, and the C-010 coverage objective. Deterministic.
+    """
+    cell = []
+    for component in vec:
+        c = _clamp01(float(component))
+        idx = int(c * bins)
+        if idx >= bins:  # c == 1.0 edge maps into the last bin
+            idx = bins - 1
+        cell.append(idx)
+    return tuple(cell)
 
 # L2 distance below which two coordinate-contribution vectors are treated as
 # near-duplicates in :func:`redundancy_rate`.
@@ -185,18 +207,7 @@ def coordinate_coverage(trace) -> float:
     if n_rounds == 0:
         return 0.0
 
-    bins = COORDINATE_GRID_BINS
-    cells = set()
-    for vec in vectors:
-        cell = []
-        for component in vec:
-            c = _clamp01(component)
-            idx = int(c * bins)
-            if idx >= bins:  # c == 1.0 edge maps into the last bin
-                idx = bins - 1
-            cell.append(idx)
-        cells.add(tuple(cell))
-
+    cells = {coordinate_cell(vec) for vec in vectors}
     return _clamp01(len(cells) / n_rounds)
 
 
@@ -703,6 +714,103 @@ def regret_to_oracle(trace, oracle_ref: Sequence[float]) -> float:
         value,
     )
     return value
+
+
+def _achieved_coverage_gain(trace) -> List[float]:
+    """Per-round achieved objective = coordinate-COVERAGE gain of the round.
+
+    The objective the C-010 ``ORACLE_COVERAGE`` oracle maximizes: a round scores
+    ``1.0`` when its selected card lands in a coordinate-grid cell not visited by
+    any earlier round, else ``0.0`` (it added no new coverage). This is the
+    per-round marginal contribution to :func:`coordinate_coverage`. Pure
+    deterministic function of the observable trace; aligned with ``trace.rounds()``.
+    """
+    gains: List[float] = []
+    visited: set = set()
+    for record in trace.rounds():
+        cc = record.get("coordinateContribution")
+        if not cc:
+            gains.append(0.0)
+            continue
+        cell = coordinate_cell(cc)
+        gains.append(0.0 if cell in visited else 1.0)
+        visited.add(cell)
+    return gains
+
+
+def _achieved_diversity_gain(trace) -> List[float]:
+    """Per-round achieved objective = complexity-band DIVERSITY gain of the round.
+
+    The objective the C-010 ``ORACLE_DIVERSITY`` oracle maximizes: a round scores
+    ``1.0 / (1.0 + prior_count)`` where ``prior_count`` is how many earlier rounds
+    already used the round's ``complexityBand`` — so a fresh/rare band scores high
+    and a repeated band scores low. This rewards spreading the complexity-band
+    distribution (the quantity :func:`artifact_diversity` measures). Pure
+    deterministic function of the observable trace; aligned with ``trace.rounds()``.
+    """
+    gains: List[float] = []
+    counts: Dict[Any, int] = {}
+    for record in trace.rounds():
+        band = record.get("complexityBand")
+        prior = counts.get(band, 0)
+        gains.append(1.0 / (1.0 + prior))
+        counts[band] = prior + 1
+    return gains
+
+
+# Registry of per-round achieved-objective functions, keyed by the OBJECTIVE name
+# the C-010 oracle variants optimize. ``COORD_NOVELTY`` is the C-007 default.
+OBJECTIVE_ACHIEVERS = {
+    "COORD_NOVELTY": _achieved_coordinate_novelty,
+    "COVERAGE_GAIN": _achieved_coverage_gain,
+    "DIVERSITY_GAIN": _achieved_diversity_gain,
+}
+
+
+def regret_to_oracle_for(
+    trace, oracle_ref: Sequence[float], objective_key: str = "COORD_NOVELTY"
+) -> float:
+    """Objective-specific regret: shortfall of the trace vs. an oracle reference.
+
+    Generalizes :func:`regret_to_oracle` to any objective in
+    :data:`OBJECTIVE_ACHIEVERS` (Task C-010). The achieved per-round objective is
+    computed by that objective's achiever; ``oracle_ref`` must be the matching
+    objective's per-round oracle reference (e.g. the ``ORACLE_COVERAGE`` oracle's
+    per-round ``COVERAGE_GAIN``). The regret is the same normalized one-sided mean
+    shortfall as :func:`regret_to_oracle`::
+
+        mean_i( clip(oracle_i - achieved_i, 0, None) ) / REGRET_SCALE
+
+    clamped to ``[0, 1]``. The oracle is objective-specific, NOT a universal
+    utility upper bound: a coverage oracle bounds coverage gain, a diversity
+    oracle bounds diversity gain. System-level metric over the controlled testbed;
+    no user/real-world claim. Deterministic.
+
+    :raises ValueError: (Korean message) on an unknown ``objective_key``, a
+        ``None`` ``oracle_ref``, or a length mismatch (never silently padded).
+    """
+    if objective_key not in OBJECTIVE_ACHIEVERS:
+        raise ValueError(
+            "regret_to_oracle_for: 알 수 없는 objective_key=%r (사용 가능: %s)"
+            % (objective_key, sorted(OBJECTIVE_ACHIEVERS))
+        )
+    achieved = OBJECTIVE_ACHIEVERS[objective_key](trace)
+    n = len(achieved)
+    if oracle_ref is None:
+        raise ValueError(
+            "regret_to_oracle_for: oracle_ref 가 None 입니다 (objective=%s, rounds=%d)"
+            % (objective_key, n)
+        )
+    ref = oracle_reference_from_objectives(list(oracle_ref))
+    if len(ref) != n:
+        raise ValueError(
+            "regret_to_oracle_for: oracle_ref 길이(%d)가 트레이스 라운드 수(%d)와 "
+            "일치하지 않습니다 (objective=%s)" % (len(ref), n, objective_key)
+        )
+    if n == 0:
+        return 0.0
+    shortfall = sum(max(ref[i] - achieved[i], 0.0) for i in range(n))
+    return _clamp01((shortfall / n) / REGRET_SCALE)
 
 
 def compute_all_with_oracle(

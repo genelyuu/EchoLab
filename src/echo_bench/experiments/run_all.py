@@ -12,10 +12,11 @@ Replayability notes in the index:
 
 - **E3** sets ``"replayable"`` from ``validate_replay``; source is recorded in
   ``"replayableSource"``.
-- **E1/E2** set ``"replayable": null`` — determinism is guaranteed by
-  construction (fixed seed → fixed trace), and replay is verified by the F-006
-  regression guard, not measured inline here.  See ``"replayableNote"`` for the
-  rationale.
+- **E1/E2** set ``"replayable"`` from each report's E-012 inline
+  ``replayAudit`` (``inline_replay_audit`` re-runs from config+seed and compares
+  the hash chain); ``"replayableSource": "inline_replay_audit"`` and
+  ``"firstDivergent"`` record the audit outcome. The F-006 regression guard
+  remains a second, independent check.
 
 GPU note: ``prefer_gpu`` is accepted and recorded in the index ``config`` only —
 it is NOT forwarded to any experiment runner (E1/E2/E3 are CPU trace producers
@@ -69,25 +70,26 @@ def run_all(
 
     entries: List[Dict[str, Any]] = []
 
-    _REPLAY_NOTE = (
-        "determinism-by-construction; replay verified by the F-006 regression guard, "
-        "not measured inline here"
-    )
-
     e1 = run_e1_horizon(base_seed=base_seed, n=n)
+    e1_audit = e1.get("replayAudit", {})
     entries.append({
         "experiment": "E1_HORIZON_SWEEP", "designVersion": "e1-design-1",
         "reportHash": e1["reportHash"], "packHash": e1["packHash"],
         "seedBatchId": e1["seedBatchId"],
-        "replayable": None, "replayableNote": _REPLAY_NOTE,
+        "replayable": bool(e1_audit.get("replayable")),
+        "replayableSource": "inline_replay_audit",
+        "firstDivergent": e1_audit.get("first_divergent"),
     })
 
     e2 = run_e2_policy(base_seed=base_seed, n=n)
+    e2_audit = e2.get("replayAudit", {})
     entries.append({
         "experiment": "E2_POLICY_UTILITY", "designVersion": "e2-design-1",
         "reportHash": e2["reportHash"], "packHash": e2["packHash"],
         "seedBatchId": e2["seedBatchId"],
-        "replayable": None, "replayableNote": _REPLAY_NOTE,
+        "replayable": bool(e2_audit.get("replayable")),
+        "replayableSource": "inline_replay_audit",
+        "firstDivergent": e2_audit.get("first_divergent"),
     })
 
     e3 = run_e3_audit(base_seed=base_seed)

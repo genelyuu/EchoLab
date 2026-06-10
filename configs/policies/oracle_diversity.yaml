@@ -1,0 +1,10 @@
+# ECHO-Bench ORACLE_STRATEGY — diversity objective variant (Task C-010).
+#
+# An OBJECTIVE-SPECIFIC oracle, NOT a universal utility upper bound. It ranks
+# candidate cards by complexity-band DIVERSITY gain (a fresh/rare band scores
+# high) and is the regret reference for the DIVERSITY_GAIN objective only. Reads
+# only observable card/trace fields; no probe, no synthetic user, no
+# user/persona/emotion signal.
+policy: ORACLE_STRATEGY
+k: 4
+objective: DIVERSITY_GAIN

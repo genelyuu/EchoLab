@@ -77,6 +77,7 @@ from echo_bench.metrics.leakage import (
 )
 from echo_bench.metrics.robustness import (
     FAULTS,
+    ROBUSTNESS_DIRECTION,
     robustness_score_with_metadata,
 )
 from echo_bench.metrics.utility import compute_all
@@ -384,6 +385,7 @@ def run_e3_audit(
                 "faultParams": FAULT_PARAMS[fault_name],
                 "faultedPoolSize": len(faulted_pool),
                 "robustness_score": score["value"],
+                "sensitivity_score": score["sensitivityScore"],
                 "baselineTraceHash": score["baselineTraceHash"],
                 "faultedTraceHash": score["faultedTraceHash"],
                 "sharedKeys": score["sharedKeys"],
@@ -398,12 +400,16 @@ def run_e3_audit(
 
     robustness_section = {
         "metric": "robustness_score",
+        "direction": ROBUSTNESS_DIRECTION,
         "policy": rob_name,
         "policyVersion": rob_policy_cls(dict(rob_cfg)).policy_version(),
         "note": (
             "Controlled, fully-specified fault transforms (FAULTS), NOT "
             "real-world distribution shift; system-level sensitivity over a "
-            "controlled testbed."
+            "controlled testbed. robustness_score is a SENSITIVITY magnitude "
+            "(equivalently surfaced as sensitivity_score): "
+            + ROBUSTNESS_DIRECTION
+            + "."
         ),
         "baselineTraceHash": baseline_trace.trace_hash(),
         "faults": fault_names,

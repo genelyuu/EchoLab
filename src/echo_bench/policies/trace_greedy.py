@@ -39,6 +39,7 @@ import yaml
 from echo_bench.cards.metrics import COMPLEXITY_BANDS
 from echo_bench.env.constraints import check_slate
 from echo_bench.logging import get_logger, log_ko
+from echo_bench.metrics.utility import coordinate_cell
 from echo_bench.policies.base import Policy
 from echo_bench.utils.hash import canonical_hash
 
@@ -48,7 +49,21 @@ _logger = get_logger(__name__)
 
 BAND_ORDER: tuple[str, ...] = tuple(name for name, _lo, _hi in COMPLEXITY_BANDS)
 
-DEFAULT_WEIGHTS = {"novelty": 1.0, "progression": 0.5, "redundancy": 1.0}
+# Per-card reward weights. The original three terms (novelty / progression /
+# in-slate redundancy) are kept; the C-009 redesign ADDS session-level terms that
+# fix the long-horizon coverage collapse: ``session_coverage`` rewards landing in
+# a coordinate-grid cell the trace has NOT visited, ``cell_repulsion`` penalizes
+# revisiting an already-visited cell (cross-round, not just in-slate), and
+# ``exploration`` is a small deterministic epsilon (seeded jitter) so the greedy
+# does not lock onto one neighborhood. All terms read OBSERVABLE trace fields only.
+DEFAULT_WEIGHTS = {
+    "novelty": 1.0,
+    "progression": 0.5,
+    "redundancy": 1.0,
+    "session_coverage": 2.0,
+    "cell_repulsion": 0.75,
+    "exploration": 0.1,
+}
 
 _BASES_CFG_PATH = (
     Path(__file__).resolve().parents[3] / "configs" / "basis" / "bases.yaml"
@@ -123,7 +138,11 @@ class TraceGreedyPolicy(Policy):
         config: Dict[str, Any] | None = None,
     ) -> List[Any]:
         """Return a constraint-satisfying slate by greedy trace-only scoring."""
-        effective = config if config is not None else self.config
+        # Merge: the round runner passes only ``{"k": k}`` to override the slate
+        # size, but the policy's own config (``weights``) must still apply during
+        # an episode — so self.config is the base and the call-time config
+        # overrides it (rather than replacing it wholesale).
+        effective = {**self.config, **(config or {})}
         k = int(effective["k"])
         weights = {**DEFAULT_WEIGHTS, **(effective.get("weights") or {})}
 
@@ -135,6 +154,16 @@ class TraceGreedyPolicy(Policy):
 
         centroid, max_band = self._trace_summary(trace)
         target_band_idx = min(max_band + 1, len(BAND_ORDER) - 1) if max_band >= 0 else 0
+
+        # Session-level coverage memory (C-009): how many prior rounds landed in
+        # each coordinate-grid cell. Reads only the observable
+        # ``coordinateContribution`` of prior rounds — no latent field.
+        visited_counts: Dict[tuple, int] = {}
+        for record in trace.rounds():
+            cc = record.get("coordinateContribution")
+            if cc:
+                cell = coordinate_cell(cc)
+                visited_counts[cell] = visited_counts.get(cell, 0) + 1
 
         # Seed material includes traceHash: the policy IS trace-driven, but the
         # RNG is used only for deterministic tiebreaks among equal scores.
@@ -176,15 +205,41 @@ class TraceGreedyPolicy(Policy):
             )
             return 1.0 / (1.0 + nearest)
 
+        def session_coverage_gain(card: Dict[str, Any]) -> float:
+            # Reward (C-009): 1.0 if the card's coordinate cell is NOT yet visited
+            # across the trace, else 0.0 — the marginal session coverage it adds.
+            cc = card.get("coordinateContribution")
+            if not cc:
+                return 0.0
+            return 0.0 if coordinate_cell(cc) in visited_counts else 1.0
+
+        def cell_repulsion(card: Dict[str, Any]) -> float:
+            # Penalty (C-009): how many prior rounds already sit in this card's
+            # cell — pushes selection away from over-visited neighborhoods.
+            cc = card.get("coordinateContribution")
+            if not cc:
+                return 0.0
+            return float(visited_counts.get(coordinate_cell(cc), 0))
+
         def components_for(card: Dict[str, Any], chosen: List[Dict[str, Any]]) -> Dict[str, float]:
             nov = weights["novelty"] * novelty(card)
             prog = weights["progression"] * progression(card)
             red = weights["redundancy"] * redundancy(card, chosen)
+            cov = weights["session_coverage"] * session_coverage_gain(card)
+            rep = weights["cell_repulsion"] * cell_repulsion(card)
+            # Deterministic epsilon exploration via the seeded tiebreak draw, so
+            # the greedy occasionally breaks out of its preferred neighborhood
+            # without using the global RNG or wall-clock.
+            exp = weights["exploration"] * tiebreak[card["cardId"]]
+            total = nov + prog - red + cov - rep + exp
             return {
                 "novelty": round(nov, 12),
                 "progression": round(prog, 12),
                 "redundancy": round(-red, 12),  # logged as a (negative) penalty
-                "total": round(nov + prog - red, 12),
+                "session_coverage": round(cov, 12),
+                "cell_repulsion": round(-rep, 12),  # logged as a (negative) penalty
+                "exploration": round(exp, 12),
+                "total": round(total, 12),
             }
 
         chosen: List[Dict[str, Any]] = []

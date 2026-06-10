@@ -111,18 +111,24 @@ _EXPECTED_POLICIES = {
     "TRACE_GREEDY",
     "TRACE_LIN_UCB",
     "PSEUDO_USER_MODEL",
+    # C-008 strengthened contrast-baseline variants (E-013).
+    "PSEUDO_USER_MODEL_DIVERSITY_REG",
+    "PSEUDO_USER_MODEL_SESSION_EMBEDDING",
     "ORACLE_STRATEGY",
+    # C-010 objective-specific oracle references (E-013).
+    "ORACLE_COVERAGE",
+    "ORACLE_DIVERSITY",
 }
 
 
-def test_e2_all_seven_policies_present_with_metrics():
+def test_e2_all_policies_present_with_metrics():
     report = run_e2_policy(dry_run=False, **_KW)
     table = report["table"]
 
-    # All 7 policies present, exactly once each.
+    # Every policy present, exactly once each (now 11 after E-013).
     assert {row["policy"] for row in table} == set(E2_POLICIES)
     assert set(E2_POLICIES) == _EXPECTED_POLICIES
-    assert len(table) == len(E2_POLICIES) == 7
+    assert len(table) == len(E2_POLICIES) == 11
 
     for row in table:
         # Every policy row carries the four trace-only metrics +
@@ -132,6 +138,32 @@ def test_e2_all_seven_policies_present_with_metrics():
             assert 0.0 <= row[key] <= 1.0
         assert "strategy_sensitivity" in row
         assert "regret_to_oracle" in row
+
+
+def test_e2_strengthened_baselines_are_not_straw_men():
+    # E-013 acceptance: the strengthened contrast variants keep artifact_diversity
+    # strictly positive AND at least as high as the BASIC contrast baseline (which
+    # collapses toward 0 on the full pool) — so the contrast is fair, not a straw
+    # man. All three pseudo rows stay flagged as contrast baselines.
+    report = run_e2_policy(dry_run=False, **_KW)
+    rows = {r["policy"]: r for r in report["table"]}
+    basic_div = rows["PSEUDO_USER_MODEL"]["artifact_diversity"]
+
+    for variant in (
+        "PSEUDO_USER_MODEL_DIVERSITY_REG",
+        "PSEUDO_USER_MODEL_SESSION_EMBEDDING",
+    ):
+        assert rows[variant]["artifact_diversity"] > 0.0, variant
+        assert rows[variant]["artifact_diversity"] >= basic_div - 1e-9, variant
+        assert rows[variant]["isContrastBaseline"] is True
+        assert rows[variant]["traceOnly"] is False
+
+    # Objective-specific oracle rows are present, flagged as oracles, and the
+    # comparison block scores TRACE_GREEDY against the strengthened baselines.
+    for oracle in ("ORACLE_COVERAGE", "ORACLE_DIVERSITY"):
+        assert rows[oracle]["isOracle"] is True
+    others = set(report["comparisons"]["others"])
+    assert {"PSEUDO_USER_MODEL_DIVERSITY_REG", "ORACLE_COVERAGE"} <= others
 
 
 def test_e2_regret_to_oracle_present_and_bounded():
@@ -165,12 +197,19 @@ def test_e2_contrast_baseline_isolated():
     assert baseline_row["traceOnly"] is False
     assert report["contrastBaselinePolicy"] == CONTRAST_BASELINE_POLICY
 
-    # Every other (non-baseline, non-oracle) policy stays trace-only.
+    # Every contrast-baseline-family / oracle-family row is flagged non-trace-only;
+    # every other policy stays trace-only and not a contrast baseline.
+    from echo_bench.experiments.e2_policy import (
+        CONTRAST_BASELINE_POLICIES,
+        ORACLE_POLICIES,
+    )
+
     for name, row in by_policy.items():
-        if name in (CONTRAST_BASELINE_POLICY, ORACLE_POLICY):
+        if name in CONTRAST_BASELINE_POLICIES or name in ORACLE_POLICIES:
+            assert row["traceOnly"] is False, name
             continue
-        assert row["traceOnly"] is True
-        assert row["isContrastBaseline"] is False
+        assert row["traceOnly"] is True, name
+        assert row["isContrastBaseline"] is False, name
 
 
 def test_e2_strategy_sensitivity_still_present():

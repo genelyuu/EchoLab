@@ -87,7 +87,8 @@ from echo_bench.env.round_runner import run_episode
 from echo_bench.env.seed_batch import derive_child_seeds, seed_batch_id
 from echo_bench.logging import get_logger, log_ko
 from echo_bench.logging.repro_pack import ReproducibilityPack
-from echo_bench.metrics.robustness import robustness_score
+from echo_bench.metrics.aggregate import aggregate_values
+from echo_bench.metrics.robustness import ROBUSTNESS_DIRECTION, robustness_score
 from echo_bench.metrics.utility import METRIC_KEYS, compute_all
 from echo_bench.policies.random import RandomPolicy
 from echo_bench.policies.trace_greedy import TraceGreedyPolicy
@@ -210,7 +211,7 @@ def scramble_coordinates(
 
 def run_s3_coordinate_scramble(
     base_seed: int = 42,
-    n: int = 4,
+    n: int = 10,
     H: int | None = None,
     k: int = 4,
     pool_size: int = 64,
@@ -385,6 +386,9 @@ def run_s3_coordinate_scramble(
             "n": n,
             "scramble_shift": mean_shift,
             "round0_selection_divergence": round0_divergence,
+            "stats": {
+                "scramble_shift": aggregate_values(per_seed_shifts, "scramble_shift")
+            },
             "baselineTraceHashes": cell_baseline_hashes,
             "scrambledTraceHashes": cell_scrambled_hashes,
         }
@@ -458,6 +462,10 @@ def run_s3_coordinate_scramble(
         ),
         "config": run_params,
         "metricKeys": list(S3_METRIC_KEYS),
+        "scrambleShiftDirection": (
+            "scramble_shift is the mean full-episode baseline-vs-scrambled "
+            "sensitivity magnitude (robustness_score units): " + ROBUSTNESS_DIRECTION
+        ),
         "seedBatchId": exp_seed_batch_id,
         "perPolicySeedBatchIds": seed_batch_ids,
         "scramblePermutation": permutation,
@@ -521,7 +529,7 @@ def main() -> None:
         description="ECHO-Bench S3 coordinate-scramble runner.",
     )
     parser.add_argument("--seed", type=int, default=42, help="base seed")
-    parser.add_argument("--n", type=int, default=4, help="child seeds per policy")
+    parser.add_argument("--n", type=int, default=10, help="child seeds per policy")
     parser.add_argument(
         "--H", type=int, default=None, help="horizon (default: config default)"
     )

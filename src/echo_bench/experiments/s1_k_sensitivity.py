@@ -73,6 +73,7 @@ from echo_bench.env.round_runner import run_episode
 from echo_bench.env.seed_batch import derive_child_seeds, seed_batch_id
 from echo_bench.logging import get_logger, log_ko
 from echo_bench.logging.repro_pack import ReproducibilityPack
+from echo_bench.metrics.aggregate import aggregate_metric_dicts
 from echo_bench.metrics.utility import METRIC_KEYS, compute_all
 from echo_bench.policies.fixed_balanced import FixedBalancedPolicy
 from echo_bench.policies.random import RandomPolicy
@@ -157,7 +158,7 @@ def _required_distinct_bases(k: int) -> int:
 
 def run_s1_k_sensitivity(
     base_seed: int = 42,
-    n: int = 2,
+    n: int = 10,
     H: int | None = None,
     pool_size: int = 64,
     dry_run: bool = False,
@@ -290,6 +291,10 @@ def run_s1_k_sensitivity(
             }
             for key in S1_METRIC_KEYS:
                 row[key] = _mean([m[key] for m in per_seed_metrics])
+            # Seed-batch aggregates (mean ± bootstrap CI). Usable when
+            # n >= MIN_SUFFICIENT_N; the flat per-metric means above are kept for
+            # back-compat readers.
+            row["stats"] = aggregate_metric_dicts(per_seed_metrics, S1_METRIC_KEYS)
             table.append(row)
 
             log_ko(
@@ -389,7 +394,7 @@ def main() -> None:
     )
     parser.add_argument("--seed", type=int, default=42, help="base seed")
     parser.add_argument(
-        "--n", type=int, default=2, help="child seeds per (k, policy) cell"
+        "--n", type=int, default=10, help="child seeds per (k, policy) cell"
     )
     parser.add_argument(
         "--H", type=int, default=None, help="horizon (default: config default)"

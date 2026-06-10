@@ -161,3 +161,75 @@ def test_raises_when_pool_smaller_than_k() -> None:
     policy = PseudoUserModelPolicy({"k": 4})
     with pytest.raises(ValueError):
         policy.select(pool, TraceState(), 7)
+
+
+# --- C-008: stronger contrast-baseline variants -----------------------------
+
+from echo_bench.archive.builder import build_archive  # noqa: E402
+from echo_bench.basis.schema import load_bases  # noqa: E402
+from echo_bench.env.round_runner import run_episode  # noqa: E402
+from echo_bench.metrics.utility import artifact_diversity  # noqa: E402
+from echo_bench.policies.pseudo_user_model import VARIANTS  # noqa: E402
+
+import yaml  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+_REPO = Path(__file__).resolve().parents[1]
+
+
+def _real_pool(n: int = 32):
+    bases = load_bases(_REPO / "configs" / "basis" / "bases.yaml")
+    with open(_REPO / "configs" / "archive" / "archive.yaml", encoding="utf-8") as fh:
+        archive_cfg = yaml.safe_load(fh)
+    archive = build_archive(bases, archive_cfg, 42)
+    return archive["cards"][:n], bases
+
+
+def test_variants_registered():
+    assert set(VARIANTS) == {"BASIC", "DIVERSITY_REG", "SESSION_EMBEDDING"}
+
+
+def test_basic_variant_matches_default():
+    pool = _make_pool()
+    default = PseudoUserModelPolicy({"k": 4}).select(pool, TraceState(), 7)
+    basic = PseudoUserModelPolicy({"k": 4, "variant": "BASIC"}).select(
+        pool, TraceState(), 7
+    )
+    assert default == basic
+
+
+def test_basic_variant_collapses_but_reg_variants_do_not():
+    # The BASIC static-latent baseline collapses artifact_diversity toward 0;
+    # the regularized variants must keep it strictly positive (no straw man).
+    pool, bases = _real_pool()
+    basic = PseudoUserModelPolicy({"k": 4, "variant": "BASIC"})
+    basic_div = artifact_diversity(run_episode(pool, basic, 7, 12, 4, bases))
+    for variant in ("DIVERSITY_REG", "SESSION_EMBEDDING"):
+        policy = PseudoUserModelPolicy({"k": 4, "variant": variant})
+        div = artifact_diversity(run_episode(pool, policy, 7, 12, 4, bases))
+        assert div > 0.0, variant
+        assert div > basic_div, variant
+
+
+def test_variants_are_deterministic():
+    pool = _make_pool(24)
+    for variant in VARIANTS:
+        a = PseudoUserModelPolicy({"k": 4, "variant": variant}).select(
+            pool, TraceState(), 7
+        )
+        b = PseudoUserModelPolicy({"k": 4, "variant": variant}).select(
+            pool, TraceState(), 7
+        )
+        assert a == b, variant
+
+
+def test_variant_changes_policy_version():
+    base = PseudoUserModelPolicy({"k": 4, "variant": "BASIC"}).policy_version()
+    reg = PseudoUserModelPolicy({"k": 4, "variant": "DIVERSITY_REG"}).policy_version()
+    assert base != reg
+
+
+def test_unknown_variant_raises():
+    pool = _make_pool()
+    with pytest.raises(ValueError):
+        PseudoUserModelPolicy({"k": 4, "variant": "NOPE"}).select(pool, TraceState(), 7)

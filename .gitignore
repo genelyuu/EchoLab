@@ -19,3 +19,12 @@ outputs/artifacts/*
 
 # OS
 .DS_Store
+.gstack/
+
+# AI assistant tooling (not part of the published project)
+.claude/
+CLAUDE.md
+
+# Non-code: design docs & implementation TODOs (code-only repo by agreement)
+docs/
+tasks/

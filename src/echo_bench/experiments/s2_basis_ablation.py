@@ -67,6 +67,7 @@ from echo_bench.env.round_runner import run_episode
 from echo_bench.env.seed_batch import derive_child_seeds, seed_batch_id
 from echo_bench.logging import get_logger, log_ko
 from echo_bench.logging.repro_pack import ReproducibilityPack
+from echo_bench.metrics.aggregate import aggregate_metric_dicts
 from echo_bench.metrics.utility import METRIC_KEYS, compute_all
 from echo_bench.policies.trace_greedy import TraceGreedyPolicy
 from echo_bench.utils.hash import canonical_hash
@@ -156,10 +157,10 @@ def _ablation_subsets() -> List[tuple[str, ...]]:
 
 def run_s2_basis_ablation(
     base_seed: int = 42,
-    n: int = 2,
+    n: int = 10,
     H: int | None = None,
     k: int = 4,
-    pool_size: int = 48,
+    pool_size: int = 64,
     dry_run: bool = False,
 ) -> dict:
     """Run the S2 basis-ablation study and return a fully hashed report.
@@ -175,10 +176,12 @@ def run_s2_basis_ablation(
         n: number of child seeds (episodes) per arm.
         H: horizon (rounds); defaults to the horizon config's default when None.
         k: slate size (S2 fixes ``k=4``; its rule needs >= 3 bases per slate).
-        pool_size: candidate pool size per arm. Defaults to 48: a drop-one
-            3-subset cannot always fill 64 cards from the configured candidate
-            budget (the most-constrained arm yields ~55), so 48 keeps every
-            feasible arm fillable; raise it only if the archive budget allows.
+        pool_size: REQUESTED candidate pool size per arm (a ceiling). The runner
+            caps it to the smallest arm's archive so every arm shares one
+            ``effectivePoolSize`` (Task E-011) — dropping a basis shrinks the
+            archive (the most-constrained arm yields ~55), so the constant
+            effective size is ``min(pool_size, smallest_arm_cards)``. Defaults
+            to 64; the recorded ``effectivePoolSize`` is what was actually used.
         dry_run: when true, validate config + compute per-arm archive/pool hashes
             and the planned/skipped arms, write no files, run no seed batch.
 
@@ -214,12 +217,34 @@ def run_s2_basis_ablation(
                 }
             )
 
+    # 2a. Build the per-arm archives (fresh per arm). Archives are independent of
+    #     pool_size, so build them first to learn each arm's available card count.
+    arm_archives: Dict[str, Dict[str, Any]] = {}
+    for subset in feasible_arms:
+        arm = _arm_id(subset)
+        arm_bases = {b: bases[b] for b in subset if b in bases}
+        arm_archives[arm] = build_archive(arm_bases, archive_cfg, base_seed)
+
+    # 2b. Hold the candidate-pool size CONSTANT across arms (Task E-011): cap the
+    #     requested pool_size to the smallest arm's archive. Dropping a basis
+    #     shrinks the archive, so a fixed pool_size could otherwise differ per arm
+    #     (or fail outright) — confounding basis importance with pool size. Using
+    #     the largest size every arm can supply keeps the ablation apples-to-apples.
+    min_arm_cards = min(len(a["cards"]) for a in arm_archives.values())
+    effective_pool_size = min(int(pool_size), int(min_arm_cards))
+    if effective_pool_size < int(k):
+        raise ValueError(
+            f"S2 실행: 모든 arm 공통 풀 크기 {effective_pool_size} 가 k={k} 보다 "
+            f"작습니다 (최소 아카이브 카드 수={min_arm_cards})"
+        )
+
     run_params = {
         "base_seed": int(base_seed),
         "n": int(n),
         "H": int(H),
         "k": int(k),
         "pool_size": int(pool_size),
+        "effectivePoolSize": int(effective_pool_size),
         "policy": policy_name,
         "allBases": list(ALL_BASES),
         "requiredDistinctBases": min_required,
@@ -234,21 +259,12 @@ def run_s2_basis_ablation(
         }
     )
 
-    # 2. Build the per-arm archives (fresh per arm) and pools.
-    arm_archives: Dict[str, Dict[str, Any]] = {}
+    # 2c. Slice each arm's pool to the constant effective size.
     arm_pools: Dict[str, List[Dict[str, Any]]] = {}
     arm_pool_hashes: Dict[str, str] = {}
     for subset in feasible_arms:
         arm = _arm_id(subset)
-        arm_bases = {b: bases[b] for b in subset if b in bases}
-        archive = build_archive(arm_bases, archive_cfg, base_seed)
-        pool = archive["cards"][:pool_size]
-        if len(pool) < pool_size:
-            raise ValueError(
-                f"S2 실행: arm={arm} 아카이브 카드 수 {len(pool)} 가 "
-                f"pool_size={pool_size} 보다 작습니다"
-            )
-        arm_archives[arm] = archive
+        pool = arm_archives[arm]["cards"][:effective_pool_size]
         arm_pools[arm] = pool
         arm_pool_hashes[arm] = canonical_hash([c["cardId"] for c in pool])
 
@@ -278,6 +294,7 @@ def run_s2_basis_ablation(
             f"arms={[a['arm'] for a in plan_arms]}, "
             f"skipped={[s['arm'] for s in skipped]}, "
             f"n={n}, H={H}, k={k}, pool_size={pool_size}, "
+            f"effectivePoolSize={effective_pool_size}, "
             f"configHash={config_hash[:12]} (파일 미작성)",
         )
         return {
@@ -328,6 +345,7 @@ def run_s2_basis_ablation(
             "policyVersion": policy.policy_version(),
             "seedBatchId": batch_id,
             "n": n,
+            "poolSize": len(pool),
             "archiveHash": archive_hash,
             "poolHash": arm_pool_hashes[arm],
             "coverageReportHash": cov["reportHash"],
@@ -339,6 +357,8 @@ def run_s2_basis_ablation(
         }
         for key in S2_METRIC_KEYS:
             row[key] = _mean([m[key] for m in per_seed_metrics])
+        # Seed-batch aggregates (mean ± bootstrap CI); usable at n >= 3.
+        row["stats"] = aggregate_metric_dicts(per_seed_metrics, S2_METRIC_KEYS)
         table.append(row)
 
         log_ko(
@@ -449,13 +469,13 @@ def main() -> None:
         description="ECHO-Bench S2 basis-ablation runner.",
     )
     parser.add_argument("--seed", type=int, default=42, help="base seed")
-    parser.add_argument("--n", type=int, default=2, help="child seeds per arm")
+    parser.add_argument("--n", type=int, default=10, help="child seeds per arm")
     parser.add_argument(
         "--H", type=int, default=None, help="horizon (default: config default)"
     )
     parser.add_argument("--k", type=int, default=4, help="slate size")
     parser.add_argument(
-        "--pool-size", type=int, default=48, help="candidate pool size per arm"
+        "--pool-size", type=int, default=64, help="requested pool ceiling per arm"
     )
     parser.add_argument(
         "--dry-run",

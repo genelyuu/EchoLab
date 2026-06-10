@@ -62,12 +62,22 @@ __all__ = [
     "salience_perturb",
     "FAULTS",
     "robustness_score",
+    "sensitivity_score",
     "robustness_score_with_metadata",
+    "ROBUSTNESS_DIRECTION",
     "SALIENCE_SCORE_MIN",
     "SALIENCE_SCORE_MAX",
 ]
 
 _logger = get_logger(__name__)
+
+# Explicit direction note (Task D-008). The score is a SENSITIVITY magnitude:
+# larger means the fault moved the metrics more. Surfacing this verbatim in
+# reports removes the "is high good or bad?" ambiguity.
+ROBUSTNESS_DIRECTION = (
+    "0.0 = fault changed no shared metric = maximal robustness; "
+    "higher = more sensitive = less robust"
+)
 
 # Bounds the salience channel is clamped to after perturbation, matching the
 # card schema's salience range ([0, 1]).
@@ -258,6 +268,19 @@ def robustness_score(
     return value
 
 
+def sensitivity_score(
+    baseline_metrics: Mapping[str, Any], faulted_metrics: Mapping[str, Any]
+) -> float:
+    """Unambiguously-named alias of :func:`robustness_score` (Task D-008).
+
+    Returns the IDENTICAL value as :func:`robustness_score` — this is a *naming*
+    convenience so reports can say "sensitivity" (where higher means more
+    affected) without readers second-guessing the direction. It must never
+    diverge from :func:`robustness_score`. See :data:`ROBUSTNESS_DIRECTION`.
+    """
+    return robustness_score(baseline_metrics, faulted_metrics)
+
+
 def robustness_score_with_metadata(
     baseline_metrics: Mapping[str, Any], faulted_metrics: Mapping[str, Any]
 ) -> Dict[str, Any]:
@@ -268,17 +291,24 @@ def robustness_score_with_metadata(
         {
             "metric": "robustness_score",
             "value": float in [0, 1],
+            "sensitivityScore": float in [0, 1],  # == value, clearer name (D-008)
+            "direction": ROBUSTNESS_DIRECTION,     # explicit reading of the value
             "baselineTraceHash": baseline_metrics.get("traceHash"),
             "faultedTraceHash":  faulted_metrics.get("traceHash"),
             "sharedKeys": [...],   # the numeric keys compared, sorted
         }
 
-    Deterministic: identical inputs -> identical dict.
+    Deterministic: identical inputs -> identical dict. The ``sensitivityScore``
+    and ``direction`` fields (Task D-008) are additive clarity only — ``value``
+    is unchanged.
     """
     keys = _shared_numeric_keys(baseline_metrics, faulted_metrics)
+    value = robustness_score(baseline_metrics, faulted_metrics)
     return {
         "metric": "robustness_score",
-        "value": robustness_score(baseline_metrics, faulted_metrics),
+        "value": value,
+        "sensitivityScore": value,
+        "direction": ROBUSTNESS_DIRECTION,
         "baselineTraceHash": baseline_metrics.get("traceHash"),
         "faultedTraceHash": faulted_metrics.get("traceHash"),
         "sharedKeys": keys,

@@ -71,7 +71,9 @@ from echo_bench.env.round_runner import run_episode
 from echo_bench.env.seed_batch import derive_child_seeds, seed_batch_id
 from echo_bench.logging import get_logger, log_ko
 from echo_bench.logging.repro_pack import ReproducibilityPack
+from echo_bench.logging.replay_validator import inline_replay_audit
 from echo_bench.metrics.aggregate import aggregate_metric_dicts
+from echo_bench.metrics.compare import compare_reference_to_others
 from echo_bench.metrics.utility import (
     METRIC_KEYS,
     _achieved_coordinate_novelty,
@@ -95,6 +97,9 @@ __all__ = [
     "E2_METRIC_KEYS",
     "CONTRAST_BASELINE_POLICY",
     "ORACLE_POLICY",
+    "CONTRAST_BASELINE_POLICIES",
+    "ORACLE_POLICIES",
+    "COMPARISON_REFERENCE_POLICY",
 ]
 
 _logger = get_logger(__name__)
@@ -113,13 +118,41 @@ E2_POLICIES = {
     "TRACE_GREEDY": (TraceGreedyPolicy, "trace_greedy.yaml"),
     "TRACE_LIN_UCB": (TraceLinUcbPolicy, "trace_lin_ucb.yaml"),
     "PSEUDO_USER_MODEL": (PseudoUserModelPolicy, "pseudo_user_model.yaml"),
+    # C-008 strengthened contrast-baseline variants (no longer a straw man).
+    "PSEUDO_USER_MODEL_DIVERSITY_REG": (
+        PseudoUserModelPolicy,
+        "pseudo_user_model_diversity_reg.yaml",
+    ),
+    "PSEUDO_USER_MODEL_SESSION_EMBEDDING": (
+        PseudoUserModelPolicy,
+        "pseudo_user_model_session_embedding.yaml",
+    ),
     "ORACLE_STRATEGY": (OracleStrategyPolicy, "oracle_strategy.yaml"),
+    # C-010 objective-specific oracle references (oracle is NOT a universal upper
+    # bound; each is the reference for its own objective).
+    "ORACLE_COVERAGE": (OracleStrategyPolicy, "oracle_coverage.yaml"),
+    "ORACLE_DIVERSITY": (OracleStrategyPolicy, "oracle_diversity.yaml"),
 }
 
-# The isolated contrast baseline (the only latent-vector policy) and the oracle
-# regret reference. Named so the report can flag/explain them explicitly.
+# The coord-novelty oracle that defines the canonical ``regret_to_oracle``
+# reference, and the original isolated contrast baseline. Kept singular because
+# the per-seed regret reference is derived specifically from ORACLE_STRATEGY.
 CONTRAST_BASELINE_POLICY = "PSEUDO_USER_MODEL"
 ORACLE_POLICY = "ORACLE_STRATEGY"
+
+# Families flagged in the report. The contrast-baseline family (all latent-vector
+# policies) and the oracle family (all probe/objective-reference policies) are
+# NOT trace-only; their rows are flagged so they are never read as trace-only.
+CONTRAST_BASELINE_POLICIES = {
+    "PSEUDO_USER_MODEL",
+    "PSEUDO_USER_MODEL_DIVERSITY_REG",
+    "PSEUDO_USER_MODEL_SESSION_EMBEDDING",
+}
+ORACLE_POLICIES = {"ORACLE_STRATEGY", "ORACLE_COVERAGE", "ORACLE_DIVERSITY"}
+
+# The reference policy the D-007 paired comparison statistics are computed for
+# (TRACE_GREEDY vs every other policy on each reported metric).
+COMPARISON_REFERENCE_POLICY = "TRACE_GREEDY"
 
 # The reported metric keys: the four trace-only metrics + strategy_sensitivity +
 # regret_to_oracle.
@@ -164,6 +197,7 @@ def run_e2_policy(
     pool_size: int = 64,
     n: int = 10,
     dry_run: bool = False,
+    replay_validate: bool = True,
 ) -> dict:
     """Run the E2 policy-utility comparison and return a fully hashed report.
 
@@ -273,6 +307,9 @@ def run_e2_policy(
     all_trace_hashes: List[str] = []
     all_slate_hashes: List[str] = []
     seed_batch_ids: Dict[str, str] = {}
+    # Per-policy per-seed metric vectors, aligned by the shared child-seed batch,
+    # retained for the paired policy-comparison statistics (Task D-007).
+    per_seed_by_policy: Dict[str, List[Dict[str, Any]]] = {}
 
     for name in sorted(E2_POLICIES):
         cls, _cfg_file = E2_POLICIES[name]
@@ -281,11 +318,18 @@ def run_e2_policy(
         batch_id = seed_batch_id(base_seed, n, policy.policy_version(), H)
         seed_batch_ids[name] = batch_id
 
-        is_contrast_baseline = name == CONTRAST_BASELINE_POLICY
-        is_oracle = name == ORACLE_POLICY
+        is_contrast_baseline = name in CONTRAST_BASELINE_POLICIES
+        is_oracle = name in ORACLE_POLICIES
+        # Only the coord-novelty ORACLE_STRATEGY defines the canonical
+        # regret_to_oracle reference; the objective-specific oracles
+        # (ORACLE_COVERAGE/ORACLE_DIVERSITY) are evaluated AGAINST it like any
+        # other row (their coord-novelty regret is expected > 0 — they optimize a
+        # different objective, underscoring that the oracle is objective-specific).
+        is_reference_oracle = name == ORACLE_POLICY
         # Trace-only iff it consumes no latent/oracle signal. The contrast
-        # baseline (latent vector) and the oracle (probe access) are NOT
-        # trace-only; their rows are flagged so they are never read as such.
+        # baseline family (latent vector) and the oracle family (probe/objective
+        # access) are NOT trace-only; their rows are flagged so they are never
+        # read as such.
         trace_only = not (is_contrast_baseline or is_oracle)
 
         per_seed_metrics: List[Dict[str, Any]] = []
@@ -297,11 +341,11 @@ def run_e2_policy(
             # short-circuit can derive the reference from the already-run trace.
             default_trace = run_episode(pool, policy, child_seed, H, k, bases)
 
-            # Per-seed oracle reference.  When this row IS the oracle, the
-            # default_trace is already the oracle's trace at this seed (same
-            # policy, same seed → same trace), so derive the reference directly
-            # from it instead of running a redundant second oracle episode.
-            if is_oracle:
+            # Per-seed oracle reference.  When this row IS the coord-novelty
+            # reference oracle, default_trace is already that oracle's trace at
+            # this seed (same policy, same seed → same trace), so derive the
+            # reference directly from it instead of running a redundant episode.
+            if is_reference_oracle:
                 oracle_seed_ref = oracle_reference_from_objectives(
                     _achieved_coordinate_novelty(default_trace)
                 )
@@ -348,6 +392,7 @@ def run_e2_policy(
             )
 
         stats = aggregate_metric_dicts(per_seed_metrics, E2_METRIC_KEYS)
+        per_seed_by_policy[name] = per_seed_metrics
         row = {
             "policy": name,
             "policyVersion": policy.policy_version(),
@@ -393,11 +438,24 @@ def run_e2_policy(
     # 6. Results body + output hash. The oracle reference is now derived per
     #    child seed inside the loop (designVersion e2-design-1), so there is no
     #    single pre-loop oracle reference hash; n enters the body for provenance.
+    # Paired policy-comparison statistics (Task D-007): TRACE_GREEDY vs every
+    # other policy across the reported metrics, over the shared child-seed batch
+    # (paired permutation tests + per-metric multiple-comparison correction).
+    # Deterministic, so the inline replay re-run reproduces it bit-identically.
+    comparisons = None
+    if COMPARISON_REFERENCE_POLICY in per_seed_by_policy:
+        comparisons = compare_reference_to_others(
+            per_seed_by_policy,
+            E2_METRIC_KEYS,
+            reference=COMPARISON_REFERENCE_POLICY,
+        )
+
     results_body = {
         "config": run_params,
         "metricKeys": list(E2_METRIC_KEYS),
         "n": int(n),
         "table": table,
+        "comparisons": comparisons,
     }
     output_hash = canonical_hash(results_body)
 
@@ -432,6 +490,7 @@ def run_e2_policy(
         "traceHash": trace_hash,
         "outputHash": output_hash,
         "table": table,
+        "comparisons": comparisons,
     }
     report_hash = canonical_hash(report)
     report["reportHash"] = report_hash
@@ -450,6 +509,25 @@ def run_e2_policy(
     )
     report["reproducibilityPack"] = pack.to_dict()
     report["packHash"] = pack.pack_hash()
+
+    # 8b. Inline replay validation (Task E-012): re-run once from config+seed and
+    #     confirm the hash chain reproduces EXACTLY. Attached AFTER reportHash so
+    #     it is not part of the hashed body; the re-run sets replay_validate=False
+    #     to avoid unbounded recursion.
+    if replay_validate:
+        report["replayAudit"] = inline_replay_audit(
+            report,
+            run_e2_policy,
+            dict(
+                base_seed=base_seed,
+                H=H,
+                k=k,
+                pool_size=pool_size,
+                n=n,
+                dry_run=False,
+                replay_validate=False,
+            ),
+        )
 
     # 9. Write the report json.
     _REPORTS_DIR.mkdir(parents=True, exist_ok=True)

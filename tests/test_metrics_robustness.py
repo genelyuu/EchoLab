@@ -11,6 +11,7 @@ import copy
 
 from echo_bench.metrics.robustness import (
     FAULTS,
+    ROBUSTNESS_DIRECTION,
     SALIENCE_SCORE_MAX,
     SALIENCE_SCORE_MIN,
     basis_dropout,
@@ -18,6 +19,7 @@ from echo_bench.metrics.robustness import (
     robustness_score,
     robustness_score_with_metadata,
     salience_perturb,
+    sensitivity_score,
 )
 
 
@@ -140,3 +142,38 @@ def test_robustness_metadata_carries_both_trace_hashes():
     assert md["faultedTraceHash"] == "hash-b"
     assert md["sharedKeys"] == ["m"]
     assert abs(md["value"] - 0.6) < 1e-12
+
+
+def test_sensitivity_score_is_identical_to_robustness_score():
+    # D-008: sensitivity_score is an unambiguously-named alias of the SAME value.
+    # It exists only to make report direction readable; it must never diverge.
+    baseline = {
+        "traceHash": "ha",
+        "coordinate_coverage": 0.5,
+        "artifact_diversity": 0.4,
+        "redundancy_rate": 0.1,
+        "round_coherence": 0.8,
+    }
+    faulted = dict(baseline)
+    faulted["traceHash"] = "hb"
+    faulted["coordinate_coverage"] = 0.9
+    faulted["redundancy_rate"] = 0.3
+    assert sensitivity_score(baseline, faulted) == robustness_score(baseline, faulted)
+    assert sensitivity_score(baseline, baseline) == 0.0
+
+
+def test_robustness_direction_note_is_present_and_unambiguous():
+    # D-008: the direction must be explicit — 0.0 = maximal robustness.
+    assert isinstance(ROBUSTNESS_DIRECTION, str)
+    assert "0.0" in ROBUSTNESS_DIRECTION
+    assert "robust" in ROBUSTNESS_DIRECTION.lower()
+
+
+def test_robustness_metadata_surfaces_sensitivity_and_direction():
+    # D-008: metadata carries the identically-valued sensitivity field and the
+    # direction note, without changing the existing `value`.
+    a = {"traceHash": "hash-a", "m": 0.2}
+    b = {"traceHash": "hash-b", "m": 0.8}
+    md = robustness_score_with_metadata(a, b)
+    assert md["sensitivityScore"] == md["value"]
+    assert md["direction"] == ROBUSTNESS_DIRECTION

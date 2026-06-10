@@ -61,6 +61,7 @@ from echo_bench.env.round_runner import run_episode
 from echo_bench.env.seed_batch import derive_child_seeds, seed_batch_id
 from echo_bench.logging import get_logger, log_ko
 from echo_bench.logging.repro_pack import ReproducibilityPack
+from echo_bench.logging.replay_validator import inline_replay_audit
 from echo_bench.metrics.aggregate import aggregate_metric_dicts
 from echo_bench.metrics.utility import METRIC_KEYS, compute_all
 from echo_bench.policies.fixed_low_to_high import FixedLowToHighPolicy
@@ -130,6 +131,7 @@ def run_e1_horizon(
     k: int = 4,
     pool_size: int = 64,
     dry_run: bool = False,
+    replay_validate: bool = True,
 ) -> dict:
     """Run the E1 horizon sweep and return a fully hashed report.
 
@@ -326,6 +328,25 @@ def run_e1_horizon(
     )
     report["reproducibilityPack"] = pack.to_dict()
     report["packHash"] = pack.pack_hash()
+
+    # 7b. Inline replay validation (Task E-012): re-run once from config+seed and
+    #     confirm the hash chain reproduces EXACTLY. The audit is attached AFTER
+    #     reportHash so it is not part of the hashed body (keeping the
+    #     self-comparison consistent); the re-run sets replay_validate=False to
+    #     avoid unbounded recursion.
+    if replay_validate:
+        report["replayAudit"] = inline_replay_audit(
+            report,
+            run_e1_horizon,
+            dict(
+                base_seed=base_seed,
+                n=n,
+                k=k,
+                pool_size=pool_size,
+                dry_run=False,
+                replay_validate=False,
+            ),
+        )
 
     # 8. Write the report json.
     _REPORTS_DIR.mkdir(parents=True, exist_ok=True)
