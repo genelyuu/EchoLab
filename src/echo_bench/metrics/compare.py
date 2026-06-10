@@ -238,8 +238,17 @@ def rank_stability(
 
     Splits the shared (ordered) seed batch into ``n_subbatches`` contiguous
     chunks; within each chunk ranks policies by their mean of ``key`` (rank 1 =
-    highest mean) and records each policy's rank. Returns, per policy, the mean
-    rank and the rank std across chunks (lower std = more stable). Deterministic.
+    highest mean, regardless of metric direction) and records each policy's rank.
+    Returns, per policy, the mean rank and the rank std across chunks (lower std =
+    more stable). Deterministic.
+
+    **Disambiguation (D-007 vs D-013):** This function is the D-007 sub-batch
+    diagnostic. It always ranks by sub-batch MEANS with higher mean = rank 1,
+    irrespective of whether the metric is higher-is-better or lower-is-better.
+    The top-level ``rankStability`` block in the E2 report (produced by
+    :func:`echo_bench.metrics.aggregate.rank_stability_by_metric`) is the D-013
+    unit-level ranking that applies the documented :data:`METRIC_DIRECTIONS` for
+    each metric. Both exist for complementary purposes; neither replaces the other.
     """
     policies = sorted(per_seed_by_policy)
     if not policies:
@@ -274,7 +283,22 @@ def rank_stability(
         }
         for p, ranks in ranks_by_policy.items()
     }
-    return {"key": key, "nSubbatches": k, "perPolicy": per_policy}
+    return {
+        "key": key,
+        "nSubbatches": k,
+        "perPolicy": per_policy,
+        # D-007 sub-batch diagnostic: ranks sub-batch MEANS with higher=rank1
+        # regardless of metric direction (lower-is-better metrics are NOT
+        # inverted here). The direction-aware unit-level ranking is the
+        # top-level ``rankStability`` block in the E2 report (D-013,
+        # aggregate.rank_stability_by_metric with METRIC_DIRECTIONS).
+        "note": (
+            "D-007 sub-batch diagnostic: ranks sub-batch means with "
+            "higher=rank1 regardless of metric direction. "
+            "For direction-aware unit-level rankings see the top-level "
+            "rankStability block (D-013, aggregate.rank_stability_by_metric)."
+        ),
+    }
 
 
 def _metric_values(

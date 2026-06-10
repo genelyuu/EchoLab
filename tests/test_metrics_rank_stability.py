@@ -116,17 +116,17 @@ def test_single_policy_is_always_top():
 
 
 def test_empty_input_raises_korean_value_error():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="values_by_policy 가 비어 있습니다"):
         rank_stability({})
 
 
 def test_empty_unit_lists_raise():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="단위 값 리스트가 비어 있습니다"):
         rank_stability({"A": [], "B": []})
 
 
 def test_unequal_lengths_raise():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="정책별 단위 값 길이가 서로 다릅니다"):
         rank_stability({"A": [1.0, 2.0], "B": [1.0]})
 
 

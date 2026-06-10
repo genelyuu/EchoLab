@@ -479,6 +479,10 @@ def run_e2_policy(
     rank_stability_block = rank_stability_by_metric(
         {
             key: {
+                # All E2_METRIC_KEYS are guaranteed present in every per-seed
+                # dict by compute_all; a KeyError here is intentional fail-
+                # closed — silent skipping would misalign unit counts across
+                # policies and corrupt the ranking.
                 name: [float(d[key]) for d in per_seed]
                 for name, per_seed in per_seed_by_policy.items()
             }
