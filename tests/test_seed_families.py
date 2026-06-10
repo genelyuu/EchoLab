@@ -457,6 +457,54 @@ def test_small_run_no_forbidden_keys(small_report):
 
 
 # ---------------------------------------------------------------------------
+# Partial selection: skip marker for deselected experiment blocks
+# ---------------------------------------------------------------------------
+
+
+def test_partial_selection_skip_markers():
+    """experiments=("e2",) -> e1/e3-derived blocks carry an explicit skip marker;
+    e2-derived blocks (perFamily, rankStabilityAcrossFamilies) are present."""
+    result = run_seed_families(
+        base_seeds=(42,),
+        n=2,
+        k=4,
+        pool_size=16,
+        H_e2=4,
+        replay_validate=False,
+        experiments=("e2",),
+    )
+    # e2-derived blocks must be real (not skipped)
+    per_family = result["perFamily"]
+    assert isinstance(per_family, dict) and not per_family.get("skipped"), (
+        "perFamily should be a real block when e2 is selected"
+    )
+    rank = result["rankStabilityAcrossFamilies"]
+    assert isinstance(rank, dict) and not rank.get("skipped"), (
+        "rankStabilityAcrossFamilies should be a real block when e2 is selected"
+    )
+
+    # e1-derived block must carry the explicit skip marker
+    e1_block = result["e1LongHorizonAcrossFamilies"]
+    assert isinstance(e1_block, dict), "e1LongHorizonAcrossFamilies should be a dict"
+    assert e1_block.get("skipped") is True, (
+        "e1LongHorizonAcrossFamilies must have skipped=True when e1 is not selected"
+    )
+    assert isinstance(e1_block.get("reason"), str) and e1_block["reason"], (
+        "skip marker must include a non-empty reason string"
+    )
+
+    # e3-derived block must carry the explicit skip marker
+    e3_block = result["leakageAcrossFamilies"]
+    assert isinstance(e3_block, dict), "leakageAcrossFamilies should be a dict"
+    assert e3_block.get("skipped") is True, (
+        "leakageAcrossFamilies must have skipped=True when e3 is not selected"
+    )
+    assert isinstance(e3_block.get("reason"), str) and e3_block["reason"], (
+        "skip marker must include a non-empty reason string"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Dry run + determinism
 # ---------------------------------------------------------------------------
 

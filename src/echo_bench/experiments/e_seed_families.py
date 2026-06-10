@@ -128,9 +128,13 @@ _FROZEN_MANIFEST_PATH = (
 )
 _REPORTS_DIR = _REPO_ROOT / "outputs" / "reports"
 
-# The E2 run-level k the C-011 manifest was frozen at (mirrors the e2_policy.py
-# construction path: yaml config + k=4 override).
-_FREEZE_K = 4
+# The E2 run-level k the C-011 manifest was frozen at is read from the frozen
+# manifest itself (effectiveConfig.k), so the gate can never drift from the
+# artifact it validates.  Set lazily in verify_trace_greedy_freeze() from
+# the loaded manifest; _FREEZE_K is the module-level placeholder used only
+# when the manifest hasn't been loaded yet (tests that monkeypatch
+# _load_frozen_manifest supply their own k).
+_FREEZE_K: int | None = None  # resolved from manifest at runtime
 
 
 def _load_yaml(path: Path) -> Dict[str, Any]:
@@ -171,9 +175,11 @@ def verify_trace_greedy_freeze() -> Dict[str, Any]:
 
     Mirrors the construction path the freeze manifest (and
     ``tests/test_config_freeze.py``) documents: load
-    ``configs/policies/trace_greedy.yaml``, override ``k`` with the frozen E2
-    run-level ``k=4``, instantiate :class:`TraceGreedyPolicy`, and compare its
-    ``policy_version()`` to the manifest's ``policyEffectiveConfigHash``.
+    ``configs/policies/trace_greedy.yaml``, override ``k`` with the value
+    recorded in the manifest's ``effectiveConfig.k`` (so the gate is always
+    consistent with the artifact it validates), instantiate
+    :class:`TraceGreedyPolicy`, and compare its ``policy_version()`` to the
+    manifest's ``policyEffectiveConfigHash``.
 
     Returns a small provenance dict on success; raises a Korean
     :class:`ValueError` (hard fail, nothing runs) on any mismatch or on a
@@ -187,8 +193,19 @@ def verify_trace_greedy_freeze() -> Dict[str, Any]:
             f"없습니다 (path={_FROZEN_MANIFEST_PATH})."
         )
 
+    # Read k from the manifest so this gate cannot drift from the artifact it
+    # validates.  The manifest must carry effectiveConfig.k (set at freeze time
+    # by C-011); a missing key is a hard error rather than a silent fallback.
+    effective_cfg = manifest.get("effectiveConfig")
+    if not isinstance(effective_cfg, dict) or "k" not in effective_cfg:
+        raise ValueError(
+            "E-014 동결 검증 실패: 동결 매니페스트에 effectiveConfig.k 가 없습니다 "
+            f"(path={_FROZEN_MANIFEST_PATH}). C-011 동결 매니페스트를 확인하세요."
+        )
+    freeze_k = int(effective_cfg["k"])
+
     cfg = dict(_load_yaml(_POLICY_CFG_DIR / "trace_greedy.yaml"))
-    cfg["k"] = _FREEZE_K
+    cfg["k"] = freeze_k
     live_hash = TraceGreedyPolicy(cfg).policy_version()
 
     if live_hash != frozen_hash:
@@ -203,12 +220,14 @@ def verify_trace_greedy_freeze() -> Dict[str, Any]:
     log_ko(
         _logger,
         "E-014 동결 검증 통과: TRACE_GREEDY policy_version 이 C-011 동결 해시와 "
-        f"일치합니다 (hash={frozen_hash[:12]}, frozenAt={manifest.get('frozenAt')}).",
+        f"일치합니다 (hash={frozen_hash[:12]}, k={freeze_k}, "
+        f"frozenAt={manifest.get('frozenAt')}).",
     )
     return {
         "policyName": manifest.get("policyName"),
         "frozenHash": frozen_hash,
         "liveHash": live_hash,
+        "freezeK": freeze_k,
         "frozenAt": manifest.get("frozenAt"),
         "taskId": manifest.get("taskId"),
         "verified": True,
@@ -232,13 +251,46 @@ def extract_e2_policy_metric_means(
     Reads each row's ``stats[<metric>]["mean"]`` for every key in the report's
     ``metricKeys`` (the authoritative aggregate; the flat per-row means are a
     back-compat mirror of the same values).
+
+    Raises a Korean :class:`ValueError` if the report is structurally malformed
+    (missing top-level keys, missing per-row stats entry, or missing mean).
     """
-    metric_keys = list(e2_report["metricKeys"])
+    try:
+        metric_keys = list(e2_report["metricKeys"])
+    except KeyError:
+        raise ValueError(
+            "E-014 집계: E2 보고서에 metricKeys 키가 없습니다. "
+            "보고서 구조를 확인하세요."
+        )
+    try:
+        rows = list(e2_report["table"])
+    except KeyError:
+        raise ValueError(
+            "E-014 집계: E2 보고서에 table 키가 없습니다. "
+            "보고서 구조를 확인하세요."
+        )
     out: Dict[str, Dict[str, float]] = {}
-    for row in e2_report["table"]:
-        out[row["policy"]] = {
-            key: float(row["stats"][key]["mean"]) for key in metric_keys
-        }
+    for row in rows:
+        policy = row.get("policy")
+        if policy is None:
+            raise ValueError(
+                "E-014 집계: E2 table 행에 policy 키가 없습니다."
+            )
+        stats = row.get("stats")
+        if not isinstance(stats, dict):
+            raise ValueError(
+                f"E-014 집계: E2 table 행(policy={policy})에 stats 딕셔너리가 없습니다."
+            )
+        means: Dict[str, float] = {}
+        for key in metric_keys:
+            stat_entry = stats.get(key)
+            if not isinstance(stat_entry, dict) or "mean" not in stat_entry:
+                raise ValueError(
+                    f"E-014 집계: E2 table 행(policy={policy})에 "
+                    f"stats[{key!r}]['mean'] 이 없습니다."
+                )
+            means[key] = float(stat_entry["mean"])
+        out[policy] = means
     return out
 
 
@@ -272,13 +324,20 @@ def build_rank_stability_across_families(
         )
 
     families = list(e2_by_family)
-    means_by_family = {
-        family: extract_e2_policy_metric_means(report)
-        for family, report in e2_by_family.items()
-    }
+    means_by_family: Dict[str, Dict[str, Dict[str, float]]] = {}
+    for family, report in e2_by_family.items():
+        # extract_e2_policy_metric_means already raises a descriptive Korean
+        # ValueError on malformed input, so no bare KeyError escapes here.
+        means_by_family[family] = extract_e2_policy_metric_means(report)
 
     first = families[0]
-    metric_keys = list(e2_by_family[first]["metricKeys"])
+    try:
+        metric_keys = list(e2_by_family[first]["metricKeys"])
+    except KeyError:
+        raise ValueError(
+            "E-014 집계: 첫 번째 패밀리 E2 보고서에 metricKeys 키가 없습니다 "
+            f"(family={first})."
+        )
     policies = sorted(means_by_family[first])
     for family in families[1:]:
         if list(e2_by_family[family]["metricKeys"]) != metric_keys:
@@ -523,8 +582,11 @@ def run_seed_families(
         replay_validate: forwarded to the E1/E2 children's inline replay audit
             (E-012). E3 always runs its smoke-core replay audit.
         experiments: which children to run per family (subset of
-            ``("e1", "e2", "e3")``); aggregation blocks that need a skipped
-            child are omitted with an explicit reason.
+            ``("e1", "e2", "e3")``); aggregation blocks that depend on a
+            skipped child experiment are emitted as
+            ``{"skipped": True, "reason": "<description>"}`` rather than
+            ``null``, so downstream readers can distinguish "not computed"
+            from a computed null result.
 
     Returns:
         The report dict (a dry-run plan dict when ``dry_run`` is true).
@@ -669,30 +731,44 @@ def run_seed_families(
         if "e3" in children
     }
 
+    # When a child experiment was not in `experiments`, the blocks derived from
+    # it are emitted as an explicit skip marker (not null) so downstream readers
+    # can distinguish "not computed" from "computed and was None".
     _SKIPPED = "experiment not in this run's experiments selection"
-    per_family_block = (
-        build_per_family_block(e2_by_family) if e2_by_family else None
+
+    def _skip_block() -> Dict[str, Any]:
+        return {"skipped": True, "reason": _SKIPPED}
+
+    per_family_block: Any = (
+        build_per_family_block(e2_by_family) if e2_by_family else _skip_block()
     )
-    rank_block = (
+    rank_block: Any = (
         build_rank_stability_across_families(e2_by_family)
         if e2_by_family
-        else None
+        else _skip_block()
     )
-    leakage_block = (
-        build_leakage_across_families(e3_by_family) if e3_by_family else None
+    leakage_block: Any = (
+        build_leakage_across_families(e3_by_family)
+        if e3_by_family
+        else _skip_block()
     )
-    e1_long_block = (
-        build_e1_long_horizon_block(e1_by_family) if e1_by_family else None
+    e1_long_block: Any = (
+        build_e1_long_horizon_block(e1_by_family)
+        if e1_by_family
+        else _skip_block()
     )
     replay_summary = build_replay_audit_summary(children_by_family)
+
+    def _block_status(block: Any) -> str:
+        return "생략(스킵)" if isinstance(block, dict) and block.get("skipped") else "있음"
 
     log_ko(
         _logger,
         "E-014 교차 패밀리 집계 완료: "
         f"families={len(seeds)}, "
-        f"rankStability={'있음' if rank_block else '생략'}, "
-        f"leakageCI={'있음' if leakage_block else '생략'}, "
-        f"e1LongHorizon={'있음' if e1_long_block else '생략'}, "
+        f"rankStability={_block_status(rank_block)}, "
+        f"leakageCI={_block_status(leakage_block)}, "
+        f"e1LongHorizon={_block_status(e1_long_block)}, "
         f"allReplayable={replay_summary['allReplayable']}.",
     )
 
@@ -789,6 +865,14 @@ def run_seed_families(
         "slateHash": slate_hash,
         "traceHash": trace_hash,
         "outputHash": output_hash,
+        # Describes what the sweep-level hashes cover so readers need not infer.
+        "hashSemantics": (
+            "Sweep-level archiveHash / poolHash / slateHash / traceHash are "
+            "canonical hashes computed over the mapping of per-family child "
+            "hashes (family -> experiment -> child hash).  They are NOT a "
+            "re-hash of raw artifacts; their integrity depends on the child "
+            "reports' own hash chains."
+        ),
     }
     report_hash = canonical_hash(report)
     report["reportHash"] = report_hash
