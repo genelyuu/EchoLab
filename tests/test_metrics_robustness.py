@@ -21,6 +21,7 @@ from echo_bench.metrics.robustness import (
     salience_perturb,
     sensitivity_score,
 )
+from echo_bench.metrics.utility import CORE_METRIC_KEYS
 
 
 def _pool() -> list:
@@ -177,3 +178,86 @@ def test_robustness_metadata_surfaces_sensitivity_and_direction():
     md = robustness_score_with_metadata(a, b)
     assert md["sensitivityScore"] == md["value"]
     assert md["direction"] == ROBUSTNESS_DIRECTION
+
+
+# ---- D-010 review: CORE_METRIC_KEYS pinning tests ----
+
+def test_robustness_score_with_keys_pinning_ignores_extra_keys():
+    """Pinning to 4 keys excludes the 3 D-010 distribution keys from the mean.
+
+    Two dicts share 7 numeric keys (the full METRIC_KEYS set after D-010).
+    Pinned to CORE_METRIC_KEYS (4 keys), only those four contribute to the mean
+    absolute difference. The value is verified by hand.
+    """
+    baseline = {
+        "traceHash": "base",
+        # CORE_METRIC_KEYS (4)
+        "coordinate_coverage": 0.5,
+        "artifact_diversity": 0.4,
+        "redundancy_rate": 0.1,
+        "round_coherence": 0.8,
+        # D-010 distribution extras (3): deliberately set large diffs to
+        # confirm they are excluded from the denominator under pinning.
+        "coordinate_entropy": 0.0,
+        "cell_visit_gini": 0.0,
+        "time_to_saturation": 0.0,
+    }
+    faulted = {
+        "traceHash": "fault",
+        "coordinate_coverage": 0.9,   # diff 0.4
+        "artifact_diversity": 0.4,    # diff 0.0
+        "redundancy_rate": 0.3,       # diff 0.2
+        "round_coherence": 0.8,       # diff 0.0
+        "coordinate_entropy": 1.0,    # diff 1.0 — should be ignored when pinned
+        "cell_visit_gini": 1.0,       # diff 1.0 — should be ignored when pinned
+        "time_to_saturation": 1.0,    # diff 1.0 — should be ignored when pinned
+    }
+
+    # Pinned to 4 core keys: mean of |0.4|, |0.0|, |0.2|, |0.0| = 0.15
+    pinned = robustness_score(baseline, faulted, keys=CORE_METRIC_KEYS)
+    assert abs(pinned - 0.15) < 1e-12, f"expected 0.15, got {pinned}"
+
+    # Without pinning: all 7 shared keys average including the 1.0 diffs.
+    # mean of |0.4|, |0.0|, |0.2|, |0.0|, |1.0|, |1.0|, |1.0| = 3.6/7
+    unpinned = robustness_score(baseline, faulted)
+    expected_unpinned = (0.4 + 0.0 + 0.2 + 0.0 + 1.0 + 1.0 + 1.0) / 7
+    assert abs(unpinned - expected_unpinned) < 1e-12
+
+    # Confirm the values differ, showing pinning has a real effect.
+    assert abs(pinned - unpinned) > 0.1
+
+
+def test_robustness_score_keys_none_is_default_behaviour():
+    """Passing keys=None gives the same result as the zero-arg call."""
+    a = {"traceHash": "a", "x": 0.3, "y": 0.7}
+    b = {"traceHash": "b", "x": 0.5, "y": 0.1}
+    assert robustness_score(a, b, keys=None) == robustness_score(a, b)
+
+
+def test_robustness_metadata_records_metric_keys_when_pinned():
+    """robustness_score_with_metadata carries 'metricKeys' when keys is supplied."""
+    baseline = {
+        "traceHash": "base",
+        "coordinate_coverage": 0.5,
+        "artifact_diversity": 0.4,
+        "redundancy_rate": 0.1,
+        "round_coherence": 0.8,
+        "coordinate_entropy": 0.0,
+        "cell_visit_gini": 0.0,
+        "time_to_saturation": 0.0,
+    }
+    faulted = dict(baseline)
+    faulted["traceHash"] = "fault"
+    faulted["coordinate_coverage"] = 0.9
+
+    md_pinned = robustness_score_with_metadata(
+        baseline, faulted, keys=CORE_METRIC_KEYS
+    )
+    # metricKeys is self-describing: records the four pinned keys.
+    assert md_pinned["metricKeys"] == list(CORE_METRIC_KEYS)
+    # sharedKeys reflects only the four resolved keys.
+    assert set(md_pinned["sharedKeys"]) == set(CORE_METRIC_KEYS)
+
+    # Without pinning, metricKeys is None (dynamic intersection).
+    md_dynamic = robustness_score_with_metadata(baseline, faulted)
+    assert md_dynamic["metricKeys"] is None

@@ -72,6 +72,7 @@ __all__ = [
     "OBJECTIVE_ACHIEVERS",
     "oracle_reference_from_objectives",
     "coordinate_cell",
+    "CORE_METRIC_KEYS",
     "METRIC_KEYS",
     "COORDINATE_GRID_BINS",
     "REDUNDANCY_NEAR_DUP_EPS",
@@ -81,17 +82,31 @@ __all__ = [
 
 _logger = get_logger(__name__)
 
-# The seven trace-only metric keys returned by :func:`compute_all` (alongside
-# ``traceHash``). Kept as an explicit constant so callers/tests can assert the
-# exact key set. The last three are the D-010 (TRD alias D-009) coverage-
-# DISTRIBUTION metrics, appended additively so the original four keep their
-# order and values; they stay informative when raw ``coordinate_coverage``
-# saturates at its 1.0 ceiling (TRD V-003).
-METRIC_KEYS = (
+# The original four trace-only utility keys that were the sole numerics in
+# ``compute_all`` before the D-010 distribution metrics were added (commit
+# boundary: C-011 config freeze). Pinned here so robustness_score (D-003) and
+# the S3 scramble sensitivity (E-006) can keep a stable denominator of four
+# keys across the C-011 freeze boundary, preserving comparability with
+# pre-D-010 runs. D-010 distribution metrics are excluded from these
+# sensitivity/robustness denominators; they appear only in METRIC_KEYS below.
+CORE_METRIC_KEYS = (
     "coordinate_coverage",
     "artifact_diversity",
     "redundancy_rate",
     "round_coherence",
+)
+
+# The seven trace-only metric keys returned by :func:`compute_all` (alongside
+# ``traceHash``). Kept as an explicit constant so callers/tests can assert the
+# exact key set. Built from CORE_METRIC_KEYS plus the three D-010 (TRD alias
+# D-009) coverage-DISTRIBUTION metrics to avoid duplication; the distribution
+# keys are appended additively so the original four keep their order and
+# values. They stay informative when raw ``coordinate_coverage`` saturates at
+# its 1.0 ceiling (TRD V-003). Note: the D-010 distribution metrics are
+# excluded from sensitivity/robustness denominators — use CORE_METRIC_KEYS
+# when pinning those computations to preserve comparability across the C-011
+# freeze boundary.
+METRIC_KEYS = CORE_METRIC_KEYS + (
     "coordinate_entropy",
     "cell_visit_gini",
     "time_to_saturation",

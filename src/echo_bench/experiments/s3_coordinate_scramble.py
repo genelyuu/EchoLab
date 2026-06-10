@@ -89,7 +89,7 @@ from echo_bench.logging import get_logger, log_ko
 from echo_bench.logging.repro_pack import ReproducibilityPack
 from echo_bench.metrics.aggregate import aggregate_values
 from echo_bench.metrics.robustness import ROBUSTNESS_DIRECTION, robustness_score
-from echo_bench.metrics.utility import METRIC_KEYS, compute_all
+from echo_bench.metrics.utility import CORE_METRIC_KEYS, METRIC_KEYS, compute_all
 from echo_bench.policies.random import RandomPolicy
 from echo_bench.policies.trace_greedy import TraceGreedyPolicy
 from echo_bench.policies.trace_lin_ucb import TraceLinUcbPolicy
@@ -121,8 +121,13 @@ S3_POLICIES = {
     "TRACE_LIN_UCB": (TraceLinUcbPolicy, "trace_lin_ucb.yaml"),
 }
 
-# The trace-only metric keys compared baseline vs scrambled.
-S3_METRIC_KEYS = tuple(METRIC_KEYS)
+# The trace-only metric keys compared baseline vs scrambled. Pinned to
+# CORE_METRIC_KEYS (the original four utility keys) to preserve a stable
+# denominator of four keys across the C-011 freeze boundary; the D-010
+# distribution metrics (coordinate_entropy, cell_visit_gini,
+# time_to_saturation) are excluded from the scramble-shift denominator.
+# METRIC_KEYS is still imported for report completeness where needed.
+S3_METRIC_KEYS = CORE_METRIC_KEYS
 
 # Repo-rooted config locations (resolved relative to the package, not the cwd).
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -352,7 +357,9 @@ def run_s3_coordinate_scramble(
             )
             per_seed_shifts.append(
                 robustness_score(
-                    compute_all(baseline_trace), compute_all(scrambled_trace)
+                    compute_all(baseline_trace),
+                    compute_all(scrambled_trace),
+                    keys=S3_METRIC_KEYS,
                 )
             )
             # Round-0 selection divergence: clean of trace-hash feedback because

@@ -51,7 +51,7 @@ delegated to :func:`echo_bench.utils.hash.canonical_hash`.
 from __future__ import annotations
 
 import random
-from typing import Any, Callable, Dict, List, Mapping, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from echo_bench.logging import get_logger
 from echo_bench.utils.hash import canonical_hash
@@ -238,7 +238,9 @@ def _shared_numeric_keys(
 
 
 def robustness_score(
-    baseline_metrics: Mapping[str, Any], faulted_metrics: Mapping[str, Any]
+    baseline_metrics: Mapping[str, Any],
+    faulted_metrics: Mapping[str, Any],
+    keys: Optional[Tuple[str, ...]] = None,
 ) -> float:
     """Bounded sensitivity of metrics to a fault, in ``[0.0, 1.0]``.
 
@@ -252,24 +254,58 @@ def robustness_score(
     ``0.0`` means the fault changed no shared metric (maximal robustness); a
     larger value means greater sensitivity. Returns ``0.0`` when there are no
     shared numeric keys. Deterministic: identical inputs -> identical value.
+
+    Parameters
+    ----------
+    baseline_metrics
+        Metric dict from the baseline run (e.g. ``utility.compute_all``).
+    faulted_metrics
+        Metric dict from the faulted run.
+    keys
+        Optional explicit tuple of metric key names to include in the mean.
+        When ``None`` (the default), the denominator is the full dynamic
+        intersection of shared numeric keys — the pre-D-010 behaviour,
+        unchanged for direct callers and tests. Pass
+        ``utility.CORE_METRIC_KEYS`` from call sites that must pin to the
+        original four utility keys to preserve comparability across the C-011
+        freeze boundary (e.g. E3 robustness audit and S3 scramble sensitivity).
     """
-    keys = _shared_numeric_keys(baseline_metrics, faulted_metrics)
-    if not keys:
+    if keys is not None:
+        # Pinned mode: use only the explicitly supplied key list. Skip any key
+        # absent from either dict or with a non-numeric value (defensive, but
+        # the pinned key set should always be present in compute_all dicts).
+        effective_keys: List[str] = []
+        for k in keys:
+            bv = baseline_metrics.get(k)
+            fv = faulted_metrics.get(k)
+            if bv is None or fv is None:
+                continue
+            if isinstance(bv, bool) or isinstance(fv, bool):
+                continue
+            if isinstance(bv, (int, float)) and isinstance(fv, (int, float)):
+                effective_keys.append(k)
+    else:
+        effective_keys = _shared_numeric_keys(baseline_metrics, faulted_metrics)
+
+    if not effective_keys:
         return 0.0
     total = 0.0
-    for key in keys:
+    for key in effective_keys:
         total += abs(float(baseline_metrics[key]) - float(faulted_metrics[key]))
-    value = _clamp(total / len(keys), 0.0, 1.0)
+    value = _clamp(total / len(effective_keys), 0.0, 1.0)
     _logger.info(
-        "강건성 점수(robustness_score)를 계산했습니다 (shared_keys=%d, value=%.6f)",
-        len(keys),
+        "강건성 점수(robustness_score)를 계산했습니다 (shared_keys=%d, pinned=%s, value=%.6f)",
+        len(effective_keys),
+        keys is not None,
         value,
     )
     return value
 
 
 def sensitivity_score(
-    baseline_metrics: Mapping[str, Any], faulted_metrics: Mapping[str, Any]
+    baseline_metrics: Mapping[str, Any],
+    faulted_metrics: Mapping[str, Any],
+    keys: Optional[Tuple[str, ...]] = None,
 ) -> float:
     """Unambiguously-named alias of :func:`robustness_score` (Task D-008).
 
@@ -277,12 +313,17 @@ def sensitivity_score(
     convenience so reports can say "sensitivity" (where higher means more
     affected) without readers second-guessing the direction. It must never
     diverge from :func:`robustness_score`. See :data:`ROBUSTNESS_DIRECTION`.
+
+    The optional ``keys`` parameter is passed through to :func:`robustness_score`
+    unchanged (see that function's documentation).
     """
-    return robustness_score(baseline_metrics, faulted_metrics)
+    return robustness_score(baseline_metrics, faulted_metrics, keys=keys)
 
 
 def robustness_score_with_metadata(
-    baseline_metrics: Mapping[str, Any], faulted_metrics: Mapping[str, Any]
+    baseline_metrics: Mapping[str, Any],
+    faulted_metrics: Mapping[str, Any],
+    keys: Optional[Tuple[str, ...]] = None,
 ) -> Dict[str, Any]:
     """Compute :func:`robustness_score` and carry both ``traceHash`` references.
 
@@ -296,14 +337,33 @@ def robustness_score_with_metadata(
             "baselineTraceHash": baseline_metrics.get("traceHash"),
             "faultedTraceHash":  faulted_metrics.get("traceHash"),
             "sharedKeys": [...],   # the numeric keys compared, sorted
+            "metricKeys": [...],   # the pinned keys used, or None if dynamic
         }
 
     Deterministic: identical inputs -> identical dict. The ``sensitivityScore``
     and ``direction`` fields (Task D-008) are additive clarity only — ``value``
     is unchanged.
+
+    The optional ``keys`` parameter is passed through to :func:`robustness_score`.
+    When supplied (e.g. ``utility.CORE_METRIC_KEYS``), ``metricKeys`` in the
+    returned dict records the pinned key list, making the report self-describing
+    about which keys were used in the denominator.
     """
-    keys = _shared_numeric_keys(baseline_metrics, faulted_metrics)
-    value = robustness_score(baseline_metrics, faulted_metrics)
+    if keys is not None:
+        effective_keys: List[str] = []
+        for k in keys:
+            bv = baseline_metrics.get(k)
+            fv = faulted_metrics.get(k)
+            if bv is None or fv is None:
+                continue
+            if isinstance(bv, bool) or isinstance(fv, bool):
+                continue
+            if isinstance(bv, (int, float)) and isinstance(fv, (int, float)):
+                effective_keys.append(k)
+    else:
+        effective_keys = _shared_numeric_keys(baseline_metrics, faulted_metrics)
+
+    value = robustness_score(baseline_metrics, faulted_metrics, keys=keys)
     return {
         "metric": "robustness_score",
         "value": value,
@@ -311,5 +371,6 @@ def robustness_score_with_metadata(
         "direction": ROBUSTNESS_DIRECTION,
         "baselineTraceHash": baseline_metrics.get("traceHash"),
         "faultedTraceHash": faulted_metrics.get("traceHash"),
-        "sharedKeys": keys,
+        "sharedKeys": effective_keys,
+        "metricKeys": list(keys) if keys is not None else None,
     }

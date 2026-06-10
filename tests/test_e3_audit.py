@@ -11,6 +11,7 @@ from echo_bench.experiments.e3_audit import (
 )
 from echo_bench.metrics.leakage import PROXY_DISCLAIMER
 from echo_bench.metrics.robustness import FAULTS
+from echo_bench.metrics.utility import CORE_METRIC_KEYS
 
 # Small but valid parameters: full leakage policy x probe grid + fault grid at a
 # short horizon and a 16-card pool. H=4 is in the horizon allowed set.
@@ -145,8 +146,18 @@ def test_e3_robustness_section_per_fault():
         assert 0.0 <= row["robustness_score"] <= 1.0
         assert isinstance(row["baselineTraceHash"], str) and row["baselineTraceHash"]
         assert isinstance(row["faultedTraceHash"], str) and row["faultedTraceHash"]
+        # Each row records which keys were used — self-describing report (D-010 review).
+        assert row["metricKeys"] == list(CORE_METRIC_KEYS), (
+            f"E3 robustness row for fault={row['fault']} must record "
+            f"metricKeys pinned to CORE_METRIC_KEYS, got {row['metricKeys']!r}"
+        )
     # Documented as controlled faults, not real-world.
     assert "controlled" in robustness["note"].lower()
+    # The robustness section itself records which keys were pinned (D-010 review).
+    assert robustness["metricKeys"] == list(CORE_METRIC_KEYS), (
+        f"E3 robustness section must record metricKeys={list(CORE_METRIC_KEYS)!r}, "
+        f"got {robustness.get('metricKeys')!r}"
+    )
 
 
 def test_e3_replay_audit_reports_replayable_true():

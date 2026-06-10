@@ -80,7 +80,7 @@ from echo_bench.metrics.robustness import (
     ROBUSTNESS_DIRECTION,
     robustness_score_with_metadata,
 )
-from echo_bench.metrics.utility import compute_all
+from echo_bench.metrics.utility import CORE_METRIC_KEYS, compute_all
 from echo_bench.policies.fixed_balanced import FixedBalancedPolicy
 from echo_bench.policies.fixed_low_to_high import FixedLowToHighPolicy
 from echo_bench.policies.random import RandomPolicy
@@ -378,7 +378,9 @@ def run_e3_audit(
             canonical_hash([r["slate"] for r in faulted_trace.rounds()])
         )
 
-        score = robustness_score_with_metadata(baseline_metrics, faulted_metrics)
+        score = robustness_score_with_metadata(
+            baseline_metrics, faulted_metrics, keys=CORE_METRIC_KEYS
+        )
         robustness_rows.append(
             {
                 "fault": fault_name,
@@ -389,6 +391,7 @@ def run_e3_audit(
                 "baselineTraceHash": score["baselineTraceHash"],
                 "faultedTraceHash": score["faultedTraceHash"],
                 "sharedKeys": score["sharedKeys"],
+                "metricKeys": score["metricKeys"],
             }
         )
         log_ko(
@@ -413,6 +416,7 @@ def run_e3_audit(
         ),
         "baselineTraceHash": baseline_trace.trace_hash(),
         "faults": fault_names,
+        "metricKeys": list(CORE_METRIC_KEYS),
         "table": robustness_rows,
     }
 
