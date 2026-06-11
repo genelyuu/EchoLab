@@ -1,0 +1,53 @@
+{
+  "preregId": "axs-mechanism",
+  "version": 1,
+  "title": "AXS mechanism preregistration v1",
+  "scope": {
+    "testbed": "ECHO-Bench controlled procedural k-slate testbed",
+    "policyFamilies": ["AXS UCB variants (new IDs; C-011 frozen set untouched)"],
+    "requiredScopeMarkers": ["within the tested policy families", "in this controlled testbed"]
+  },
+  "primaryEndpoint": {"metric": "slate_excess_nmi", "aggregation": "cross_family"},
+  "confirmatoryEndpoints": ["selection_excess_nmi", "combined_excess_nmi"],
+  "utilityGuard": {"metric": "coordinate_coverage", "rule": "arm_mean >= RANDOM_mean"},
+  "pairedUnit": "seed_family",
+  "evaluationFamilies": ["42", "7", "101", "2025", "31337"],
+  "signRule": {"minConsistentFamilies": 4, "totalFamilies": 5},
+  "ciRule": {"method": "cross_family_seeded_bootstrap", "lowerBoundMustExceed": 0.0},
+  "noPValues": true,
+  "minSufficientFamilies": 3,
+  "tieBreakCaveatMarker": "subject to a tie-breaking sensitivity caveat (AXS-010 soft_pass)",
+  "yokedSchedule": {
+    "pilotFamily": "999",
+    "referenceArm": "axs_ucb_default",
+    "derivation": "deterministic from pilot config + seed",
+    "scheduleArtifactPath": "configs/prereg/axs_004c_yoked_schedule_v1.json"
+  },
+  "experiments": {
+    "AXS-003": {"arms": ["axs_ucb_default", "axs_ucb_alpha0"],
+      "decision": {"defaultSeparabilityPresent": "sign+CI pass", "alphaZeroSeparabilityAbsent": "sign or CI fail"}},
+    "AXS-009": {"arms": ["freeze_at_1", "freeze_at_quarter", "freeze_at_half", "freeze_none"],
+      "keyMetric": "post_freeze_incremental_divergence",
+      "decision": {"postFreezeAccrualAbsent": true, "doseResponseOrdering": true}},
+    "AXS-004c": {"arms": ["axs_ucb_default", "axs_yoked_bonus"],
+      "decision": {"historyDependentSeparabilityPresent": true, "yokedSeparabilityAbsent": true}},
+    "AXS-002": {"arms": ["utility_matched_contrast"],
+      "decision": {"separabilityNotUtilityArtifact": true}},
+    "AXS-010": {"tieBreakOrders": ["canonical", "reverse", "hash_seeded", "feature_lexicographic"],
+      "decision": {"strict_pass": "sign unchanged AND within baseline 95% CI",
+                   "soft_pass": "sign+track unchanged, outside CI -> caveat",
+                   "fail": "sign flip or track change"}}
+  },
+  "claimTransitions": {
+    "M2": {"requiresPass": ["AXS-003", "AXS-009", "AXS-004c", "AXS-002"],
+           "requiresInvariance": "AXS-010 >= soft_pass",
+           "softPassRequiresCaveatMarker": true,
+           "scopeMarkersRequired": true},
+    "M3": {"requires": "M2 + AXS-001 full alpha sweep + anchor validation"}
+  },
+  "degenerateArmPolicy": {"mustReport": true,
+    "requiredFields": ["degenerate", "degenerateReason", "includedInMechanismClaim"],
+    "silentOmissionFails": true},
+  "amendmentPolicy": {"supersedesRequired": true, "changeJustificationRequired": true,
+    "retroactiveApplication": false}
+}
