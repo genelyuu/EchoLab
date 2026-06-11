@@ -46,10 +46,39 @@ GOOD_PREREG_COMMIT = "aabbcc1122334455667788990011223344556677"
 GOOD_RUN_COMMIT = "ff00ee1122334455667788990011223344556677"
 
 # Real git commits from the repo (for CLI tests that use real git).
-# preregCommit: git log -1 -- configs/prereg/axs_mechanism_prereg_v1.json
-# runCommit: git rev-parse HEAD at test time
-_REAL_PREREG_COMMIT = "4da7a0cc440270b5ff630652f53d382a2aea5d23"
-_REAL_RUN_COMMIT = "ea46ef3423754b4849ee512e830456e99633e390"
+# preregCommit: git log -1 --format=%H -- configs/prereg/axs_mechanism_prereg_v1.json
+# runCommit:    git rev-parse HEAD
+# Resolved dynamically at module load time; None if git is unavailable.
+def _resolve_real_sha_pair() -> tuple:
+    """런타임에 git 에서 CLI 테스트용 SHA 쌍 해석.
+
+    실패 시 (None, None) 반환 — git checkout 이 아닌 환경에서 건너뜀.
+    """
+    import subprocess as _sp
+    prereg_file = "configs/prereg/axs_mechanism_prereg_v1.json"
+    try:
+        prereg_commit = _sp.run(
+            ["git", "log", "-1", "--format=%H", "--", prereg_file],
+            cwd=str(_REPO_ROOT),
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        run_commit = _sp.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(_REPO_ROOT),
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        if prereg_commit and run_commit:
+            return prereg_commit, run_commit
+    except Exception:
+        pass
+    return None, None
+
+
+_REAL_PREREG_COMMIT, _REAL_RUN_COMMIT = _resolve_real_sha_pair()
 
 
 def _good_git_runner(args: List[str]) -> str:
@@ -1038,7 +1067,9 @@ def test_consumed_reports_and_family_history(tmp_path):
 
 
 def test_cli_exit0_happy_path(tmp_path):
-    """CLI: 정상 경로 — 실제 git 커밋 사용, exit 0."""
+    """CLI: 정상 경로 — 실제 git 커밋 동적 해석 사용, exit 0."""
+    if _REAL_PREREG_COMMIT is None or _REAL_RUN_COMMIT is None:
+        pytest.skip("git SHA 동적 해석 실패 — git checkout 이 아닌 환경에서는 건너뜀")
     # CLI 는 실제 git 을 호출하므로 레포에 실제로 존재하는 커밋을 stamp 에 주입
     prereg_path, report_paths, ledger_path, _, _ = _build_full_set(
         tmp_path,
@@ -1065,6 +1096,8 @@ def test_cli_exit0_happy_path(tmp_path):
 
 def test_cli_exit1_on_failure(tmp_path):
     """CLI: 실패 검사 있으면 exit 1 (원장 미등록 유도)."""
+    if _REAL_PREREG_COMMIT is None or _REAL_RUN_COMMIT is None:
+        pytest.skip("git SHA 동적 해석 실패 — git checkout 이 아닌 환경에서는 건너뜀")
     prereg_path, report_paths, ledger_path, _, _ = _build_full_set(
         tmp_path,
         prereg_commit=_REAL_PREREG_COMMIT,
@@ -1089,6 +1122,8 @@ def test_cli_exit1_on_failure(tmp_path):
 
 def test_cli_audit_note_in_output(tmp_path):
     """CLI 출력 파일에 AUDIT LOG ONLY 노트 포함."""
+    if _REAL_PREREG_COMMIT is None or _REAL_RUN_COMMIT is None:
+        pytest.skip("git SHA 동적 해석 실패 — git checkout 이 아닌 환경에서는 건너뜀")
     prereg_path, report_paths, ledger_path, _, _ = _build_full_set(
         tmp_path,
         prereg_commit=_REAL_PREREG_COMMIT,
@@ -1106,3 +1141,115 @@ def test_cli_audit_note_in_output(tmp_path):
     written = json.loads(licenses_out.read_text())
     assert "AUDIT LOG ONLY" in written.get("note", "")
     assert "입력으로 사용 금지" in written.get("note", "")
+
+
+# ===========================================================================
+# Fix 1 (CRITICAL fail-open): requiresPass 강제
+# ===========================================================================
+
+
+def test_redteam_only_axs010_submitted(tmp_path):
+    """red-team: AXS-010 strict_pass 단독 제출 — M2 False, acceptance_recomputed 실패.
+
+    requiresPass 에 열거된 AXS-003/009/004c/002 리포트가 없으면
+    acceptance_recomputed 가 누락 실험을 한국어로 명시하며 실패해야 한다.
+    """
+    prereg_path, report_paths, ledger_path, _, _ = _build_full_set(tmp_path)
+
+    # AXS-010 리포트만 남김
+    only_axs010 = [r for r in report_paths if "axs010" in r.name]
+    assert len(only_axs010) == 1, "AXS-010 리포트가 픽스처에 없음"
+
+    result = evaluate_mechanism_license(
+        prereg_path,
+        only_axs010,
+        ledger_path=ledger_path,
+        git_runner=_good_git_runner,
+    )
+    assert result["rungs"]["M2"] is False, "AXS-010 단독 제출 시 M2 는 False 여야 함"
+    failed = [c for c in result["checks"] if not c["ok"]]
+    acc_fail = next(
+        (c for c in failed if c["check"] == "acceptance_recomputed"), None
+    )
+    assert acc_fail is not None, (
+        "requiresPass 실험 누락 시 acceptance_recomputed 가 실패해야 함"
+    )
+    # 누락 실험이 detail 에 한국어로 명시되어야 함
+    detail = acc_fail["detail"]
+    assert "AXS-003" in detail or "AXS-009" in detail or "AXS-004c" in detail or "AXS-002" in detail, (
+        f"acceptance_recomputed detail 에 누락 실험이 없음: {detail!r}"
+    )
+
+
+# ===========================================================================
+# Fix 3 (minor): arms_complete — degenerate 값 검증
+# ===========================================================================
+
+
+def test_redteam_below_random_arm_false_degenerate_values(tmp_path):
+    """red-team: RANDOM 미달 arm 에 degenerate=False 로 표기 → arms_complete 실패.
+
+    키 존재만으로는 통과해선 안 된다.
+    degenerate=false, degenerateReason="x", includedInMechanismClaim=true 조합은
+    arms_complete 실패를 유발해야 한다.
+    """
+    prereg_path, report_paths, ledger_path, prereg, p_hash = _build_full_set(tmp_path)
+
+    axs003_path = next(r for r in report_paths if "axs003" in r.name)
+    r = json.loads(axs003_path.read_text())
+    # axs_ucb_alpha0 arm 을 RANDOM 미달로 만들되, degenerate 값은 잘못 설정
+    r["arms"]["axs_ucb_alpha0"]["utility"]["coordinate_coverage_mean"] = 0.50  # RANDOM(0.90) 미달
+    r["arms"]["axs_ucb_alpha0"]["degenerate"] = False          # 잘못된 값
+    r["arms"]["axs_ucb_alpha0"]["degenerateReason"] = "x"      # 비어 있지 않지만 degenerate=False
+    r["arms"]["axs_ucb_alpha0"]["includedInMechanismClaim"] = True  # 잘못된 값
+    body = {k: v for k, v in r.items() if k != "reportHash"}
+    r["reportHash"] = canonical_hash(body)
+    axs003_path.write_text(json.dumps(r, indent=2), encoding="utf-8")
+
+    result = evaluate_mechanism_license(
+        prereg_path,
+        report_paths,
+        ledger_path=ledger_path,
+        git_runner=_good_git_runner,
+    )
+    failed = [c for c in result["checks"] if not c["ok"]]
+    assert any(c["check"] == "arms_complete" for c in failed), (
+        "degenerate=False arm 이 arms_complete 을 통과해서는 안 됨"
+    )
+
+
+# ===========================================================================
+# Fix 2 (test fragility): CLI 테스트 SHA 동적 해석 — 새 픽스처 검증
+# ===========================================================================
+
+
+def test_cli_dynamic_sha_happy_path(tmp_path):
+    """CLI: SHA 를 동적으로 해석해 ancestry 통과 — exit 0.
+
+    Fix 2: 하드코딩된 SHA 대신 런타임에 git 에서 해석된 모듈 수준 변수 사용.
+    git 해석 실패 시 skip (Korean reason).
+    """
+    if _REAL_PREREG_COMMIT is None or _REAL_RUN_COMMIT is None:
+        pytest.skip("git SHA 동적 해석 실패 — git checkout 이 아닌 환경에서는 건너뜀")
+
+    prereg_path, report_paths, ledger_path, _, _ = _build_full_set(
+        tmp_path,
+        prereg_commit=_REAL_PREREG_COMMIT,
+        run_commit=_REAL_RUN_COMMIT,
+    )
+    licenses_out = tmp_path / "licenses_dynamic.json"
+    ret = main(
+        [
+            "--prereg", str(prereg_path),
+            "--reports", *[str(r) for r in report_paths],
+            "--ledger", str(ledger_path),
+            "--licenses-out", str(licenses_out),
+        ]
+    )
+    assert ret == 0, (
+        f"동적 SHA 로 CLI 실행 시 exit 0 기대. "
+        f"preregCommit={_REAL_PREREG_COMMIT[:12]}, runCommit={_REAL_RUN_COMMIT[:12]}"
+    )
+    written = json.loads(licenses_out.read_text())
+    assert written["rungs"]["M2"] is True
+    assert "AUDIT LOG ONLY" in written["note"]

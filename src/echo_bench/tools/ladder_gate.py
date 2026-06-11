@@ -274,7 +274,7 @@ def _check_arms_complete(
                 and arm_cov is not None
                 and arm_cov < random_cov
             ):
-                # RANDOM 미달 → degenerate 3개 필드 필수
+                # RANDOM 미달 → degenerate 3개 필드 필수, 값도 정확해야 함
                 for field in degenerate_fields:
                     if field not in arm_data:
                         ok = False
@@ -282,6 +282,28 @@ def _check_arms_complete(
                             f"{exp_id} arm {arm_id!r}: RANDOM 기준 미달이나 "
                             f"degenerate 필드 {field!r} 누락"
                         )
+                # 값 검증: degenerate=True, degenerateReason 비어있지 않은 문자열,
+                # includedInMechanismClaim=False 이어야 함
+                if arm_data.get("degenerate") is not True:
+                    ok = False
+                    details.append(
+                        f"{exp_id} arm {arm_id!r}: RANDOM 기준 미달이나 "
+                        f"degenerate={arm_data.get('degenerate')!r} (True 여야 함)"
+                    )
+                reason = arm_data.get("degenerateReason")
+                if not isinstance(reason, str) or not reason.strip():
+                    ok = False
+                    details.append(
+                        f"{exp_id} arm {arm_id!r}: degenerateReason 이 비어 있거나 "
+                        f"문자열이 아님 ({reason!r})"
+                    )
+                if arm_data.get("includedInMechanismClaim") is not False:
+                    ok = False
+                    details.append(
+                        f"{exp_id} arm {arm_id!r}: RANDOM 기준 미달이나 "
+                        f"includedInMechanismClaim="
+                        f"{arm_data.get('includedInMechanismClaim')!r} (False 여야 함)"
+                    )
 
     detail = "; ".join(details) if details else "모든 arm 완전성 확인"
     return {"check": "arms_complete", "ok": ok, "detail": detail}
@@ -293,6 +315,7 @@ def _check_acceptance_recomputed(
 ) -> Dict[str, Any]:
     """검사 5: acceptance_recomputed.
 
+    requiresPass 실험 전체가 소비된 리포트로 제출되어야 함 (누락 시 즉시 실패).
     각 실험별 판정 재계산:
     AXS-003: present(axs_ucb_default) AND absent(axs_ucb_alpha0) on slate_excess_nmi
     AXS-004c: present(axs_ucb_default) AND absent(axs_yoked_bonus)
@@ -306,6 +329,18 @@ def _check_acceptance_recomputed(
     for r in reports:
         exp_id = r.get("experimentId", "")
         reports_by_exp[exp_id] = r
+
+    # requiresPass 강제: 사전등록에 명시된 실험 리포트가 모두 소비되어야 함
+    requires_pass_exps = list(
+        prereg.get("claimTransitions", {}).get("M2", {}).get("requiresPass", [])
+    )
+    missing_exps = [exp for exp in requires_pass_exps if exp not in reports_by_exp]
+    if missing_exps:
+        ok = False
+        details.append(
+            f"requiresPass 실험 리포트 누락: {sorted(missing_exps)} — "
+            "해당 실험 리포트 없이는 M2 라이선스 발급 불가"
+        )
 
     # AXS-003
     r3 = reports_by_exp.get("AXS-003")
