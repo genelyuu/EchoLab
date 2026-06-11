@@ -15,6 +15,17 @@ G-008 / TRD G-012 additions:
 (h) JSON oracle-note rule: post-C-014 reports with wrong/missing oracleNote
     fail; legacy reports (no oraclePolicyDisplayName) only warn; compliant
     reports pass.
+
+G-010 additions (claim ladder v2):
+(j) leakage-improvement / privacy claim-FORM regex patterns are FLAGGED;
+(k) backtick-quoted (mention) and negated forms are NOT flagged — the ladder's
+    own forbidden-forms list must stay scanner-safe;
+(l) the CLI emits a Korean guidance message naming the pattern and the
+    required "probe separability diagnostic" reframing, with the approved
+    replacement sentences;
+(m) docs/12_CLAIM_LADDER.md carries ladderVersion claim-ladder-2, the five
+    tracks (U/S/N/R/G), the exact Track S activation sentences (EN + KR), and
+    the "(formerly Track L)" legacy note, and scans clean.
 """
 
 from __future__ import annotations
@@ -25,6 +36,7 @@ from pathlib import Path
 import pytest
 
 from echo_bench.tools.claim_check import (
+    FORBIDDEN_CLAIM_PATTERNS,
     FORBIDDEN_PHRASES,
     Finding,
     main,
@@ -432,4 +444,176 @@ def test_live_reports_oracle_notes_clean():
     oracle_findings = [f for f in findings if f.phrase == "oracleNote"]
     assert oracle_findings == [], (
         f"live reports/ have oracle-note violations: {oracle_findings}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# (j) G-010: leakage-improvement / privacy claim-FORM patterns are FLAGGED.   #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "text, pattern",
+    [
+        ("TRACE_GREEDY reduces leakage.", r"reduce(?:s|d)?\s+leakage"),
+        (
+            "The policy reduced leakage at every horizon.",
+            r"reduce(?:s|d)?\s+leakage",
+        ),
+        ("Trace-only policies reduce leakage.", r"reduce(?:s|d)?\s+leakage"),
+        ("TRACE_GREEDY improves leakage.", r"improv(?:e|es|ed|ing)\s+leakage"),
+        (
+            "The bandit update improved leakage across families.",
+            r"improv(?:e|es|ed|ing)\s+leakage",
+        ),
+        (
+            "TRACE_LIN_UCB leaks user information.",
+            r"leaks?\s+user\s+information",
+        ),
+        ("The system is privacy-preserving.", r"privacy[-\s]preserving"),
+        ("Probe separability is privacy leakage.", r"is\s+privacy\s+leakage"),
+    ],
+)
+def test_g010_claim_form_patterns_flagged(text, pattern):
+    findings = scan_text(text)
+    assert any(f.phrase == pattern for f in findings), (
+        f"expected pattern {pattern!r} to be flagged in {text!r}: {findings}"
+    )
+
+
+def test_g010_patterns_in_pattern_list():
+    for p in (
+        r"reduce(?:s|d)?\s+leakage",
+        r"improv(?:e|es|ed|ing)\s+leakage",
+        r"leaks?\s+user\s+information",
+        r"privacy[-\s]preserving",
+        r"is\s+privacy\s+leakage",
+    ):
+        assert p in FORBIDDEN_CLAIM_PATTERNS, (
+            f"{p!r} must be in FORBIDDEN_CLAIM_PATTERNS"
+        )
+
+
+# --------------------------------------------------------------------------- #
+# (k) G-010: backtick-quoted (mention) and negated forms are NOT flagged.     #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Backtick code-span quoting = mention, not assertion (the ladder's own
+        # forbidden-forms list uses exactly this mechanism).
+        "- `TRACE_GREEDY reduces leakage.`",
+        "- `TRACE_GREEDY improves leakage.`",
+        "- `TRACE_LIN_UCB leaks user information.`",
+        "- `Probe separability is privacy leakage.`",
+        "- `The system is privacy-preserving.`",
+        "Statements like `trace-only policies reduce leakage` are quarantined.",
+        # Negated / denial forms.
+        "TRACE_GREEDY does not reduce leakage in any admissible sense.",
+        "No policy may be described as privacy-preserving.",
+        'NEVER write "randomized policies leak user information".',
+        "This is not a privacy-preserving claim and never will be.",
+    ],
+)
+def test_g010_quoted_or_negated_forms_not_flagged(text):
+    assert scan_text(text) == [], (
+        f"quoted/negated claim form wrongly flagged: {text!r}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# (l) G-010: CLI Korean guidance names the pattern and the reframing.         #
+# --------------------------------------------------------------------------- #
+
+
+def test_g010_cli_korean_guidance(tmp_path, capsys):
+    dirty = tmp_path / "dirty.md"
+    dirty.write_text("TRACE_GREEDY reduces leakage.\n", encoding="utf-8")
+    rc = main([str(dirty)])
+    out = capsys.readouterr().out
+    assert rc == 1
+    # The offending pattern is named.
+    assert r"reduce(?:s|d)?\s+leakage" in out
+    # Korean guidance with the required reframing.
+    assert "재구성" in out
+    assert "probe separability diagnostic" in out
+    # Approved replacement sentences are documented in the guidance output.
+    assert (
+        "We therefore report probe separability as a diagnostic axis rather "
+        "than a privacy or leakage improvement claim." in out
+    )
+
+
+def test_g010_cli_no_guidance_when_clean(tmp_path, capsys):
+    clean = tmp_path / "clean.md"
+    clean.write_text(
+        "TRACE_LIN_UCB exhibits above-null probe separability.\n",
+        encoding="utf-8",
+    )
+    rc = main([str(clean)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "[G-010]" not in out
+
+
+# --------------------------------------------------------------------------- #
+# (m) G-010: ladder v2 structure — version, tracks, Track S sentences.        #
+# --------------------------------------------------------------------------- #
+
+_LADDER_PATH = _DOCS_DIR / "12_CLAIM_LADDER.md"
+
+
+def test_ladder_version_is_2():
+    text = _LADDER_PATH.read_text(encoding="utf-8")
+    assert "ladderVersion: claim-ladder-2" in text
+    # claim-ladder-1 may appear only in the revision history, never as the
+    # current ladderVersion declaration.
+    assert "ladderVersion: claim-ladder-1" not in text
+
+
+def test_ladder_has_five_tracks():
+    text = _LADDER_PATH.read_text(encoding="utf-8")
+    for track in ("Track U", "Track S", "Track N", "Track R", "Track G"):
+        assert track in text, f"ladder must define {track}"
+
+
+def test_ladder_track_s_activation_sentences_exact():
+    text = _LADDER_PATH.read_text(encoding="utf-8")
+    en = (
+        "Track S is activated when a policy exhibits positive, "
+        "cross-family-consistent, null-corrected probe separability. "
+        "This is a diagnostic signal, not an improvement claim."
+    )
+    kr = (
+        "Track S는 policy가 null-corrected probe separability를 "
+        "cross-family 일관적으로 양수로 보일 때 활성화된다. "
+        "이는 진단 신호이지 개선 claim이 아니다."
+    )
+    normalized = " ".join(text.split())
+    assert " ".join(en.split()) in normalized, (
+        "ladder must contain the exact Track S activation sentence (EN)"
+    )
+    assert " ".join(kr.split()) in normalized, (
+        "ladder must contain the exact Track S activation sentence (KR)"
+    )
+
+
+def test_ladder_keeps_legacy_track_l_note():
+    text = _LADDER_PATH.read_text(encoding="utf-8")
+    assert "formerly Track L" in text
+
+
+def test_ladder_records_activation_decision_and_evidence():
+    text = _LADDER_PATH.read_text(encoding="utf-8")
+    assert "leakage_diagnostic_a72a1c0582fe" in text
+    assert "c3550dc423d7" in text
+    assert "TRACE_LIN_UCB" in text
+
+
+def test_ladder_scans_clean():
+    findings = scan_path(_LADDER_PATH)
+    assert findings == [], (
+        f"revised ladder must pass its own scanner: {findings}"
     )
