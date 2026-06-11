@@ -35,6 +35,7 @@ import pytest
 
 from echo_bench.env.trace_state import TraceState
 from echo_bench.metrics.leakage import (
+    DEFAULT_NULL_PERMUTATIONS,
     PROXY_DISCLAIMER,
     leakage_proxy,
     null_corrected_separability,
@@ -148,7 +149,7 @@ def test_every_channel_carries_full_null_corrected_stats():
             assert field in block, f"channel {name} missing field: {field}"
         assert block["isProxy"] is True
         assert block["disclaimer"] == PROXY_DISCLAIMER
-        assert block["n_permutations"] == 200
+        assert block["n_permutations"] == DEFAULT_NULL_PERMUTATIONS
 
 
 def test_top_level_convenience_keys_match_channel_blocks():
@@ -163,7 +164,7 @@ def test_top_level_convenience_keys_match_channel_blocks():
     assert (
         out["combined_excess_nmi"] == out["channels"]["combined"]["excess_nmi"]
     )
-    assert out["n_permutations"] == 200
+    assert out["n_permutations"] == DEFAULT_NULL_PERMUTATIONS
 
 
 def test_is_explicitly_a_proxy():
@@ -371,3 +372,83 @@ def test_selection_rank_is_slate_order_invariant():
     assert (
         out1["channels"]["selection"] == out2["channels"]["selection"]
     )
+
+
+# --- defensive record-shape edge cases (D-016 review follow-up) -------------------
+
+
+class _DuckTrace:
+    """Minimal duck-typed trace: the metric contract only requires
+    ``rounds()``. Used to exercise defensive record shapes that TraceState's
+    own schema validation would reject (e.g. a missing ``selectedCardId``)."""
+
+    def __init__(self, records: list):
+        self._records = records
+
+    def rounds(self) -> list:
+        return list(self._records)
+
+
+def test_record_without_selected_card_id_key_is_handled():
+    """A round record missing the ``selectedCardId`` key entirely must not
+    crash: the selection channel maps it to the deterministic fail-closed
+    absent-from-slate encoding, and the slate channel is unaffected.
+    (TraceState itself rejects such records, so this guards the metric's own
+    defensive ``record.get(...)`` path over duck-typed traces.)"""
+    a = _DuckTrace([{"slate": ["a1", "a2", "a3", "a4"]}] * 3)
+    b = _DuckTrace([{"slate": ["b1", "b2", "b3", "b4"]}] * 3)
+    out = channel_separated_separability({"PROBE_A": a, "PROBE_B": b})
+    # Slates are disjoint -> slate channel still separates.
+    assert out["channels"]["slate"]["observed_nmi"] == 1.0
+    # Both probes carry the SAME absent-selection encoding -> the selection
+    # channel has a single unique signature -> degenerate (fail closed).
+    assert out["channels"]["selection"]["degenerate"] is True
+    # Deterministic on repeat.
+    assert out == channel_separated_separability({"PROBE_A": a, "PROBE_B": b})
+
+
+def test_empty_slate_is_handled():
+    """An empty slate must not crash any channel: the slate signature is the
+    empty-membership signature; the selection deterministically maps to the
+    absent-from-slate encoding."""
+    a = _trace([_record("c1", [])] * 3)
+    b = _trace([_record("c1", ["c1", "c2", "c3", "c4"])] * 3)
+    out = channel_separated_separability({"PROBE_A": a, "PROBE_B": b})
+    # Empty vs non-empty membership separates the slate channel.
+    assert out["channels"]["slate"]["observed_nmi"] == 1.0
+    # absent-encoding (empty slate) vs rank 0 separates the selection channel.
+    assert out["channels"]["selection"]["observed_nmi"] == 1.0
+    assert out == channel_separated_separability({"PROBE_A": a, "PROBE_B": b})
+
+
+def test_single_round_per_probe_traces():
+    """One round per probe: nothing crashes, the statistic is computed over
+    2 pooled rounds, and the all-unique micro-sample is correctly flagged as
+    saturated (fail closed: its absolute NMI is not report-grade)."""
+    a = _trace([_record("a1", ["a1", "a2", "a3", "a4"])])
+    b = _trace([_record("b1", ["b1", "b2", "b3", "b4"])])
+    out = channel_separated_separability({"PROBE_A": a, "PROBE_B": b})
+    combined = out["channels"]["combined"]
+    assert combined["degenerate"] is False
+    assert combined["observed_nmi"] == 1.0
+    assert combined["saturation"]["sample_count"] == 2
+    assert combined["saturation"]["saturation_flag"] is True
+    assert out == channel_separated_separability({"PROBE_A": a, "PROBE_B": b})
+
+
+def test_duplicate_id_slate_has_deterministic_first_occurrence_rank():
+    """A slate containing duplicate card ids yields the FIRST-occurrence rank
+    within the name-sorted member list — deterministically, and invariant to
+    the stored order of the duplicates."""
+    a1 = _trace([_record("c1", ["c1", "c1", "c2", "c3"])] * 3)
+    a2 = _trace([_record("c1", ["c3", "c1", "c2", "c1"])] * 3)
+    b = _trace([_record("c2", ["c1", "c1", "c2", "c3"])] * 3)
+    out1 = channel_separated_separability({"PROBE_A": a1, "PROBE_B": b})
+    out2 = channel_separated_separability({"PROBE_A": a2, "PROBE_B": b})
+    # Same members (duplicates preserved), same selection -> identical blocks.
+    assert out1 == out2
+    # c1 (rank 0, first occurrence) vs c2 (rank 2) separates the selection
+    # channel; duplicates do not make the encoding ambiguous.
+    assert out1["channels"]["selection"]["observed_nmi"] == 1.0
+    # Membership is identical across probes -> slate channel degenerate.
+    assert out1["channels"]["slate"]["degenerate"] is True

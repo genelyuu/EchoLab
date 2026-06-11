@@ -17,6 +17,7 @@ from echo_bench.metrics.leakage import (
     DEFAULT_NULL_PERMUTATIONS,
     LEAKAGE_RATIO_FLOOR,
     PROXY_DISCLAIMER,
+    SATURATION_UNIQUE_RATE_THRESHOLD,
 )
 from echo_bench.metrics.robustness import FAULTS
 from echo_bench.metrics.utility import CORE_METRIC_KEYS
@@ -235,6 +236,43 @@ def test_e3_leakage_rows_carry_channel_separated_excess_fields():
             "null_std",
             "excess_nmi",
             "excess_z",
+        ):
+            assert legacy_field in row
+
+
+def test_e3_leakage_rows_carry_saturation_flags():
+    """D-017: every leakage row carries the signature-saturation diagnostics
+    flags, additively. The exact key ``saturation_flag`` is promised by
+    docs/12_CLAIM_LADDER.md Section 5 (Track L re-enable condition 2:
+    ``saturation_flag = False``); it is the headline gate and equals the
+    combined (legacy-signature) channel's flag. Flags are diagnostics over
+    the measurement, never claims."""
+    report = run_e3_audit(dry_run=False, **_KW)
+    leakage = report["leakage"]
+
+    # Section-level: the threshold the flags were computed against is
+    # self-describing.
+    assert leakage["saturationThreshold"] == SATURATION_UNIQUE_RATE_THRESHOLD
+
+    for row in leakage["table"]:
+        for field in (
+            "saturation_flag",
+            "slate_saturation_flag",
+            "selection_saturation_flag",
+            "combined_saturation_flag",
+        ):
+            assert field in row, f"leakage row missing D-017 field: {field}"
+            assert isinstance(row[field], bool)
+        # The headline gate IS the combined-channel flag.
+        assert row["saturation_flag"] == row["combined_saturation_flag"]
+        # All legacy D-015/D-016 keys must still be present (additive-only).
+        for legacy_field in (
+            "leakage_proxy",
+            "observed_nmi",
+            "excess_nmi",
+            "slate_excess_nmi",
+            "selection_excess_nmi",
+            "combined_excess_nmi",
         ):
             assert legacy_field in row
 

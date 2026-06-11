@@ -56,7 +56,16 @@ from __future__ import annotations
 
 import math
 import random
-from typing import Any, Dict, List, Mapping, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 from echo_bench.logging import get_logger
 from echo_bench.utils.hash import canonical_hash
@@ -67,6 +76,12 @@ __all__ = [
     "null_corrected_separability",
     "leakage_delta_vs_random",
     "utility_per_leakage",
+    # Documented shared machinery (D-015/D-016/D-017 cores; consumed by
+    # echo_bench.metrics.separability — see the SHARED MACHINERY note below).
+    "collect_labeled_signatures",
+    "null_corrected_stats",
+    "slate_member_ids",
+    "signature_saturation_stats",
     "METRIC_NAME",
     "SEPARABILITY_METRIC_NAME",
     "IS_PROXY",
@@ -74,6 +89,7 @@ __all__ = [
     "LEAKAGE_RATIO_FLOOR",
     "DEFAULT_NULL_PERMUTATIONS",
     "NULL_STD_EPS",
+    "SATURATION_UNIQUE_RATE_THRESHOLD",
 ]
 
 _logger = get_logger(__name__)
@@ -99,6 +115,18 @@ SEPARABILITY_METRIC_NAME = "null_corrected_separability"
 
 # D-015: default number of deterministic label permutations for the null.
 DEFAULT_NULL_PERMUTATIONS = 200
+
+# D-017 (TRD V-004 diagnostics): saturation threshold over the unique
+# signature rate. When the distinct-signature count is at least this fraction
+# of the pooled sample count, (nearly) every signature is unique, the pooled
+# NMI sits at/near its observed-achievable maximum under EVERY labeling, and
+# the absolute NMI value is not report-grade — `saturation_flag` is then True.
+# The flag is a DIAGNOSTIC over the measurement (it catches measurement
+# failure automatically), never a claim. NOTE the fail-closed corollary: a
+# minuscule sample (e.g. a single pooled round) trivially has unique-rate 1.0
+# and therefore flags as saturated — by design, since its NMI is equally
+# uninformative.
+SATURATION_UNIQUE_RATE_THRESHOLD = 0.95
 
 # D-015: documented near-zero threshold for the null standard deviation.
 # CONVENTION (bounded, never +/-inf or NaN): when ``null_std < NULL_STD_EPS``
@@ -195,14 +223,15 @@ def utility_per_leakage(
     return _clamp01(mean_utility) / max(_clamp01(leakage), float(floor))
 
 
-def _slate_member_ids(record: Mapping[str, Any]) -> List[str]:
-    """Name-sorted observable slate member ids of one round.
+def slate_member_ids(record: Mapping[str, Any]) -> List[str]:
+    """Name-sorted observable slate member ids of one round (shared, D-016).
 
     Slate entries may be card-id strings or card dicts; reduce to ids and sort
     the string forms so the result is independent of stored slate order.
-    Reads only the observable ``slate`` field. Shared by the legacy combined
-    signature below and the D-016 channel signatures in
-    :mod:`echo_bench.metrics.separability`.
+    Duplicate ids are PRESERVED (this is the sorted member list, not a set).
+    Reads only the observable ``slate`` field. Documented shared machinery for
+    the legacy combined signature below and the D-016/D-017 channel signatures
+    in :mod:`echo_bench.metrics.separability`.
     """
     slate = record.get("slate") or []
     slate_ids = []
@@ -218,9 +247,11 @@ def _selection_signature(record: Mapping[str, Any]) -> str:
     """Build a canonical observable selection signature for one round.
 
     The signature combines only observable fields: the round's
-    ``selectedCardId`` and the *set* of card ids present in its ``slate``
-    (order-independent). It deliberately reads no other field. The signature is
-    a stable canonical hash so equal observable rounds map to an equal label.
+    ``selectedCardId`` and the name-sorted list of card ids present in its
+    ``slate`` (order-independent; duplicate member ids are preserved — see
+    :func:`slate_member_ids`, this is NOT a set reduction). It deliberately
+    reads no other field. The signature is a stable canonical hash so equal
+    observable rounds map to an equal label.
 
     D-016 NOTE: this is the **combined** channel signature — byte-identical
     construction is an invariant relied upon by
@@ -229,7 +260,7 @@ def _selection_signature(record: Mapping[str, Any]) -> str:
     """
     sig = {
         "selectedCardId": record.get("selectedCardId"),
-        "slateMembers": _slate_member_ids(record),
+        "slateMembers": slate_member_ids(record),
     }
     return canonical_hash(sig)
 
@@ -250,17 +281,19 @@ def _probe_version(trace: Any) -> Any:
     return None
 
 
-def _collect_labeled_signatures(
+def collect_labeled_signatures(
     traces_by_probe: Mapping[str, Any],
-    signature_fn: Any = None,
+    signature_fn: Optional[Callable[[Mapping[str, Any]], str]] = None,
 ) -> List[Tuple[str, str]]:
-    """Return ``(probeName, signature)`` pairs over all pooled rounds.
+    """Return ``(probeName, signature)`` pairs over all pooled rounds (shared).
 
     ``signature_fn`` maps one round record to its canonical signature string
     and defaults to the legacy combined :func:`_selection_signature`; D-016
     passes per-channel signature functions. Every supported signature function
     reads **only** the observable ``slate``/``selectedCardId`` fields. Probes
     are visited in name-sorted order so the pooled sequence is deterministic.
+    Documented shared machinery for
+    :mod:`echo_bench.metrics.separability` (D-016/D-017).
     """
     if signature_fn is None:
         signature_fn = _selection_signature
@@ -330,7 +363,59 @@ def _normalized_mutual_information(pairs: List[Tuple[str, str]]) -> float:
     return float(value)
 
 
-def _null_corrected_stats(
+def signature_saturation_stats(signatures: Sequence[str]) -> Dict[str, Any]:
+    """Signature-space saturation **DIAGNOSTICS** over pooled signatures (D-017).
+
+    TRD V-004 diagnostics: detects automatically when the signature space is
+    too large relative to the sample — when (nearly) every pooled signature is
+    unique, the pooled NMI sits at/near its observed-achievable maximum under
+    every labeling, and its absolute value is not report-grade (the D-015
+    saturation regime). Reported fields (all pure functions of ``signatures``,
+    deterministic, no RNG):
+
+    - ``sample_count``             — number of pooled signatures (rounds).
+    - ``distinct_signature_count`` — number of distinct signatures.
+    - ``unique_signature_rate``    — distinct-signature count / sample count
+      (``0.0`` for an empty sample).
+    - ``cardinality_sample_ratio`` — |distinct signatures| / sample_count.
+      NOTE: by the TRD's definitions this coincides with
+      ``unique_signature_rate``; both promised key names are reported so
+      downstream consumers (and docs/12_CLAIM_LADDER.md Section 5) can rely
+      on either.
+    - ``saturation_flag``          — ``True`` iff ``sample_count > 0`` and
+      ``unique_signature_rate >= SATURATION_UNIQUE_RATE_THRESHOLD``.
+    - ``saturationThreshold``      — the documented threshold constant, so
+      the block is self-describing.
+
+    INTERPRETATION CONVENTION: the flag is a DIAGNOSTIC that catches
+    measurement failure, never a claim. ``saturation_flag = True`` forbids any
+    headline leakage-proxy claim for that channel/report
+    (docs/12_CLAIM_LADDER.md Section 5, Track L re-enable condition 2 requires
+    ``saturation_flag = False``). An empty sample is NOT flagged saturated —
+    it is degenerate instead (nothing was measured); a tiny all-unique sample
+    IS flagged (fail closed: its NMI is equally uninformative).
+    """
+    sample_count = len(signatures)
+    distinct_signature_count = len(set(signatures))
+    if sample_count > 0:
+        unique_signature_rate = distinct_signature_count / sample_count
+    else:
+        unique_signature_rate = 0.0
+    saturation_flag = (
+        sample_count > 0
+        and unique_signature_rate >= SATURATION_UNIQUE_RATE_THRESHOLD
+    )
+    return {
+        "sample_count": int(sample_count),
+        "distinct_signature_count": int(distinct_signature_count),
+        "unique_signature_rate": float(unique_signature_rate),
+        "cardinality_sample_ratio": float(unique_signature_rate),
+        "saturation_flag": bool(saturation_flag),
+        "saturationThreshold": SATURATION_UNIQUE_RATE_THRESHOLD,
+    }
+
+
+def null_corrected_stats(
     pairs: List[Tuple[str, str]],
     n_permutations: int,
     seed_metric: str,
@@ -341,7 +426,10 @@ def _null_corrected_stats(
     channel-separated variant in :mod:`echo_bench.metrics.separability`
     (D-016): given pooled ``(label, signature)`` pairs, compute the observed
     pooled NMI, a deterministic permutation null over the same signature
-    multiset, and the excess statistics.
+    multiset, and the excess statistics. D-017: the returned dict additionally
+    carries a ``saturation`` sub-block (:func:`signature_saturation_stats`
+    over the pooled signature multiset) so every null-corrected report block
+    is saturation-self-diagnosing.
 
     DETERMINISM: the permutation RNG is a ``random.Random`` seeded **only**
     from ``seed_metric`` + the pooled pairs + ``n_permutations`` via
@@ -354,6 +442,13 @@ def _null_corrected_stats(
     :func:`_normalized_mutual_information`'s degeneracy rule (a single unique
     signature always yields NMI 0 under every labeling, so the permutation
     loop would be pointless).
+
+    D-016 SEMANTICS NOTE: the single-unique-signature condition
+    (``len(set(signatures)) < 2``) was ADDED in D-016 and intentionally widens
+    the legacy D-015 ``degenerate`` flag for single-unique-signature inputs
+    (previously only no-pairs / single-label inputs were flagged). The numeric
+    outputs are unchanged — such inputs already reported the exact zero dict —
+    only the flag now states the degeneracy explicitly.
 
     Raises ``ValueError`` if ``n_permutations < 1``.
     """
@@ -421,6 +516,11 @@ def _null_corrected_stats(
         "excess_z": float(excess_z),
         "n_permutations": int(n_permutations),
         "degenerate": degenerate,
+        # D-017: saturation diagnostics over the same pooled signature
+        # multiset — a DIAGNOSTIC sub-block (never a claim). saturation_flag
+        # = True forbids a headline leakage claim for this block
+        # (docs/12_CLAIM_LADDER.md Section 5 condition 2).
+        "saturation": signature_saturation_stats(signatures),
     }
 
 
@@ -443,7 +543,7 @@ def leakage_proxy(traces_by_probe: Mapping[str, Any]) -> float:
         selection signature, in ``[0.0, 1.0]``. ``0.0`` when fewer than two
         probes (or no rounds) are supplied.
     """
-    pairs = _collect_labeled_signatures(traces_by_probe)
+    pairs = collect_labeled_signatures(traces_by_probe)
     value = _normalized_mutual_information(pairs)
     _logger.info(
         "누출 프록시(leakage_proxy)를 계산했습니다 (probes=%d, rounds=%d, "
@@ -521,8 +621,8 @@ def null_corrected_separability(
 
     Raises ``ValueError`` if ``n_permutations < 1``.
     """
-    pairs = _collect_labeled_signatures(traces_by_probe)
-    stats = _null_corrected_stats(
+    pairs = collect_labeled_signatures(traces_by_probe)
+    stats = null_corrected_stats(
         pairs, n_permutations, SEPARABILITY_METRIC_NAME
     )
 

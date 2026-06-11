@@ -79,7 +79,10 @@ from echo_bench.metrics.leakage import (
     leakage_proxy_with_metadata,
     utility_per_leakage,
 )
-from echo_bench.metrics.separability import channel_separated_separability
+from echo_bench.metrics.separability import (
+    SATURATION_UNIQUE_RATE_THRESHOLD,
+    channel_separated_separability,
+)
 from echo_bench.metrics.robustness import (
     FAULTS,
     ROBUSTNESS_DIRECTION,
@@ -359,8 +362,13 @@ def run_e3_audit(
         null_permutations_used = int(null_corrected["n_permutations"])
         # D-016: channel-separated excess statistics over the SAME probe-keyed
         # trace family. The combined channel reproduces the legacy D-015
-        # statistic exactly (combined_excess_nmi == excess_nmi below).
-        channel_sep = channel_separated_separability(traces_by_probe)
+        # statistic exactly (combined_excess_nmi == excess_nmi below). The
+        # already-computed nullCorrected block is passed through as the
+        # precomputed combined channel so the deterministic 200-permutation
+        # null runs ONCE per policy (D-016 review follow-up), bit-identically.
+        channel_sep = channel_separated_separability(
+            traces_by_probe, precomputed_combined=null_corrected
+        )
         leakage_rows.append(
             {
                 "policy": name,
@@ -382,6 +390,20 @@ def run_e3_audit(
                 "slate_excess_nmi": channel_sep["slate_excess_nmi"],
                 "selection_excess_nmi": channel_sep["selection_excess_nmi"],
                 "combined_excess_nmi": channel_sep["combined_excess_nmi"],
+                # D-017: signature-saturation diagnostics (additive; flags
+                # are DIAGNOSTICS, never claims). saturation_flag is the
+                # headline gate — it equals the combined (legacy-signature)
+                # channel's flag, and saturation_flag=True forbids any
+                # headline leakage claim for this row
+                # (docs/12_CLAIM_LADDER.md Section 5 condition 2).
+                "saturation_flag": channel_sep["combined_saturation_flag"],
+                "slate_saturation_flag": channel_sep["slate_saturation_flag"],
+                "selection_saturation_flag": channel_sep[
+                    "selection_saturation_flag"
+                ],
+                "combined_saturation_flag": channel_sep[
+                    "combined_saturation_flag"
+                ],
                 "mean_coordinate_coverage": mean_coverage,
                 "utility_per_leakage": utility_per_leakage(
                     mean_coverage, leak["value"]
@@ -397,8 +419,10 @@ def run_e3_audit(
             f"excess_nmi={null_corrected['excess_nmi']:+.6f}, "
             f"excess_z={null_corrected['excess_z']:+.4f}, "
             f"slate_excess_nmi={channel_sep['slate_excess_nmi']:+.6f}, "
-            f"selection_excess_nmi={channel_sep['selection_excess_nmi']:+.6f} "
+            f"selection_excess_nmi={channel_sep['selection_excess_nmi']:+.6f}, "
+            f"saturation_flag={channel_sep['combined_saturation_flag']} "
             "(해석은 'null 초과 정보가 있다/없다'로만 하며, "
+            "saturation_flag=True 인 채널의 절대 NMI 는 헤드라인 클레임 금지 — "
             "이는 PROXY 이고 프라이버시/법적 보증이 아닙니다)",
         )
 
@@ -449,6 +473,11 @@ def run_e3_audit(
         # many data-seeded label permutations, read back from the computed
         # block rather than hard-coded.
         "nullPermutations": null_permutations_used,
+        # D-017: documented saturation threshold — every row's saturation_flag
+        # (and per-channel flags) is computed against this unique-signature
+        # rate; recorded here so the report is self-describing. The flags are
+        # diagnostics, never claims.
+        "saturationThreshold": SATURATION_UNIQUE_RATE_THRESHOLD,
         "probeVersions": {
             pn: get_probe(pn).probe_version() for pn in probe_names
         },
