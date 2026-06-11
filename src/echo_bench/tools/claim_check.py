@@ -581,6 +581,12 @@ _BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s")
 # Semicolons do NOT terminate a sentence (the canonical M2 sentence uses one).
 _SENTENCE_END_RE = re.compile(r"[.!?](?=\s|$)")
 
+# G-022a Fix 3: unicode evasion normalisation for the Track M sentence path.
+# Zero-width chars: U+200B ZWSP, U+200C ZWNJ, U+200D ZWJ, U+FEFF BOM/ZWNBSP.
+_TRACK_M_ZW_RE = re.compile(r"[​‌‍﻿]")
+# Unicode dashes U+2010–U+2014 → ASCII hyphen-minus.
+_TRACK_M_DASH_TABLE = str.maketrans("‐‑‒–—", "-----")
+
 
 def _iter_sentence_chunks(text: str) -> Iterable[List[tuple[int, str]]]:
     """Yield chunks of ``(line_no, stripped_line)`` forming sentence groups.
@@ -680,11 +686,44 @@ def _scan_mechanism_claims(
             return line_nos[max(0, bisect_right(starts, abs_offset) - 1)]
 
         for s_start, sentence in _split_sentences_with_offsets(joined):
+            # Fix 3 (G-022a): normalise unicode evasions ONCE on a copy used
+            # only for matching; line attribution still uses the original
+            # sentence (reporting the sentence's first line is acceptable).
+            # - Zero-width chars stripped: U+200B/C/D/FEFF
+            # - Unicode dashes mapped to ASCII '-': U+2010–U+2014
+            norm_sentence = _TRACK_M_ZW_RE.sub("", sentence).translate(
+                _TRACK_M_DASH_TABLE
+            )
+
             matches: List[tuple[str, re.Match]] = []
             for pattern, rx in _MECHANISM_PATTERN_RES:
-                for m in rx.finditer(sentence):
-                    if _is_identifier_context(sentence, m.start(), m.end()):
-                        continue  # mention (backtick/identifier), not a claim
+                for m in rx.finditer(norm_sentence):
+                    # Fix 1 (G-022a): sentence-level backtick check uses the
+                    # open-span test (odd backtick count before match start)
+                    # instead of the sentence-wide "backtick anywhere before
+                    # AND after" heuristic used by the G-010 line scanner.
+                    # The non-backtick identifier checks in _is_identifier_context
+                    # are still applied via the helper; only the backtick branch
+                    # is overridden here.
+                    before_match = norm_sentence[: m.start()]
+                    after_match = norm_sentence[m.end() :]
+                    # Inside an open backtick span: odd count of backticks
+                    # before the match start means the match is enclosed.
+                    if before_match.count("`") % 2 == 1:
+                        continue  # genuinely inside a backtick span — suppress
+                    # Other identifier contexts (snake_case, camelCase, quotes)
+                    # — reuse the helper but skip its backtick branch by
+                    # temporarily testing a sentinel that has no backtick before.
+                    # We reconstruct the effective before/after without backtick
+                    # interference: strip all backticks for the helper call so
+                    # only the non-backtick rules fire.
+                    _before_nb = before_match.replace("`", "")
+                    _after_nb = after_match.replace("`", "")
+                    _line_nb = _before_nb + norm_sentence[m.start() : m.end()] + _after_nb
+                    _start_nb = len(_before_nb)
+                    _end_nb = _start_nb + (m.end() - m.start())
+                    if _is_identifier_context(_line_nb, _start_nb, _end_nb):
+                        continue  # snake_case / camelCase / quote identifier
                     matches.append((pattern, m))
             if not matches:
                 continue
@@ -1025,7 +1064,7 @@ def _resolve_mechanism_license(args: argparse.Namespace) -> Optional[dict]:
             ledger_path=args.ledger,
             release=args.release,
         )
-    except (ValueError, OSError) as exc:
+    except (ValueError, OSError, KeyError, TypeError) as exc:
         print(
             f"[경고] ladder_gate 평가 실패 — M2 라이선스 미부여 (fail closed): {exc}"
         )

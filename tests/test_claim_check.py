@@ -955,6 +955,134 @@ def test_cli_partial_gate_args_fail_closed(tmp_path, capsys):
     assert rc == 1  # missing --reports/--ledger -> no license, fail closed
 
 
+# ---------------------------------------------------------------------------
+# G-022a review fixes — new fixtures
+# ---------------------------------------------------------------------------
+
+# Fix 1: backtick-straddle over-suppression
+_STRADDLE_SENTENCE = (
+    "The `axs_ucb_default` arm shows that amplification requires "
+    "history-dependent exploration in the `replay` audit."
+)
+_GENUINE_BACKTICK_SENTENCE = (
+    "The form `requires history-dependent exploration` is a quarantined "
+    "mechanism claim form."
+)
+
+
+def test_backtick_straddle_is_flagged():
+    """A mechanism claim flanked by UNRELATED backtick spans must be a finding.
+
+    The pattern is: `identifier` ... CLAIM ... `identifier` — the match is NOT
+    inside any open backtick span; the sentence-level check must NOT suppress it.
+    """
+    findings = scan_text(_STRADDLE_SENTENCE)
+    assert findings, (
+        "backtick-straddle sentence wrongly suppressed — "
+        "unrelated code spans must not protect a prose claim: "
+        f"{_STRADDLE_SENTENCE!r}"
+    )
+
+
+def test_genuine_backtick_span_still_suppressed():
+    """A claim fully enclosed in a single backtick span must remain suppressed."""
+    findings = scan_text(_GENUINE_BACKTICK_SENTENCE)
+    assert findings == [], (
+        f"genuine backtick-enclosed mention wrongly flagged: {_GENUINE_BACKTICK_SENTENCE!r}"
+    )
+
+
+# Fix 2: regression fixtures for multi-line wrap and marker smuggling
+
+_M2_MULTILINE = (
+    "Within the tested policy families\n"
+    "in this controlled testbed, above-null slate separability requires\n"
+    "history-dependent exploration pressure."
+)
+
+
+def test_multiline_m2_unlicensed_one_finding():
+    """M2 sentence split across 3 lines, unlicensed → exactly one finding."""
+    findings = scan_text(_M2_MULTILINE)
+    assert len(findings) == 1, (
+        f"expected exactly one finding for multi-line M2, got: {findings}"
+    )
+
+
+def test_multiline_m2_licensed_clean():
+    """Same sentence with an active license (no caveat required) → clean."""
+    findings = scan_text(
+        _M2_MULTILINE,
+        mechanism_license={"m2": True, "caveatRequired": False},
+    )
+    assert findings == [], f"licensed multi-line M2 wrongly flagged: {findings}"
+
+
+_SMUGGLE_TEXT = (
+    "We hypothesize nothing here.\n"
+    "Amplification requires history-dependent exploration."
+)
+
+
+def test_marker_smuggling_second_sentence_flagged():
+    """Hypothesis marker in sentence 1 must NOT license the assertion in sentence 2."""
+    findings = scan_text(_SMUGGLE_TEXT)
+    assert findings, (
+        "hypothesis marker in prior sentence must not license the assertion: "
+        f"{_SMUGGLE_TEXT!r}"
+    )
+
+
+# Fix 3: unicode evasion normalization
+
+def test_unicode_hyphen_evasion_flagged():
+    """U+2011 non-breaking hyphen in 'history-dependent' must not bypass the pattern."""
+    # U+2011 is a non-breaking hyphen — visually identical to ASCII '-'
+    evasion = "Amplification requires history‑dependent exploration."
+    findings = scan_text(evasion)
+    assert findings, (
+        f"U+2011 hyphen evasion wrongly suppressed: {evasion!r}"
+    )
+
+
+def test_zwsp_evasion_flagged():
+    """Zero-width space (U+200B) inserted into 'requires' must not bypass the pattern."""
+    evasion = "Amplification requ​ires history-dependent exploration."
+    findings = scan_text(evasion)
+    assert findings, (
+        f"ZWSP evasion wrongly suppressed: {evasion!r}"
+    )
+
+
+# Fix 4: KeyError traceback in gate wiring
+
+def test_gate_malformed_prereg_no_traceback(tmp_path, capsys, monkeypatch):
+    """A malformed prereg missing 'preregId' must not raise a traceback.
+
+    The gate wiring must catch KeyError/TypeError, emit the Korean warning, and
+    return exit 1 (or 0 for a clean file) — but never let an unhandled exception
+    surface.
+    """
+    import echo_bench.tools.ladder_gate as lg
+
+    def _raise_key_error(*a, **kw):
+        d = {}
+        return d["preregId"]  # KeyError
+
+    monkeypatch.setattr(lg, "evaluate_mechanism_license", _raise_key_error)
+    prereg, report, ledger = _write_gate_evidence(tmp_path)
+
+    # File with an M2 sentence (unlicensed because gate raises) → exit 1
+    doc = tmp_path / "m2.md"
+    doc.write_text(_M2_CANONICAL + "\n", encoding="utf-8")
+
+    # Should not raise; captured output must contain the Korean warning
+    rc = main([str(doc)] + _gate_args(prereg, report, ledger))
+    out = capsys.readouterr().out
+    assert rc == 1, f"expected exit 1 (unlicensed), got {rc}"
+    assert "[경고]" in out, f"Korean warning expected in output: {out!r}"
+
+
 # --- Regression: live tree stays clean with the Track M layer active ---
 
 
