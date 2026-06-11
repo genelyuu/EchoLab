@@ -617,3 +617,353 @@ def test_ladder_scans_clean():
     assert findings == [], (
         f"revised ladder must pass its own scanner: {findings}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# (n) G-022a/G-022c: Track M mechanism-claim layer.                            #
+# --------------------------------------------------------------------------- #
+
+from echo_bench.tools.claim_check import (  # noqa: E402
+    DEFAULT_TIE_BREAK_CAVEAT_MARKER,
+    MECHANISM_CLAIM_PATTERNS,
+)
+
+_PAT_REQUIRES = r"requires\s+history[-\s]dependent\s+exploration"
+_PAT_ATTRIBUTABLE = (
+    r"attributable\s+to\s+(?:the\s+)?(?:history[-\s]dependent\s+)?exploration"
+)
+_PAT_DRIVEN = r"driven\s+by\s+(?:the\s+)?(?:history[-\s]dependent\s+)?exploration"
+_PAT_CAUSES = r"caus(?:ed|es|ing)\s+[^.\n]{0,80}probe[-\s]separability"
+_PAT_NOT_ADAPTIVITY = r"not\s+adaptivity\s+itself"
+
+_CAVEAT = "subject to a tie-breaking sensitivity caveat (AXS-010 soft_pass)"
+
+_M2_CANONICAL = (
+    "Within the tested policy families in this controlled testbed, above-null "
+    "slate separability requires history-dependent exploration pressure "
+    "coupled to trace-conditioned update dynamics; trace-independent "
+    "randomization and schedule-matched bonuses do not produce the same "
+    "effect."
+)
+# Same single sentence with the canonical caveat marker spliced in before the
+# final period (so the caveat is part of the SAME sentence).
+_M2_WITH_CAVEAT = _M2_CANONICAL[:-1] + ", " + _CAVEAT + "."
+_M2_WITH_PARAPHRASED_CAVEAT = (
+    _M2_CANONICAL[:-1] + ", noting minor ordering effects."
+)
+
+
+def test_mechanism_pattern_list_exact():
+    # EXACTLY the five preregistered patterns — no broadening, no additions.
+    assert MECHANISM_CLAIM_PATTERNS == (
+        _PAT_REQUIRES,
+        _PAT_ATTRIBUTABLE,
+        _PAT_DRIVEN,
+        _PAT_CAUSES,
+        _PAT_NOT_ADAPTIVITY,
+    )
+
+
+def test_default_caveat_marker_matches_prereg():
+    prereg = json.loads(
+        (_REPO_ROOT / "configs" / "prereg" / "axs_mechanism_prereg_v1.json")
+        .read_text(encoding="utf-8")
+    )
+    assert DEFAULT_TIE_BREAK_CAVEAT_MARKER == prereg["tieBreakCaveatMarker"]
+    assert DEFAULT_TIE_BREAK_CAVEAT_MARKER == _CAVEAT
+
+
+# --- PASS fixtures (no finding) ---
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Hypothesis form (M1) — always allowed.
+        "We hypothesize that above-null slate separability may emerge when "
+        "history-dependent exploration pressure is coupled to "
+        "trace-conditioned updates.",
+        "Current results motivate a mechanism hypothesis: above-null slate "
+        "separability may emerge when history-dependent exploration pressure "
+        "is coupled to trace-conditioned updates.",
+    ],
+)
+def test_mechanism_hypothesis_sentences_allowed(text):
+    assert scan_text(text) == [], f"M1 hypothesis form wrongly flagged: {text!r}"
+
+
+def test_mechanism_m2_sentence_allowed_with_license_no_caveat():
+    findings = scan_text(
+        _M2_CANONICAL,
+        mechanism_license={"m2": True, "caveatRequired": False},
+    )
+    assert findings == [], f"licensed M2 sentence wrongly flagged: {findings}"
+
+
+def test_mechanism_m2_sentence_allowed_with_license_and_caveat():
+    findings = scan_text(
+        _M2_WITH_CAVEAT,
+        mechanism_license={"m2": True, "caveatRequired": True},
+    )
+    assert findings == [], (
+        f"licensed M2 sentence with canonical caveat wrongly flagged: {findings}"
+    )
+
+
+def test_requires_the_exploration_config_key_no_match():
+    # "requires the exploration" != "requires history-dependent exploration":
+    # the sentence must not match ANY mechanism pattern.
+    text = "The runner requires the exploration config key."
+    assert scan_text(text) == []
+    import re as _re
+
+    for pat in MECHANISM_CLAIM_PATTERNS:
+        assert _re.search(pat, text, _re.IGNORECASE) is None, (
+            f"pattern {pat!r} must not match {text!r}"
+        )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # snake_case identifier: the regex itself cannot match underscores.
+        "Set the `requires_history_dependent_exploration` flag in the config.",
+        # backtick code-span mention of the claim FORM (mention, not assertion).
+        "The form `requires history-dependent exploration` is a quarantined "
+        "mechanism claim form.",
+    ],
+)
+def test_mechanism_identifier_context_suppressed(text):
+    assert scan_text(text) == [], f"identifier context wrongly flagged: {text!r}"
+
+
+# --- FAIL fixtures (finding) ---
+
+
+@pytest.mark.parametrize(
+    "text, pattern",
+    [
+        (
+            "Amplification is caused by exploration-driven probe separability.",
+            _PAT_CAUSES,
+        ),
+        (
+            "Amplification generally requires history-dependent exploration.",
+            _PAT_REQUIRES,
+        ),
+        ("The effect is attributable to exploration.", _PAT_ATTRIBUTABLE),
+    ],
+)
+def test_mechanism_unmarked_causal_sentences_flagged(text, pattern):
+    findings = scan_text(text)
+    assert any(f.phrase == pattern for f in findings), (
+        f"expected mechanism pattern {pattern!r} flagged in {text!r}: {findings}"
+    )
+
+
+def test_mechanism_driven_by_not_adaptivity_flags_both_patterns():
+    text = "The amplification is driven by exploration, not adaptivity itself."
+    findings = scan_text(text)
+    phrases = {f.phrase for f in findings}
+    assert _PAT_DRIVEN in phrases, findings
+    assert _PAT_NOT_ADAPTIVITY in phrases, findings
+
+
+def test_mechanism_m2_sentence_without_license_flagged():
+    # Fail closed: no gate evidence -> M2-form sentences are findings.
+    findings = scan_text(_M2_CANONICAL)  # mechanism_license=None
+    assert findings, "M2-form sentence without license must be a finding"
+    assert all(f.phrase in MECHANISM_CLAIM_PATTERNS for f in findings)
+
+
+def test_mechanism_m2_sentence_with_denied_license_flagged():
+    findings = scan_text(_M2_CANONICAL, mechanism_license={"m2": False})
+    assert findings, "M2-form sentence with m2=False must be a finding"
+
+
+def test_mechanism_m2_caveat_required_but_absent_flagged():
+    findings = scan_text(
+        _M2_CANONICAL,
+        mechanism_license={"m2": True, "caveatRequired": True},
+    )
+    assert findings, "caveatRequired=True without the caveat must be a finding"
+
+
+def test_mechanism_m2_paraphrased_caveat_flagged():
+    findings = scan_text(
+        _M2_WITH_PARAPHRASED_CAVEAT,
+        mechanism_license={"m2": True, "caveatRequired": True},
+    )
+    assert findings, "paraphrased caveat must NOT satisfy the caveat rule"
+
+
+def test_mechanism_m2_caveat_marker_is_case_sensitive():
+    upper = _M2_CANONICAL[:-1] + ", " + _CAVEAT.upper() + "."
+    findings = scan_text(
+        upper,
+        mechanism_license={"m2": True, "caveatRequired": True},
+    )
+    assert findings, "case-mangled caveat marker must NOT satisfy the rule"
+
+
+def test_mechanism_single_scope_marker_flagged_even_with_license():
+    # Only ONE of the two required scope markers -> finding, license or not.
+    text = (
+        "In this controlled testbed, above-null slate separability requires "
+        "history-dependent exploration pressure."
+    )
+    findings = scan_text(
+        text, mechanism_license={"m2": True, "caveatRequired": False}
+    )
+    assert findings, "single scope marker must not qualify as M2 form"
+
+
+# --- WARNING fixtures (stdout warning, never affects findings/exit) ---
+
+_WARNING_SENTENCE = (
+    "Within the tested policy families in this controlled testbed, "
+    "exploration pressure requires history-dependent exploration and may "
+    "affect users."
+)
+
+
+def test_mechanism_user_vocab_warning_collected():
+    warnings: list = []
+    findings = scan_text(_WARNING_SENTENCE, file="warn.md", warnings=warnings)
+    assert len(warnings) == 1, warnings
+    assert "[경고]" in warnings[0]
+    assert "warn.md:1" in warnings[0]
+    # The finding/license logic applies independently (no license here).
+    assert findings, "unlicensed M2-form sentence must still be a finding"
+
+
+def test_no_warning_without_mechanism_pattern():
+    warnings: list = []
+    findings = scan_text(
+        "The benchmark uses no latent user model.", warnings=warnings
+    )
+    assert warnings == []
+    assert findings == []
+
+
+def test_cli_emits_mechanism_warning(tmp_path, capsys):
+    doc = tmp_path / "warn.md"
+    doc.write_text(_WARNING_SENTENCE + "\n", encoding="utf-8")
+    rc = main([str(doc)])
+    out = capsys.readouterr().out
+    assert rc == 1  # unlicensed M2-form sentence
+    assert "[경고]" in out
+    assert "재검토" in out
+
+
+# --- CLI / gate integration ---
+
+
+def test_cli_mechanism_fail_closed_without_gate_args(tmp_path, capsys):
+    doc = tmp_path / "m2.md"
+    doc.write_text(_M2_CANONICAL + "\n", encoding="utf-8")
+    rc = main([str(doc)])
+    out = capsys.readouterr().out
+    assert rc == 1
+    # Korean Track M guidance: rewrite as hypothesis (M1) or obtain the
+    # scope markers + ladder_gate license.
+    assert "가설형(M1)" in out
+    assert "ladder_gate" in out
+
+
+def _write_gate_evidence(tmp_path, caveat_marker=_CAVEAT):
+    prereg = tmp_path / "prereg.json"
+    prereg.write_text(
+        json.dumps({"tieBreakCaveatMarker": caveat_marker}), encoding="utf-8"
+    )
+    report = tmp_path / "report.json"
+    report.write_text("{}", encoding="utf-8")
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(json.dumps({"entries": []}), encoding="utf-8")
+    return prereg, report, ledger
+
+
+def _gate_args(prereg, report, ledger):
+    return [
+        "--prereg", str(prereg),
+        "--reports", str(report),
+        "--ledger", str(ledger),
+    ]
+
+
+def test_cli_gate_grants_m2_license(tmp_path, capsys, monkeypatch):
+    import echo_bench.tools.ladder_gate as lg
+
+    monkeypatch.setattr(
+        lg,
+        "evaluate_mechanism_license",
+        lambda *a, **k: {"rungs": {"M2": True}, "caveatRequired": False},
+    )
+    prereg, report, ledger = _write_gate_evidence(tmp_path)
+    doc = tmp_path / "m2.md"
+    doc.write_text(_M2_CANONICAL + "\n", encoding="utf-8")
+    rc = main([str(doc)] + _gate_args(prereg, report, ledger))
+    assert rc == 0, capsys.readouterr().out
+
+
+def test_cli_gate_denies_m2_license(tmp_path, capsys, monkeypatch):
+    import echo_bench.tools.ladder_gate as lg
+
+    monkeypatch.setattr(
+        lg,
+        "evaluate_mechanism_license",
+        lambda *a, **k: {"rungs": {"M2": False}, "caveatRequired": False},
+    )
+    prereg, report, ledger = _write_gate_evidence(tmp_path)
+    doc = tmp_path / "m2.md"
+    doc.write_text(_M2_CANONICAL + "\n", encoding="utf-8")
+    rc = main([str(doc)] + _gate_args(prereg, report, ledger))
+    assert rc == 1
+
+
+def test_cli_gate_caveat_marker_read_from_prereg(tmp_path, capsys, monkeypatch):
+    import echo_bench.tools.ladder_gate as lg
+
+    monkeypatch.setattr(
+        lg,
+        "evaluate_mechanism_license",
+        lambda *a, **k: {"rungs": {"M2": True}, "caveatRequired": True},
+    )
+    custom = "subject to a CUSTOM ordering caveat (TEST-001)"
+    prereg, report, ledger = _write_gate_evidence(tmp_path, caveat_marker=custom)
+
+    # Sentence carrying the prereg's custom marker passes...
+    ok_doc = tmp_path / "ok.md"
+    ok_doc.write_text(
+        _M2_CANONICAL[:-1] + ", " + custom + ".\n", encoding="utf-8"
+    )
+    rc = main([str(ok_doc)] + _gate_args(prereg, report, ledger))
+    assert rc == 0, capsys.readouterr().out
+
+    # ...the default marker no longer satisfies the prereg's custom marker.
+    bad_doc = tmp_path / "bad.md"
+    bad_doc.write_text(_M2_WITH_CAVEAT + "\n", encoding="utf-8")
+    rc = main([str(bad_doc)] + _gate_args(prereg, report, ledger))
+    assert rc == 1
+
+
+def test_cli_partial_gate_args_fail_closed(tmp_path, capsys):
+    prereg, _, _ = _write_gate_evidence(tmp_path)
+    doc = tmp_path / "m2.md"
+    doc.write_text(_M2_CANONICAL + "\n", encoding="utf-8")
+    rc = main([str(doc), "--prereg", str(prereg)])
+    assert rc == 1  # missing --reports/--ledger -> no license, fail closed
+
+
+# --- Regression: live tree stays clean with the Track M layer active ---
+
+
+def test_live_tree_clean_with_mechanism_layer():
+    warnings: list = []
+    findings = scan_paths([_DOCS_DIR, _REPORTS_DIR], warnings=warnings)
+    mech = [f for f in findings if f.phrase in MECHANISM_CLAIM_PATTERNS]
+    assert mech == [], (
+        "live docs/ + outputs/reports/ tripped a Track M mechanism pattern "
+        f"(report as a concern, do not weaken the regex): {mech}"
+    )
+    assert warnings == [], f"live tree produced Track M warnings: {warnings}"

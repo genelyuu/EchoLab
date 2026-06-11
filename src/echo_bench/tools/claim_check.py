@@ -79,6 +79,30 @@ message naming the pattern and the required reframing: the statement must be
 rewritten as a **probe separability diagnostic** (approved replacement
 sentences are printed; see ``docs/12_CLAIM_LADDER.md`` Section 3).
 
+G-022a — Track M mechanism-claim layer
+---------------------------------------
+Mechanism-CAUSAL sentences about exploration / probe separability are
+forbidden UNLESS licensed. :data:`MECHANISM_CLAIM_PATTERNS` holds EXACTLY the
+five preregistered claim-form regexes (no broadening). Decision per SENTENCE
+containing a mechanism pattern (sentences are reassembled across wrapped
+lines; backtick/identifier mentions are suppressed as elsewhere):
+
+1. The sentence carries a HYPOTHESIS marker
+   (:data:`MECHANISM_HYPOTHESIS_MARKERS`, case-insensitive) → allowed (M1).
+2. Else the sentence carries BOTH SCOPE markers
+   (:data:`MECHANISM_SCOPE_MARKERS`) → M2 form: allowed ONLY when an M2
+   license is active (resolved by ``echo_bench.tools.ladder_gate.
+   evaluate_mechanism_license`` from prereg + reports + ledger evidence;
+   NEVER from licenses.json). When the license carries ``caveatRequired``,
+   the sentence must ALSO contain the canonical caveat marker from the
+   prereg (``tieBreakCaveatMarker``) as an EXACT, case-sensitive substring.
+3. Else → finding (fail closed; rewrite as M1 hypothesis or obtain the two
+   scope markers + a ladder_gate M2 license).
+
+A sentence containing a mechanism pattern AND ``user``/``users``/``privacy``
+additionally emits a Korean WARNING line (stdout only — never a finding,
+never affects the exit code).
+
 CLI
 ---
 ``python -m echo_bench.tools.claim_check [paths...]`` scans the default targets
@@ -86,18 +110,25 @@ CLI
 findings, emits a Korean summary log line, and exits non-zero if any genuine
 assertion-style forbidden claim is found (exit ``0`` when clean).
 
+Optional Track M gate arguments: ``--prereg P --reports R1 R2... --ledger L
+[--release]``. When ALL THREE are provided the M2 license is recomputed once
+up front via ``ladder_gate.evaluate_mechanism_license``; otherwise (default)
+no license is active and M2-form sentences are findings (fail closed).
+
 All identifiers and file paths stay English; the summary log line is Korean per
 the project logging convention.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import sys
+from bisect import bisect_right
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Sequence
+from typing import Iterable, List, Optional, Sequence
 
 from echo_bench.logging import get_logger
 from echo_bench.policies.display_names import REFERENCE_NOTE
@@ -105,6 +136,10 @@ from echo_bench.policies.display_names import REFERENCE_NOTE
 __all__ = [
     "FORBIDDEN_PHRASES",
     "FORBIDDEN_CLAIM_PATTERNS",
+    "MECHANISM_CLAIM_PATTERNS",
+    "MECHANISM_HYPOTHESIS_MARKERS",
+    "MECHANISM_SCOPE_MARKERS",
+    "DEFAULT_TIE_BREAK_CAVEAT_MARKER",
     "OracleNoteViolation",
     "Finding",
     "check_oracle_note",
@@ -178,6 +213,76 @@ _FORBIDDEN_PATTERN_RES: tuple[tuple[str, "re.Pattern[str]"], ...] = tuple(
         ),
     )
     for pattern in FORBIDDEN_CLAIM_PATTERNS
+)
+
+# G-022a (Track M): mechanism-causal claim-form regex patterns. EXACTLY the
+# five preregistered forms — no broadening, no additions. Matched per SENTENCE
+# (reassembled across wrapped lines) with the same whole-token boundary guards
+# as FORBIDDEN_CLAIM_PATTERNS; backtick/identifier mentions are suppressed via
+# _is_identifier_context. A match is a finding UNLESS the sentence is licensed
+# (M1 hypothesis marker, or M2 scope markers + active ladder_gate license).
+MECHANISM_CLAIM_PATTERNS: tuple[str, ...] = (
+    r"requires\s+history[-\s]dependent\s+exploration",
+    r"attributable\s+to\s+(?:the\s+)?(?:history[-\s]dependent\s+)?exploration",
+    r"driven\s+by\s+(?:the\s+)?(?:history[-\s]dependent\s+)?exploration",
+    r"caus(?:ed|es|ing)\s+[^.\n]{0,80}probe[-\s]separability",
+    r"not\s+adaptivity\s+itself",
+)
+
+# Compiled forms with the same whole-token boundary guards as
+# _FORBIDDEN_PATTERN_RES.
+_MECHANISM_PATTERN_RES: tuple[tuple[str, "re.Pattern[str]"], ...] = tuple(
+    (
+        pattern,
+        re.compile(
+            r"(?<![A-Za-z0-9])(?:" + pattern + r")(?![A-Za-z0-9])",
+            re.IGNORECASE,
+        ),
+    )
+    for pattern in MECHANISM_CLAIM_PATTERNS
+)
+
+# M1 hypothesis markers: any ONE licenses the sentence as hypothesis-form
+# (always allowed). Matched case-insensitively as substrings of the sentence.
+MECHANISM_HYPOTHESIS_MARKERS: tuple[str, ...] = (
+    "hypothesize",
+    "hypothesis",
+    "motivates the hypothesis",
+    "we test whether",
+    "is consistent with",
+    "may emerge",
+)
+
+# M2 scope markers: BOTH are required for a sentence to qualify as M2 form.
+# Matched case-insensitively as substrings of the sentence. These mirror
+# configs/prereg/axs_mechanism_prereg_v1.json scope.requiredScopeMarkers.
+MECHANISM_SCOPE_MARKERS: tuple[str, ...] = (
+    "within the tested policy families",
+    "in this controlled testbed",
+)
+
+# Canonical tie-break caveat marker. Default used when no prereg is loaded;
+# when a prereg IS loaded (CLI --prereg), the marker is read from its
+# tieBreakCaveatMarker field. The caveat must appear in the M2 sentence as an
+# EXACT, case-sensitive substring when the license carries caveatRequired.
+DEFAULT_TIE_BREAK_CAVEAT_MARKER: str = (
+    "subject to a tie-breaking sensitivity caveat (AXS-010 soft_pass)"
+)
+
+# user/privacy vocabulary co-occurring with a mechanism pattern triggers a
+# Korean WARNING (stdout only, never a finding, never affects the exit code).
+_MECHANISM_WARN_VOCAB_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:users?|privacy)(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+
+# Korean guidance for Track M findings (English marker strings are
+# machine-read identifiers and stay English).
+_TRACK_M_GUIDANCE = (
+    "메커니즘 인과형 표현은 라이선스 없이 금지됨 — 가설형(M1) 문장으로 "
+    "바꾸거나, scope 마커 2종('within the tested policy families' + "
+    "'in this controlled testbed')과 ladder_gate M2 라이선스를 확보할 것 "
+    "(caveatRequired 시 prereg tieBreakCaveatMarker 원문을 같은 문장에 포함)"
 )
 
 # Korean guidance for G-010 pattern hits (identifiers / metric names stay
@@ -382,7 +487,17 @@ def _label_order(label: str) -> int:
         return FORBIDDEN_PHRASES.index(label)
     if label in FORBIDDEN_CLAIM_PATTERNS:
         return len(FORBIDDEN_PHRASES) + FORBIDDEN_CLAIM_PATTERNS.index(label)
-    return len(FORBIDDEN_PHRASES) + len(FORBIDDEN_CLAIM_PATTERNS)
+    if label in MECHANISM_CLAIM_PATTERNS:
+        return (
+            len(FORBIDDEN_PHRASES)
+            + len(FORBIDDEN_CLAIM_PATTERNS)
+            + MECHANISM_CLAIM_PATTERNS.index(label)
+        )
+    return (
+        len(FORBIDDEN_PHRASES)
+        + len(FORBIDDEN_CLAIM_PATTERNS)
+        + len(MECHANISM_CLAIM_PATTERNS)
+    )
 
 
 def _is_identifier_context(line: str, start: int, end: int) -> bool:
@@ -455,6 +570,160 @@ def _is_denial_enumeration(line: str, start: int, end: int) -> bool:
     return any(word in low for word in _ENUM_DENIAL_WORDS)
 
 
+# ---------------------------------------------------------------------------
+# G-022a — Track M mechanism-claim layer (sentence-level)
+# ---------------------------------------------------------------------------
+
+# A bullet/list item starts a fresh sentence chunk even without a blank line.
+_BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s")
+
+# Sentence terminator: ., !, ? followed by whitespace or end-of-chunk.
+# Semicolons do NOT terminate a sentence (the canonical M2 sentence uses one).
+_SENTENCE_END_RE = re.compile(r"[.!?](?=\s|$)")
+
+
+def _iter_sentence_chunks(text: str) -> Iterable[List[tuple[int, str]]]:
+    """Yield chunks of ``(line_no, stripped_line)`` forming sentence groups.
+
+    Wrapped prose lines are grouped so a sentence spanning several source
+    lines is evaluated as ONE sentence. Chunk boundaries: blank lines,
+    markdown headings, and bullet/list-item starts. Lines inside a
+    ``## Forbidden ...`` section are skipped entirely (that section
+    enumerates forbidden forms, it never asserts them).
+    """
+    chunk: List[tuple[int, str]] = []
+    in_forbidden_section = False
+    for idx, raw in enumerate(text.splitlines(), start=1):
+        if _HEADING_RE.match(raw):
+            in_forbidden_section = bool(
+                _FORBIDDEN_SECTION_HEADING_RE.match(raw)
+            )
+            if chunk:
+                yield chunk
+                chunk = []
+            continue
+        stripped = raw.strip()
+        if not stripped or in_forbidden_section:
+            if chunk:
+                yield chunk
+                chunk = []
+            continue
+        if _BULLET_RE.match(raw) and chunk:
+            yield chunk
+            chunk = []
+        chunk.append((idx, stripped))
+    if chunk:
+        yield chunk
+
+
+def _split_sentences_with_offsets(joined: str) -> List[tuple[int, str]]:
+    """Split ``joined`` into ``(start_offset, sentence)`` pairs."""
+    out: List[tuple[int, str]] = []
+    start = 0
+    for m in _SENTENCE_END_RE.finditer(joined):
+        end = m.end()
+        if joined[start:end].strip():
+            out.append((start, joined[start:end]))
+        start = end
+        while start < len(joined) and joined[start].isspace():
+            start += 1
+    if start < len(joined) and joined[start:].strip():
+        out.append((start, joined[start:]))
+    return out
+
+
+def _scan_mechanism_claims(
+    text: str,
+    *,
+    file: str,
+    mechanism_license: Optional[dict],
+    warnings: Optional[List[str]],
+) -> List[Finding]:
+    """Track M scan: mechanism-causal sentences forbidden unless licensed.
+
+    Per sentence containing a mechanism pattern (identifier/backtick mentions
+    suppressed): a hypothesis marker licenses it as M1 (always allowed); BOTH
+    scope markers qualify it as M2-form, allowed only when ``mechanism_license``
+    carries an active M2 grant (and, when ``caveatRequired``, the canonical
+    caveat marker as an exact case-sensitive substring); everything else is a
+    finding. ``mechanism_license=None`` means NO license (fail closed).
+
+    When ``warnings`` is a list, a Korean warning string is appended for every
+    mechanism-pattern sentence that also carries user/users/privacy vocabulary
+    (warning only — never a finding).
+    """
+    lic = mechanism_license or {}
+    m2_granted = bool(lic.get("m2", False))
+    # Fail closed: a license dict without an explicit caveatRequired=False is
+    # treated as caveat-required.
+    caveat_required = bool(lic.get("caveatRequired", True))
+    caveat_marker = lic.get("caveatMarker") or DEFAULT_TIE_BREAK_CAVEAT_MARKER
+
+    findings: List[Finding] = []
+    for chunk in _iter_sentence_chunks(text):
+        # Join the chunk's lines with single spaces, remembering where each
+        # source line starts so matches map back to a 1-based line number.
+        starts: List[int] = []
+        line_nos: List[int] = []
+        parts: List[str] = []
+        offset = 0
+        for line_no, stripped in chunk:
+            if parts:
+                offset += 1  # the joining space
+            starts.append(offset)
+            line_nos.append(line_no)
+            parts.append(stripped)
+            offset += len(stripped)
+        joined = " ".join(parts)
+
+        def _line_for(abs_offset: int) -> int:
+            return line_nos[max(0, bisect_right(starts, abs_offset) - 1)]
+
+        for s_start, sentence in _split_sentences_with_offsets(joined):
+            matches: List[tuple[str, re.Match]] = []
+            for pattern, rx in _MECHANISM_PATTERN_RES:
+                for m in rx.finditer(sentence):
+                    if _is_identifier_context(sentence, m.start(), m.end()):
+                        continue  # mention (backtick/identifier), not a claim
+                    matches.append((pattern, m))
+            if not matches:
+                continue
+
+            first_line = _line_for(s_start + matches[0][1].start())
+
+            # Warning rule: mechanism pattern + user/users/privacy vocabulary.
+            if warnings is not None and _MECHANISM_WARN_VOCAB_RE.search(
+                sentence
+            ):
+                warnings.append(
+                    "[경고] 메커니즘 클레임 문장에 user/privacy 어휘 공존 — "
+                    f"문장 재검토 권장: {file}:{first_line}"
+                )
+
+            low = sentence.lower()
+            # 1. M1 hypothesis form: always allowed.
+            if any(h in low for h in MECHANISM_HYPOTHESIS_MARKERS):
+                continue
+            # 2. M2 form (BOTH scope markers): allowed only under an active
+            #    M2 license (+ exact caveat marker when caveatRequired).
+            if all(s in low for s in MECHANISM_SCOPE_MARKERS):
+                if m2_granted and (
+                    not caveat_required or caveat_marker in sentence
+                ):
+                    continue
+            # 3. Unlicensed mechanism claim: finding (fail closed).
+            for pattern, m in matches:
+                findings.append(
+                    Finding(
+                        file=file,
+                        line=_line_for(s_start + m.start()),
+                        phrase=pattern,
+                        text=sentence.strip(),
+                    )
+                )
+    return findings
+
+
 # --- G-008 oracle-note rule ---
 
 
@@ -504,7 +773,13 @@ def check_oracle_note(report: dict, *, file: str = "<report>") -> None:
         )
 
 
-def scan_text(text: str, *, file: str = "<text>") -> List[Finding]:
+def scan_text(
+    text: str,
+    *,
+    file: str = "<text>",
+    mechanism_license: Optional[dict] = None,
+    warnings: Optional[List[str]] = None,
+) -> List[Finding]:
     """Scan ``text`` and return genuine assertion-style forbidden-claim findings.
 
     A line is reported for a phrase only when the phrase is used as an ASSERTION:
@@ -515,6 +790,13 @@ def scan_text(text: str, *, file: str = "<text>") -> List[Finding]:
     Args:
         text: the document text to scan.
         file: label recorded on each :class:`Finding` (defaults to ``<text>``).
+        mechanism_license: G-022a Track M license, a dict
+            ``{"m2": bool, "caveatRequired": bool, "caveatMarker": str}``.
+            ``None`` (default) means NO license is active — M2-form mechanism
+            sentences are findings (fail closed).
+        warnings: optional list; Korean Track M warning strings are appended
+            (mechanism pattern + user/privacy vocabulary). Warnings are never
+            findings and never affect the exit code.
 
     Returns:
         A deterministically ordered list of :class:`Finding` (by line, then by
@@ -600,11 +882,26 @@ def scan_text(text: str, *, file: str = "<text>") -> List[Finding]:
             prev_line = line
             prev_was_denial_context = line_has_negator or line_has_denial_word
 
+    # G-022a: Track M mechanism-claim layer (sentence-level, fail closed).
+    findings.extend(
+        _scan_mechanism_claims(
+            text,
+            file=file,
+            mechanism_license=mechanism_license,
+            warnings=warnings,
+        )
+    )
+
     findings.sort(key=lambda f: (f.line, f.text, _label_order(f.phrase)))
     return findings
 
 
-def scan_path(path: str | Path) -> List[Finding]:
+def scan_path(
+    path: str | Path,
+    *,
+    mechanism_license: Optional[dict] = None,
+    warnings: Optional[List[str]] = None,
+) -> List[Finding]:
     """Scan a single file and return its genuine findings.
 
     For JSON files the function additionally runs the G-008 oracle-note rule
@@ -620,7 +917,12 @@ def scan_path(path: str | Path) -> List[Finding]:
     except (OSError, UnicodeDecodeError):
         return []
 
-    findings = scan_text(text, file=str(p))
+    findings = scan_text(
+        text,
+        file=str(p),
+        mechanism_license=mechanism_license,
+        warnings=warnings,
+    )
 
     # G-008: run oracle-note JSON rule on .json files.
     if p.suffix.lower() == ".json":
@@ -658,11 +960,18 @@ def _iter_files(target: Path) -> Iterable[Path]:
         yield target
 
 
-def scan_paths(paths: Sequence[str | Path]) -> List[Finding]:
+def scan_paths(
+    paths: Sequence[str | Path],
+    *,
+    mechanism_license: Optional[dict] = None,
+    warnings: Optional[List[str]] = None,
+) -> List[Finding]:
     """Scan multiple files/directories and return all genuine findings.
 
     Directories are walked recursively for ``.md`` / ``.json`` / ``.txt`` files.
     Findings are returned in a deterministic order (by file, then line).
+    ``mechanism_license`` / ``warnings`` are forwarded to :func:`scan_text`
+    (G-022a Track M; ``None`` license = fail closed).
     """
     findings: List[Finding] = []
     seen: set[Path] = set()
@@ -673,7 +982,13 @@ def scan_paths(paths: Sequence[str | Path]) -> List[Finding]:
             if resolved in seen:
                 continue
             seen.add(resolved)
-            findings.extend(scan_path(f))
+            findings.extend(
+                scan_path(
+                    f,
+                    mechanism_license=mechanism_license,
+                    warnings=warnings,
+                )
+            )
     findings.sort(key=lambda f: (f.file, f.line, f.text))
     return findings
 
@@ -684,21 +999,107 @@ def _default_targets() -> List[Path]:
     return [repo_root / "docs", repo_root / "outputs" / "reports"]
 
 
+def _resolve_mechanism_license(args: argparse.Namespace) -> Optional[dict]:
+    """Resolve the Track M M2 license from gate arguments (G-022a).
+
+    The license is recomputed ONCE via
+    :func:`echo_bench.tools.ladder_gate.evaluate_mechanism_license` when ALL
+    of ``--prereg`` / ``--reports`` / ``--ledger`` are provided. Any other
+    state — args missing, gate error — returns ``None`` (no license, fail
+    closed). licenses.json is NEVER read.
+    """
+    if not (args.prereg and args.reports and args.ledger):
+        if args.prereg or args.reports or args.ledger:
+            print(
+                "[경고] --prereg/--reports/--ledger 는 셋 모두 함께 지정해야 함 "
+                "— M2 라이선스 미부여 (fail closed)"
+            )
+        return None
+
+    import echo_bench.tools.ladder_gate as _ladder_gate
+
+    try:
+        gate = _ladder_gate.evaluate_mechanism_license(
+            args.prereg,
+            args.reports,
+            ledger_path=args.ledger,
+            release=args.release,
+        )
+    except (ValueError, OSError) as exc:
+        print(
+            f"[경고] ladder_gate 평가 실패 — M2 라이선스 미부여 (fail closed): {exc}"
+        )
+        return None
+
+    # Canonical caveat marker: read from the loaded prereg; fall back to the
+    # committed default only if the field is absent.
+    caveat_marker = DEFAULT_TIE_BREAK_CAVEAT_MARKER
+    try:
+        with open(args.prereg, "r", encoding="utf-8") as fh:
+            prereg = json.load(fh)
+        marker = prereg.get("tieBreakCaveatMarker")
+        if isinstance(marker, str) and marker:
+            caveat_marker = marker
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
+
+    return {
+        "m2": bool((gate.get("rungs") or {}).get("M2", False)),
+        "caveatRequired": bool(gate.get("caveatRequired", True)),
+        "caveatMarker": caveat_marker,
+    }
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI entry point. Scan targets, print findings, return an exit code.
 
     Args:
-        argv: optional path arguments; when empty, scans the default targets
-            (``docs/`` and ``outputs/reports/``).
+        argv: optional arguments: scan paths (when empty, scans the default
+            targets ``docs/`` and ``outputs/reports/``) plus the optional
+            Track M gate arguments ``--prereg`` / ``--reports`` / ``--ledger``
+            / ``--release`` (all three evidence args required together;
+            otherwise no M2 license is active — fail closed).
 
     Returns:
         ``0`` when the scanned tree is clean; ``1`` when any genuine
-        assertion-style forbidden claim is found.
+        assertion-style forbidden claim is found. Track M warnings never
+        affect the exit code.
     """
     argv = list(sys.argv[1:] if argv is None else argv)
-    targets: Sequence[str | Path] = argv if argv else _default_targets()
+    parser = argparse.ArgumentParser(
+        prog="claim_check",
+        description="ECHO-Bench 금지 클레임 스캐너 (G-005/G-008/G-010/G-022a)",
+    )
+    parser.add_argument("paths", nargs="*", help="스캔 대상 경로 목록")
+    parser.add_argument("--prereg", default=None, help="사전등록 JSON 경로")
+    parser.add_argument(
+        "--reports", nargs="*", default=None, help="실험 리포트 JSON 경로 목록"
+    )
+    parser.add_argument("--ledger", default=None, help="실행 원장 JSON 경로")
+    parser.add_argument(
+        "--release",
+        action="store_true",
+        default=False,
+        help="원격 ancestry 추가 확인 (ladder_gate 로 전달)",
+    )
+    args = parser.parse_args(argv)
 
-    findings = scan_paths(targets)
+    targets: Sequence[str | Path] = (
+        args.paths if args.paths else _default_targets()
+    )
+
+    mechanism_license = _resolve_mechanism_license(args)
+
+    track_m_warnings: List[str] = []
+    findings = scan_paths(
+        targets,
+        mechanism_license=mechanism_license,
+        warnings=track_m_warnings,
+    )
+
+    # Track M warnings: stdout only, NEVER findings, NEVER affect exit code.
+    for w in track_m_warnings:
+        print(w)
 
     if findings:
         for f in findings:
@@ -720,6 +1121,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             for sentence in _G010_APPROVED_REPLACEMENTS:
                 print(f"  - {sentence}")
+        # G-022a: Korean guidance for Track M mechanism-claim hits.
+        track_m_hits = [
+            f for f in findings if f.phrase in MECHANISM_CLAIM_PATTERNS
+        ]
+        if track_m_hits:
+            for f in track_m_hits:
+                print(
+                    f"[Track M] 금지 메커니즘 클레임 패턴 '{f.phrase}' 감지 "
+                    f"({f.file}:{f.line}) — {_TRACK_M_GUIDANCE}"
+                )
         # Korean summary line.
         print(
             f"클레임 스캔 실패: 금지된 주장 {len(findings)}건 발견 "
