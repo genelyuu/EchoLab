@@ -17,7 +17,9 @@ metric names, and file paths stay English per the project convention.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -30,7 +32,7 @@ __all__ = [
     "build_prereg_stamp",
     "append_ledger_entry",
     "load_ledger",
-    "family_entries",
+    "entries_for_prereg",
 ]
 
 _logger = get_logger(__name__)
@@ -115,9 +117,18 @@ def load_prereg(path: Any) -> Dict[str, Any]:
             f"(path={path})."
         )
 
-    # Amendment policy: version > 1 requires supersedes + changeJustification.
+    # version must be a plain int >= 1.  Reject bool (isinstance(True, int) is
+    # True in Python), strings, floats, and zero/negative values — any of these
+    # would silently bypass the amendment-policy check below.
     version = prereg.get("version")
-    if isinstance(version, int) and version > 1:
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise ValueError(
+            f"사전등록 'version' 필드는 1 이상의 정수여야 합니다 "
+            f"(현재 값: {version!r}, 타입: {type(version).__name__}, path={path})."
+        )
+
+    # Amendment policy: version > 1 requires supersedes + changeJustification.
+    if version > 1:
         amendment_missing = [k for k in _AMENDMENT_REQUIRED_KEYS if k not in prereg]
         if amendment_missing:
             raise ValueError(
@@ -161,7 +172,7 @@ def prereg_hash(prereg: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _run_git(args: List[str], git_runner: Optional[Callable]) -> str:
+def _run_git(args: List[str], git_runner: Optional[Callable[[List[str]], str]]) -> str:
     """Execute a git command and return its stripped stdout.
 
     If ``git_runner`` is provided, delegates to it (test injection). Otherwise
@@ -179,15 +190,18 @@ def _run_git(args: List[str], git_runner: Optional[Callable]) -> str:
         )
         return result.stdout.strip()
     except (subprocess.SubprocessError, OSError) as exc:
+        stderr_detail = ""
+        if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
+            stderr_detail = f" (stderr: {exc.stderr.strip()})"
         raise ValueError(
-            f"git 명령 실행 실패: {args} — {exc}"
+            f"git 명령 실행 실패: {args} — {exc}{stderr_detail}"
         ) from exc
 
 
 def build_prereg_stamp(
     prereg_path: Any,
     *,
-    git_runner: Optional[Callable] = None,
+    git_runner: Optional[Callable[[List[str]], str]] = None,
 ) -> Dict[str, Any]:
     """Build a provenance stamp for embedding into experiment reports.
 
@@ -296,7 +310,17 @@ def load_ledger(ledger_path: Any) -> Dict[str, Any]:
 
 
 def append_ledger_entry(ledger_path: Any, entry: Dict[str, Any]) -> None:
-    """Append an entry to the run ledger (append-only; duplicate reportHash is no-op).
+    """Append an entry to the run ledger (append-only; idempotent on exact duplicate).
+
+    Duplicate detection:
+    - If an existing entry has the same ``reportHash`` AND is byte-for-byte
+      identical to *entry*, the call is a no-op (idempotent re-append).
+    - If an existing entry has the same ``reportHash`` but ANY field differs,
+      ``ValueError`` is raised — this is an integrity anomaly.
+
+    Atomic write: the ledger is written to a ``.json.tmp`` sibling, fsynced,
+    then atomically replaced via ``os.replace``.  Concurrent appends are not
+    locked (single-operator CLI assumption).
 
     Args:
         ledger_path: path-like pointing at the ledger JSON file.
@@ -305,7 +329,8 @@ def append_ledger_entry(ledger_path: Any, entry: Dict[str, Any]) -> None:
 
     Raises:
         ValueError: if ``entry`` is missing required keys, if the ledger file
-            is corrupted/invalid JSON, or if it lacks an ``entries`` list.
+            is corrupted/invalid JSON, if it lacks an ``entries`` list, or if
+            an existing entry shares ``reportHash`` but has conflicting metadata.
     """
     # Validate entry keys up front (fail-closed).
     if not isinstance(entry, dict):
@@ -321,22 +346,42 @@ def append_ledger_entry(ledger_path: Any, entry: Dict[str, Any]) -> None:
 
     ledger = load_ledger(ledger_path)
 
-    # Append-only: duplicate reportHash is a no-op (not a failure).
-    existing_hashes = {e.get("reportHash") for e in ledger["entries"]}
-    if entry["reportHash"] in existing_hashes:
-        log_ko(
-            _logger,
-            "원장 중복 등록 무시(no-op): "
-            f"reportHash={entry['reportHash'][:12]} 가 이미 존재합니다 "
-            f"(reportId={entry.get('reportId')}).",
-        )
-        return
+    # Duplicate / conflict check by reportHash.
+    entry_hash = entry["reportHash"]
+    for existing in ledger["entries"]:
+        if existing.get("reportHash") == entry_hash:
+            if existing == dict(entry):
+                # Exact duplicate — idempotent no-op.
+                log_ko(
+                    _logger,
+                    "원장 중복 등록 무시(no-op): "
+                    f"reportHash={entry_hash[:12]} 가 이미 존재합니다 "
+                    f"(reportId={entry.get('reportId')}).",
+                )
+                return
+            # Same hash, different content — integrity anomaly.
+            raise ValueError(
+                "원장 무결성 이상: 같은 reportHash에 상이한 메타데이터가 감지되었습니다 "
+                f"(reportHash={entry_hash[:12]}, "
+                f"기존 reportId={existing.get('reportId')!r}, "
+                f"신규 reportId={entry.get('reportId')!r})."
+            )
 
     ledger["entries"].append(dict(entry))
 
     ledger_path = Path(ledger_path)
-    with open(ledger_path, "w", encoding="utf-8") as handle:
-        json.dump(ledger, handle, indent=2, sort_keys=True, ensure_ascii=True)
+    tmp_path = ledger_path.with_suffix(".json.tmp")
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(ledger, handle, indent=2, sort_keys=True, ensure_ascii=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, ledger_path)
+    except Exception:
+        # Clean up stale tmp file if replacement failed.
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+        raise
 
     log_ko(
         _logger,
@@ -350,12 +395,16 @@ def append_ledger_entry(ledger_path: Any, entry: Dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# family_entries
+# entries_for_prereg
 # ---------------------------------------------------------------------------
 
 
-def family_entries(ledger: Dict[str, Any], prereg_id: str) -> List[Dict[str, Any]]:
+def entries_for_prereg(ledger: Dict[str, Any], prereg_id: str) -> List[Dict[str, Any]]:
     """Return all ledger entries whose ``preregId`` matches ``prereg_id``.
+
+    Renamed from ``family_entries`` to avoid collision with the repo's
+    seed-family vocabulary; this function filters by ``preregId``, not by
+    seed family.
 
     Args:
         ledger: a ledger dict as returned by :func:`load_ledger`.

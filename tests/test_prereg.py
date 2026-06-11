@@ -27,7 +27,7 @@ import pytest
 from echo_bench.logging.prereg import (
     append_ledger_entry,
     build_prereg_stamp,
-    family_entries,
+    entries_for_prereg,
     load_ledger,
     load_prereg,
     prereg_hash,
@@ -400,7 +400,7 @@ class TestLoadLedger:
             load_ledger(p)
 
 
-class TestFamilyEntries:
+class TestEntriesForPrereg:
     def _ledger_with_entries(self) -> dict:
         entries = [
             {**_minimal_ledger_entry(), "preregId": "axs-mechanism"},
@@ -413,17 +413,17 @@ class TestFamilyEntries:
 
     def test_returns_matching_entries(self):
         ledger = self._ledger_with_entries()
-        result = family_entries(ledger, "axs-mechanism")
+        result = entries_for_prereg(ledger, "axs-mechanism")
         assert len(result) == 2
 
     def test_returns_empty_for_unknown_prereg(self):
         ledger = self._ledger_with_entries()
-        result = family_entries(ledger, "nonexistent")
+        result = entries_for_prereg(ledger, "nonexistent")
         assert result == []
 
     def test_filters_by_prereg_id(self):
         ledger = self._ledger_with_entries()
-        result = family_entries(ledger, "other-prereg")
+        result = entries_for_prereg(ledger, "other-prereg")
         assert len(result) == 1
         assert result[0]["preregId"] == "other-prereg"
 
@@ -468,3 +468,122 @@ class TestPreregV1Structural:
     def test_no_pvalues_true(self):
         prereg = load_prereg(_PREREG_V1_PATH)
         assert prereg.get("noPValues") is True
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: Atomic ledger write — no tmp file left behind, content intact
+# ---------------------------------------------------------------------------
+
+
+class TestAtomicLedgerWrite:
+    """append_ledger_entry must leave no .tmp file after a successful write."""
+
+    def _fresh_ledger(self, tmp_path) -> Path:
+        p = tmp_path / "run_ledger.json"
+        p.write_text(json.dumps({"ledgerVersion": 1, "entries": []}), encoding="utf-8")
+        return p
+
+    def test_no_tmp_file_remains_after_append(self, tmp_path):
+        ledger_path = self._fresh_ledger(tmp_path)
+        entry = _minimal_ledger_entry()
+        append_ledger_entry(ledger_path, entry)
+        tmp_path_file = ledger_path.with_suffix(".json.tmp")
+        assert not tmp_path_file.exists(), ".tmp ファイルが残っています"
+
+    def test_content_intact_after_append(self, tmp_path):
+        ledger_path = self._fresh_ledger(tmp_path)
+        entry = _minimal_ledger_entry()
+        append_ledger_entry(ledger_path, entry)
+        ledger = load_ledger(ledger_path)
+        assert len(ledger["entries"]) == 1
+        assert ledger["entries"][0]["reportId"] == entry["reportId"]
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: String-version bypass — version must be int >= 1, not bool/str
+# ---------------------------------------------------------------------------
+
+
+class TestVersionIntValidation:
+    """load_prereg must reject non-int, bool, and out-of-range version values."""
+
+    def _write_prereg(self, tmp_path, prereg: Dict[str, Any]) -> Path:
+        p = tmp_path / "prereg.json"
+        p.write_text(json.dumps(prereg), encoding="utf-8")
+        return p
+
+    def test_string_version_raises(self, tmp_path):
+        """'version': '2' (string) must raise ValueError, not silently skip amendment check."""
+        prereg = _minimal_prereg_v1()
+        prereg["version"] = "2"
+        # No supersedes/changeJustification — would be bypass if not caught
+        p = self._write_prereg(tmp_path, prereg)
+        with pytest.raises(ValueError):
+            load_prereg(p)
+
+    def test_version_zero_raises(self, tmp_path):
+        """version 0 is not a valid version number."""
+        prereg = _minimal_prereg_v1()
+        prereg["version"] = 0
+        p = self._write_prereg(tmp_path, prereg)
+        with pytest.raises(ValueError):
+            load_prereg(p)
+
+    def test_bool_true_version_raises(self, tmp_path):
+        """True (bool) must not be accepted as version=1 (isinstance(True, int) is True in Python)."""
+        prereg = _minimal_prereg_v1()
+        prereg["version"] = True
+        p = self._write_prereg(tmp_path, prereg)
+        with pytest.raises(ValueError):
+            load_prereg(p)
+
+    def test_int_version_1_passes(self, tmp_path):
+        prereg = _minimal_prereg_v1()
+        prereg["version"] = 1
+        p = self._write_prereg(tmp_path, prereg)
+        result = load_prereg(p)
+        assert result["version"] == 1
+
+    def test_int_version_2_with_amendment_keys_passes(self, tmp_path):
+        prereg = _minimal_prereg_v1()
+        prereg["version"] = 2
+        prereg["supersedes"] = "axs-mechanism-v1"
+        prereg["changeJustification"] = "Added AXS-001 arm"
+        p = self._write_prereg(tmp_path, prereg)
+        result = load_prereg(p)
+        assert result["version"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Fix 3: Duplicate reportHash with conflicting metadata must raise ValueError
+# ---------------------------------------------------------------------------
+
+
+class TestDuplicateHashConflict:
+    """Same reportHash + different fields must raise ValueError."""
+
+    def _fresh_ledger(self, tmp_path) -> Path:
+        p = tmp_path / "run_ledger.json"
+        p.write_text(json.dumps({"ledgerVersion": 1, "entries": []}), encoding="utf-8")
+        return p
+
+    def test_identical_reappend_is_noop(self, tmp_path):
+        """Exact same entry re-appended must be silently ignored (idempotent)."""
+        ledger_path = self._fresh_ledger(tmp_path)
+        entry = _minimal_ledger_entry()
+        append_ledger_entry(ledger_path, entry)
+        append_ledger_entry(ledger_path, entry)  # identical re-append
+        ledger = load_ledger(ledger_path)
+        assert len(ledger["entries"]) == 1
+
+    def test_same_hash_different_report_id_raises(self, tmp_path):
+        """Same reportHash but different reportId must raise ValueError (integrity anomaly)."""
+        ledger_path = self._fresh_ledger(tmp_path)
+        entry1 = _minimal_ledger_entry()
+        append_ledger_entry(ledger_path, entry1)
+
+        entry2 = dict(entry1)
+        entry2["reportId"] = "conflicting-report-id"
+        # same reportHash, different reportId -> integrity anomaly
+        with pytest.raises(ValueError):
+            append_ledger_entry(ledger_path, entry2)
