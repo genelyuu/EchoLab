@@ -79,6 +79,7 @@ from echo_bench.metrics.leakage import (
     leakage_proxy_with_metadata,
     utility_per_leakage,
 )
+from echo_bench.metrics.separability import channel_separated_separability
 from echo_bench.metrics.robustness import (
     FAULTS,
     ROBUSTNESS_DIRECTION,
@@ -317,6 +318,10 @@ def run_e3_audit(
     # 4. (a) LEAKAGE PROXY section. Per policy, build the probe-keyed trace family
     #    and compute leakage_proxy (carried with the explicit proxy disclaimer).
     leakage_rows: List[Dict[str, Any]] = []
+    # D-015 cleanup: the section-level nullPermutations is read back from the
+    # computed null-corrected block (single source of truth), not hard-coded;
+    # the constant only serves as the fallback when no row was computed.
+    null_permutations_used: int = DEFAULT_NULL_PERMUTATIONS
     for name in sorted(E3_LEAKAGE_POLICIES):
         cls, _cfg_file = E3_LEAKAGE_POLICIES[name]
         cfg = leakage_policy_cfgs[name]
@@ -351,6 +356,11 @@ def run_e3_audit(
         ]
         mean_coverage = sum(coverages) / len(coverages) if coverages else 0.0
         null_corrected = leak["nullCorrected"]
+        null_permutations_used = int(null_corrected["n_permutations"])
+        # D-016: channel-separated excess statistics over the SAME probe-keyed
+        # trace family. The combined channel reproduces the legacy D-015
+        # statistic exactly (combined_excess_nmi == excess_nmi below).
+        channel_sep = channel_separated_separability(traces_by_probe)
         leakage_rows.append(
             {
                 "policy": name,
@@ -365,6 +375,13 @@ def run_e3_audit(
                 "null_std": null_corrected["null_std"],
                 "excess_nmi": null_corrected["excess_nmi"],
                 "excess_z": null_corrected["excess_z"],
+                # D-016: channel-separated excess NMI (additive; the legacy
+                # keys above are untouched). slate = branching of what was
+                # shown; selection = within-slate choice rank; combined = the
+                # legacy signature.
+                "slate_excess_nmi": channel_sep["slate_excess_nmi"],
+                "selection_excess_nmi": channel_sep["selection_excess_nmi"],
+                "combined_excess_nmi": channel_sep["combined_excess_nmi"],
                 "mean_coordinate_coverage": mean_coverage,
                 "utility_per_leakage": utility_per_leakage(
                     mean_coverage, leak["value"]
@@ -378,7 +395,9 @@ def run_e3_audit(
             "E3 누출 프록시 완료: "
             f"policy={name}, leakage_proxy={leak['value']:.6f}, "
             f"excess_nmi={null_corrected['excess_nmi']:+.6f}, "
-            f"excess_z={null_corrected['excess_z']:+.4f} "
+            f"excess_z={null_corrected['excess_z']:+.4f}, "
+            f"slate_excess_nmi={channel_sep['slate_excess_nmi']:+.6f}, "
+            f"selection_excess_nmi={channel_sep['selection_excess_nmi']:+.6f} "
             "(해석은 'null 초과 정보가 있다/없다'로만 하며, "
             "이는 PROXY 이고 프라이버시/법적 보증이 아닙니다)",
         )
@@ -426,8 +445,10 @@ def run_e3_audit(
         "ciUnavailableReason": _E3_LEAKAGE_CI_UNAVAILABLE_REASON,
         # D-015: deterministic permutation-null correction is self-describing —
         # every table row carries observed_nmi/null_mean/null_std/excess_nmi/
-        # excess_z computed with this many data-seeded label permutations.
-        "nullPermutations": DEFAULT_NULL_PERMUTATIONS,
+        # excess_z (and the D-016 per-channel excess trio) computed with this
+        # many data-seeded label permutations, read back from the computed
+        # block rather than hard-coded.
+        "nullPermutations": null_permutations_used,
         "probeVersions": {
             pn: get_probe(pn).probe_version() for pn in probe_names
         },

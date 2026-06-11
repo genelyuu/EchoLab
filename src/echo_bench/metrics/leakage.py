@@ -102,10 +102,12 @@ DEFAULT_NULL_PERMUTATIONS = 200
 
 # D-015: documented near-zero threshold for the null standard deviation.
 # CONVENTION (bounded, never +/-inf or NaN): when ``null_std < NULL_STD_EPS``
-# the permutation null is (numerically) constant — every label permutation
-# yields the same NMI, so the observed value carries no information in excess
-# of the null and ``excess_z`` is defined as exactly ``0.0``. (In this regime
-# ``excess_nmi`` is itself ~0 because observed equals the constant null.)
+# the permutation null is (numerically) constant — every sampled label
+# permutation yields the same NMI — so ``excess_z`` is defined as exactly
+# ``0.0``. (In this regime ``excess_nmi`` is typically ~0 as well, e.g. in the
+# fully saturated all-unique-signature case where every labeling gives NMI 1.0,
+# but a sampled null cannot logically guarantee observed == null, so only
+# ``excess_z`` carries the hard convention.)
 NULL_STD_EPS = 1e-12
 
 # D-011 (TRD alias D-010): denominator floor for :func:`utility_per_leakage`.
@@ -193,6 +195,25 @@ def utility_per_leakage(
     return _clamp01(mean_utility) / max(_clamp01(leakage), float(floor))
 
 
+def _slate_member_ids(record: Mapping[str, Any]) -> List[str]:
+    """Name-sorted observable slate member ids of one round.
+
+    Slate entries may be card-id strings or card dicts; reduce to ids and sort
+    the string forms so the result is independent of stored slate order.
+    Reads only the observable ``slate`` field. Shared by the legacy combined
+    signature below and the D-016 channel signatures in
+    :mod:`echo_bench.metrics.separability`.
+    """
+    slate = record.get("slate") or []
+    slate_ids = []
+    for entry in slate:
+        if isinstance(entry, Mapping):
+            slate_ids.append(entry.get("cardId"))
+        else:
+            slate_ids.append(entry)
+    return sorted(str(s) for s in slate_ids)
+
+
 def _selection_signature(record: Mapping[str, Any]) -> str:
     """Build a canonical observable selection signature for one round.
 
@@ -200,19 +221,15 @@ def _selection_signature(record: Mapping[str, Any]) -> str:
     ``selectedCardId`` and the *set* of card ids present in its ``slate``
     (order-independent). It deliberately reads no other field. The signature is
     a stable canonical hash so equal observable rounds map to an equal label.
+
+    D-016 NOTE: this is the **combined** channel signature — byte-identical
+    construction is an invariant relied upon by
+    :func:`echo_bench.metrics.separability.channel_separated_separability`
+    (its ``combined`` channel must reproduce legacy values exactly).
     """
-    slate = record.get("slate") or []
-    # Slate entries may be card-id strings or card dicts; reduce to ids,
-    # order-independent (a set), so signature is permutation-invariant.
-    slate_ids = []
-    for entry in slate:
-        if isinstance(entry, Mapping):
-            slate_ids.append(entry.get("cardId"))
-        else:
-            slate_ids.append(entry)
     sig = {
         "selectedCardId": record.get("selectedCardId"),
-        "slateMembers": sorted(str(s) for s in slate_ids),
+        "slateMembers": _slate_member_ids(record),
     }
     return canonical_hash(sig)
 
@@ -234,14 +251,19 @@ def _probe_version(trace: Any) -> Any:
 
 
 def _collect_labeled_signatures(
-    traces_by_probe: Mapping[str, Any]
+    traces_by_probe: Mapping[str, Any],
+    signature_fn: Any = None,
 ) -> List[Tuple[str, str]]:
-    """Return ``(probeName, selectionSignature)`` pairs over all pooled rounds.
+    """Return ``(probeName, signature)`` pairs over all pooled rounds.
 
-    Reads **only** the observable ``slate``/``selectedCardId`` fields of each
-    round via :func:`_selection_signature`. Probes are visited in name-sorted
-    order so the pooled sequence is deterministic.
+    ``signature_fn`` maps one round record to its canonical signature string
+    and defaults to the legacy combined :func:`_selection_signature`; D-016
+    passes per-channel signature functions. Every supported signature function
+    reads **only** the observable ``slate``/``selectedCardId`` fields. Probes
+    are visited in name-sorted order so the pooled sequence is deterministic.
     """
+    if signature_fn is None:
+        signature_fn = _selection_signature
     pairs: List[Tuple[str, str]] = []
     for name in sorted(traces_by_probe):
         trace = traces_by_probe[name]
@@ -249,7 +271,7 @@ def _collect_labeled_signatures(
         if not callable(rounds_fn):
             continue
         for record in rounds_fn():
-            pairs.append((name, _selection_signature(record)))
+            pairs.append((name, signature_fn(record)))
     return pairs
 
 
@@ -306,6 +328,100 @@ def _normalized_mutual_information(pairs: List[Tuple[str, str]]) -> float:
     if value >= 1.0:
         return 1.0
     return float(value)
+
+
+def _null_corrected_stats(
+    pairs: List[Tuple[str, str]],
+    n_permutations: int,
+    seed_metric: str,
+) -> Dict[str, Any]:
+    """Core observed-vs-permutation-null statistics over labeled pairs.
+
+    Shared machinery for :func:`null_corrected_separability` (D-015) and the
+    channel-separated variant in :mod:`echo_bench.metrics.separability`
+    (D-016): given pooled ``(label, signature)`` pairs, compute the observed
+    pooled NMI, a deterministic permutation null over the same signature
+    multiset, and the excess statistics.
+
+    DETERMINISM: the permutation RNG is a ``random.Random`` seeded **only**
+    from ``seed_metric`` + the pooled pairs + ``n_permutations`` via
+    ``canonical_hash`` — no wall-clock, process entropy, or global RNG state.
+    Different ``seed_metric`` strings (e.g. per-channel names) intentionally
+    decorrelate the null samples of otherwise-identical pair sequences.
+
+    DEGENERACY (fail closed, no permutations executed): no pairs, fewer than
+    two distinct labels, or fewer than two distinct signatures — matching
+    :func:`_normalized_mutual_information`'s degeneracy rule (a single unique
+    signature always yields NMI 0 under every labeling, so the permutation
+    loop would be pointless).
+
+    Raises ``ValueError`` if ``n_permutations < 1``.
+    """
+    if n_permutations < 1:
+        raise ValueError(
+            f"{seed_metric}: n_permutations 는 1 이상이어야 "
+            f"합니다 (받은 값: {n_permutations!r})"
+        )
+
+    labels = [probe for probe, _sig in pairs]
+    signatures = [sig for _probe, sig in pairs]
+    observed = _normalized_mutual_information(pairs)
+    degenerate = (
+        len(pairs) == 0
+        or len(set(labels)) < 2
+        or len(set(signatures)) < 2
+    )
+
+    if degenerate:
+        # In every degenerate case ``observed`` is already 0.0 (the NMI is
+        # defined as 0 for a degenerate marginal) — the zero dict is exact.
+        null_mean = 0.0
+        null_std = 0.0
+        excess_nmi = 0.0
+        excess_z = 0.0
+    else:
+        # Deterministic, data-derived permutation seed: canonical hash of the
+        # pooled labeled-signature sequence (already name-sorted) plus the
+        # metric/channel name and permutation count. NO wall-clock / global RNG.
+        seed = int(
+            canonical_hash(
+                {
+                    "metric": seed_metric,
+                    "pairs": [[probe, sig] for probe, sig in pairs],
+                    "nPermutations": int(n_permutations),
+                }
+            ),
+            16,
+        )
+        rng = random.Random(seed)
+        permuted = list(labels)
+        null_values: List[float] = []
+        for _ in range(int(n_permutations)):
+            rng.shuffle(permuted)
+            null_values.append(
+                _normalized_mutual_information(list(zip(permuted, signatures)))
+            )
+        null_mean = sum(null_values) / len(null_values)
+        null_var = sum((v - null_mean) ** 2 for v in null_values) / len(
+            null_values
+        )
+        null_std = math.sqrt(null_var)
+        excess_nmi = observed - null_mean
+        if null_std < NULL_STD_EPS:
+            # Documented bounded convention: constant null -> zero excess z.
+            excess_z = 0.0
+        else:
+            excess_z = excess_nmi / null_std
+
+    return {
+        "observed_nmi": float(observed),
+        "null_mean": float(null_mean),
+        "null_std": float(null_std),
+        "excess_nmi": float(excess_nmi),
+        "excess_z": float(excess_z),
+        "n_permutations": int(n_permutations),
+        "degenerate": degenerate,
+    }
 
 
 def leakage_proxy(traces_by_probe: Mapping[str, Any]) -> float:
@@ -365,8 +481,9 @@ def null_corrected_separability(
     - ``excess_nmi`` = ``observed_nmi - null_mean``,
     - ``excess_z``  = ``(observed_nmi - null_mean) / null_std``, with the
       bounded convention ``excess_z = 0.0`` whenever
-      ``null_std < NULL_STD_EPS`` (a constant null carries no excess; ±inf and
-      NaN are forbidden — see :data:`NULL_STD_EPS`).
+      ``null_std < NULL_STD_EPS`` (a numerically constant null is treated, by
+      convention, as carrying no excess; ±inf and NaN are forbidden — see
+      :data:`NULL_STD_EPS`).
 
     Chance adjustment for information-theoretic clustering comparison follows
     the discussion in Vinh et al. (JMLR 2010).
@@ -390,8 +507,11 @@ def null_corrected_separability(
 
     FAIL-CLOSED CONVENTION
     ======================
-    Degenerate inputs (fewer than two probes with rounds, or no rounds at all)
-    have nothing to separate: the result is the defined zero dict
+    Degenerate inputs — fewer than two probes with rounds, no rounds at all,
+    or fewer than two distinct signatures (matching the NMI degeneracy rule: a
+    single unique signature yields NMI 0 under *every* labeling, so the
+    permutation loop would be pointless) — have nothing to separate: the
+    result is the defined zero dict
     (``observed_nmi = null_mean = null_std = excess_nmi = excess_z = 0.0``)
     with ``degenerate = True`` and no permutations executed.
 
@@ -401,23 +521,12 @@ def null_corrected_separability(
 
     Raises ``ValueError`` if ``n_permutations < 1``.
     """
-    if n_permutations < 1:
-        raise ValueError(
-            "null_corrected_separability: n_permutations 는 1 이상이어야 "
-            f"합니다 (받은 값: {n_permutations!r})"
-        )
-
     pairs = _collect_labeled_signatures(traces_by_probe)
-    labels = [probe for probe, _sig in pairs]
-    signatures = [sig for _probe, sig in pairs]
-    observed = _normalized_mutual_information(pairs)
-    degenerate = len(pairs) == 0 or len(set(labels)) < 2
+    stats = _null_corrected_stats(
+        pairs, n_permutations, SEPARABILITY_METRIC_NAME
+    )
 
-    if degenerate:
-        null_mean = 0.0
-        null_std = 0.0
-        excess_nmi = 0.0
-        excess_z = 0.0
+    if stats["degenerate"]:
         _logger.info(
             "널 보정 분리도(null_corrected_separability): 입력이 퇴화 상태라 "
             "fail-closed 0 값으로 보고합니다 (probes=%d, rounds=%d)",
@@ -425,38 +534,6 @@ def null_corrected_separability(
             len(pairs),
         )
     else:
-        # Deterministic, data-derived permutation seed: canonical hash of the
-        # pooled labeled-signature sequence (already name-sorted) plus the
-        # permutation count. NO wall-clock / global RNG.
-        seed = int(
-            canonical_hash(
-                {
-                    "metric": SEPARABILITY_METRIC_NAME,
-                    "pairs": [[probe, sig] for probe, sig in pairs],
-                    "nPermutations": int(n_permutations),
-                }
-            ),
-            16,
-        )
-        rng = random.Random(seed)
-        permuted = list(labels)
-        null_values: List[float] = []
-        for _ in range(int(n_permutations)):
-            rng.shuffle(permuted)
-            null_values.append(
-                _normalized_mutual_information(list(zip(permuted, signatures)))
-            )
-        null_mean = sum(null_values) / len(null_values)
-        null_var = sum((v - null_mean) ** 2 for v in null_values) / len(
-            null_values
-        )
-        null_std = math.sqrt(null_var)
-        excess_nmi = observed - null_mean
-        if null_std < NULL_STD_EPS:
-            # Documented bounded convention: constant null -> zero excess z.
-            excess_z = 0.0
-        else:
-            excess_z = excess_nmi / null_std
         _logger.info(
             "널 보정 분리도(null_corrected_separability)를 계산했습니다 "
             "(probes=%d, rounds=%d, observed_nmi=%.6f, null_mean=%.6f, "
@@ -465,23 +542,17 @@ def null_corrected_separability(
             "하며, 이는 PROXY 이고 프라이버시/법적 보증이 아닙니다",
             len(traces_by_probe),
             len(pairs),
-            observed,
-            null_mean,
-            null_std,
-            excess_nmi,
-            excess_z,
+            stats["observed_nmi"],
+            stats["null_mean"],
+            stats["null_std"],
+            stats["excess_nmi"],
+            stats["excess_z"],
             n_permutations,
         )
 
     return {
         "metric": SEPARABILITY_METRIC_NAME,
-        "observed_nmi": float(observed),
-        "null_mean": float(null_mean),
-        "null_std": float(null_std),
-        "excess_nmi": float(excess_nmi),
-        "excess_z": float(excess_z),
-        "n_permutations": int(n_permutations),
-        "degenerate": degenerate,
+        **stats,
         "nullStdEps": NULL_STD_EPS,
         "isProxy": IS_PROXY,
         "disclaimer": PROXY_DISCLAIMER,

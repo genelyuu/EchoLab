@@ -208,6 +208,37 @@ def test_e3_leakage_rows_carry_null_corrected_fields():
         assert row["null_std"] >= 0.0
 
 
+def test_e3_leakage_rows_carry_channel_separated_excess_fields():
+    """D-016: every leakage row additionally carries the channel-separated
+    excess trio (slate / selection / combined), additively — no legacy key is
+    removed or renamed, and the combined channel reproduces the legacy D-015
+    excess_nmi exactly (same signature bytes, same permutation seed)."""
+    report = run_e3_audit(dry_run=False, **_KW)
+    leakage = report["leakage"]
+
+    for row in leakage["table"]:
+        for field in (
+            "slate_excess_nmi",
+            "selection_excess_nmi",
+            "combined_excess_nmi",
+        ):
+            assert field in row, f"leakage row missing D-016 field: {field}"
+            assert isinstance(row[field], float)
+            assert math.isfinite(row[field])
+        # Combined channel IS the legacy null-corrected statistic: exact match.
+        assert row["combined_excess_nmi"] == row["excess_nmi"]
+        # D-015 legacy fields must still be present alongside (additive-only).
+        for legacy_field in (
+            "leakage_proxy",
+            "observed_nmi",
+            "null_mean",
+            "null_std",
+            "excess_nmi",
+            "excess_z",
+        ):
+            assert legacy_field in row
+
+
 def test_e3_trace_greedy_delta_vs_random_is_negative():
     """Sanity (D-011 acceptance): TRACE_GREEDY leaks LESS than RANDOM here.
 
