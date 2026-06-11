@@ -1,0 +1,903 @@
+"""Expanded leakage diagnostic runner for ECHO-Bench (Task E-019, TRD E-019).
+
+The E3 leakage section measures probe-separability over the FROZEN B-004
+probe trio (``DEFAULT_PROBE_SET``) at one base seed. This runner is the
+Track L hardening consumer named "E-019" by the B-007 / D-015 / D-016 / D-017
+task notes: it re-measures probe-separability with the EXPANDED 7-probe
+registry (B-007 / TRD B-008) across multiple base-seed families and reports,
+per policy and per channel:
+
+- the full D-015 null-corrected block (``observed_nmi`` / ``null_mean`` /
+  ``null_std`` / ``excess_nmi`` / ``excess_z``),
+- the D-016 channel separation (``slate`` / ``selection`` / ``combined``),
+- the D-017 saturation diagnostics (``saturation_flag`` per channel),
+- the B-007 probe-overlap audit over decision-time contexts,
+- a cross-family seeded-bootstrap CI of ``excess_nmi`` — the confidence
+  interval D-015 marked as "future E-019" (unit = seed FAMILY, the E-014
+  convention),
+- a machine evaluation of the four Track L re-enable conditions
+  (docs/12_CLAIM_LADDER.md Section 5) per policy x channel.
+
+GUARDRAILS
+----------
+The Track L conditions block is a **DIAGNOSTIC**: it states whether the
+ladder's re-enable conditions hold in this run's data. Unlocking the
+conditional rung is a documented ladder decision (G-009 / TRD G-013) — it is
+NEVER an automatic effect of this report, and this report never phrases a
+comparative leakage claim. Every separability value remains a PROXY
+(``isProxy=True`` + disclaimer): a system-level statistic over a controlled
+testbed, NOT a privacy guarantee, anonymity proof, identifiability bound, or
+legal/compliance claim. Strategy probes are controlled instrumented input
+policies, never synthetic users. E2/E3 stay on the frozen
+``DEFAULT_PROBE_SET`` — this runner imports their policy set but never
+modifies their behaviour.
+
+All identifiers, metric names, config keys and file paths stay English;
+runtime log messages are Korean per the project logging convention.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+from pathlib import Path
+from typing import Any, Dict, List, Mapping, Sequence, Tuple
+
+import yaml
+
+from echo_bench.archive.builder import build_archive
+from echo_bench.basis.schema import load_bases
+from echo_bench.env.horizon import default_h, load_horizon, validate_h
+from echo_bench.env.round_runner import run_episode
+from echo_bench.env.trace_state import TraceState
+from echo_bench.experiments.e3_audit import (
+    E3_LEAKAGE_DELTA_REFERENCE,
+    E3_LEAKAGE_POLICIES,
+)
+from echo_bench.experiments.e_seed_families import (
+    DEFAULT_BASE_SEEDS,
+    verify_trace_greedy_freeze,
+)
+from echo_bench.logging import get_logger, log_ko
+from echo_bench.logging.repro_pack import ReproducibilityPack
+from echo_bench.metrics.aggregate import aggregate_values
+from echo_bench.metrics.leakage import (
+    DEFAULT_NULL_PERMUTATIONS,
+    IS_PROXY,
+    PROXY_DISCLAIMER,
+    leakage_delta_vs_random,
+    leakage_proxy_with_metadata,
+)
+from echo_bench.metrics.separability import (
+    CHANNEL_NAMES,
+    SATURATION_UNIQUE_RATE_THRESHOLD,
+    channel_separated_separability,
+)
+from echo_bench.probes.probe_overlap import (
+    PROBE_OVERLAP_THRESHOLD,
+    probe_overlap_audit,
+)
+from echo_bench.probes.strategy_probes import PROBES, get_probe
+from echo_bench.utils.hash import canonical_hash
+
+__all__ = [
+    "run_leakage_diagnostic",
+    "main",
+    "EXPANDED_PROBE_SET",
+    "TRACK_L_MIN_FAMILIES",
+    "build_cross_family_excess_block",
+    "evaluate_track_l_conditions",
+]
+
+_logger = get_logger(__name__)
+
+DIAGNOSTIC_SCHEMA = "echo_bench.e_leakage_diagnostic.report"
+DIAGNOSTIC_SCHEMA_VERSION = "1"
+
+#: The EXPANDED probe set: the full B-007 registry, name-sorted. A strict
+#: superset of the frozen ``DEFAULT_PROBE_SET`` E2/E3 keep running on.
+EXPANDED_PROBE_SET: Tuple[str, ...] = tuple(sorted(PROBES))
+
+#: Track L re-enable condition 4 requires >= this many seed families
+#: (docs/12_CLAIM_LADDER.md Section 5; E-014 machinery convention).
+TRACK_L_MIN_FAMILIES = 5
+
+#: Where the four conditions are defined; recorded in the report so the
+#: diagnostic block is self-describing.
+TRACK_L_LADDER_REF = "docs/12_CLAIM_LADDER.md Section 5"
+
+_TRACK_L_NOTE = (
+    "DIAGNOSTIC only: this block states whether the Track L re-enable "
+    "conditions (docs/12_CLAIM_LADDER.md Section 5) hold in this run's data. "
+    "Unlocking the conditional rung is a documented ladder decision "
+    "(G-009 / TRD G-013) and is NEVER an automatic effect of this report; "
+    "no comparative leakage claim is made or implied here. All values remain "
+    "a PROXY over a controlled testbed."
+)
+
+# Repo-rooted config locations (resolved relative to the package, not the cwd).
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_BASES_CFG_PATH = _REPO_ROOT / "configs" / "basis" / "bases.yaml"
+_ARCHIVE_CFG_PATH = _REPO_ROOT / "configs" / "archive" / "archive.yaml"
+_HORIZON_CFG_PATH = _REPO_ROOT / "configs" / "experiments" / "horizon.yaml"
+_POLICY_CFG_DIR = _REPO_ROOT / "configs" / "policies"
+_REPORTS_DIR = _REPO_ROOT / "outputs" / "reports"
+
+
+def _load_yaml(path: Path) -> Dict[str, Any]:
+    """Load a YAML config file into a dict (empty dict if the doc is empty)."""
+    with open(path, "r", encoding="utf-8") as handle:
+        doc = yaml.safe_load(handle)
+    return doc if isinstance(doc, dict) else {}
+
+
+def _git_commit_hash() -> str:
+    """Return the short git commit hash, or ``"uncommitted"`` if unavailable."""
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(_REPO_ROOT),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        commit = out.stdout.strip()
+        return commit if commit else "uncommitted"
+    except (subprocess.SubprocessError, OSError):
+        return "uncommitted"
+
+
+# ---------------------------------------------------------------------------
+# Pure cross-family aggregation helpers (unit-testable on synthetic rows).
+# ---------------------------------------------------------------------------
+
+
+def build_cross_family_excess_block(
+    rows_by_family: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> Dict[str, Any]:
+    """Aggregate per-channel ``excess_nmi`` across seed families (E-019 core).
+
+    ``rows_by_family`` maps family (str(base_seed), in family order) to that
+    family's per-policy leakage rows; each row must carry
+    ``<channel>_excess_nmi`` and ``<channel>_saturation_flag`` for every
+    channel in :data:`CHANNEL_NAMES` (the D-016 / D-017 row keys).
+
+    Per policy x channel the block carries:
+
+    - ``perFamilyValues``: the aligned per-family ``excess_nmi`` values,
+    - the :func:`aggregate_values` stats (mean / std / n / seeded-bootstrap
+      CI / ``ci_method`` / ``sufficient_n``) — the cross-family CI that
+      D-015 marked as "future E-019"; the resampling unit is a seed FAMILY,
+    - ``signConsistent``: all values strictly positive or all strictly
+      negative (an exact 0.0 breaks consistency — fail closed),
+    - ``allFamiliesUnsaturated``: that channel's ``saturation_flag`` is
+      False in EVERY family (D-017; one saturated family poisons the well).
+
+    Raises a Korean :class:`ValueError` on an empty mapping or when the
+    families disagree on the policy set (misaligned units are never
+    aggregated silently).
+    """
+    if not rows_by_family:
+        raise ValueError(
+            "E-019 집계: rows_by_family 가 비어 있습니다 (패밀리가 최소 1개 필요)."
+        )
+
+    families = list(rows_by_family)
+    policies = sorted({str(row["policy"]) for row in rows_by_family[families[0]]})
+
+    rows_map: Dict[str, Dict[str, Mapping[str, Any]]] = {}
+    for family in families:
+        by_policy = {str(row["policy"]): row for row in rows_by_family[family]}
+        if sorted(by_policy) != policies:
+            raise ValueError(
+                "E-019 집계: 패밀리 간 정책 집합이 일치하지 않습니다 "
+                f"(family={family}, expected={policies}, got={sorted(by_policy)})."
+            )
+        rows_map[family] = by_policy
+
+    per_policy: Dict[str, Any] = {}
+    for policy in policies:
+        channel_blocks: Dict[str, Any] = {}
+        for channel in CHANNEL_NAMES:
+            value_key = f"{channel}_excess_nmi"
+            flag_key = f"{channel}_saturation_flag"
+            values = [
+                float(rows_map[family][policy][value_key]) for family in families
+            ]
+            agg = aggregate_values(values, f"excess_nmi@{policy}@{channel}")
+            sign_consistent = all(v > 0.0 for v in values) or all(
+                v < 0.0 for v in values
+            )
+            all_unsaturated = all(
+                not bool(rows_map[family][policy][flag_key])
+                for family in families
+            )
+            channel_blocks[channel] = {
+                "channel": channel,
+                "perFamilyValues": values,
+                **agg,
+                "signConsistent": sign_consistent,
+                "allFamiliesUnsaturated": all_unsaturated,
+            }
+        per_policy[policy] = channel_blocks
+
+    return {
+        "metric": "excess_nmi",
+        "unit": "seed_family",
+        "ciAvailable": True,
+        "ciNote": (
+            "Cross-family seeded-bootstrap CI of the null-corrected excess "
+            "NMI (D-015); the resampling unit is a seed FAMILY (E-014 "
+            "convention). This is the CI the D-015 task marked as 'future "
+            "E-019'. The values remain a PROXY."
+        ),
+        "families": families,
+        "policies": policies,
+        "perPolicy": per_policy,
+    }
+
+
+def evaluate_track_l_conditions(
+    cross_block: Mapping[str, Any],
+    min_families: int = TRACK_L_MIN_FAMILIES,
+) -> Dict[str, Any]:
+    """Machine-evaluate the four Track L re-enable conditions (DIAGNOSTIC).
+
+    Per policy x channel of ``cross_block`` (a
+    :func:`build_cross_family_excess_block` result):
+
+    1. ``condition1_excess_positive_ci`` — the excess is positive with a CI
+       excluding 0 on the positive side (``mean > 0`` and ``ci_low > 0``)
+       and the CI is a real bootstrap CI (``sufficient_n``).
+    2. ``condition2_not_saturated`` — the channel's ``saturation_flag`` is
+       False in every family (D-017).
+    3. ``condition3_channel_named`` — structurally True here: the block is
+       keyed by channel, so any citation of it names its channel (D-016).
+    4. ``condition4_cross_family_stable`` — at least ``min_families``
+       families, consistent sign across all of them, and a sufficient-n CI
+       excluding 0 (either side).
+
+    ``allConditionsHold`` is the conjunction. The block is a DIAGNOSTIC:
+    it gates claims and never supports one; the unlock decision belongs to
+    the claim ladder (G-009), never to this function.
+    """
+    per_policy_out: Dict[str, Any] = {}
+    for policy in cross_block["policies"]:
+        channel_out: Dict[str, Any] = {}
+        for channel, entry in cross_block["perPolicy"][policy].items():
+            sufficient = bool(entry["sufficient_n"])
+            ci_excludes_zero = (
+                float(entry["ci_low"]) > 0.0 or float(entry["ci_high"]) < 0.0
+            )
+            condition1 = (
+                sufficient
+                and float(entry["mean"]) > 0.0
+                and float(entry["ci_low"]) > 0.0
+            )
+            condition2 = bool(entry["allFamiliesUnsaturated"])
+            condition3 = True
+            condition4 = (
+                int(entry["n"]) >= int(min_families)
+                and bool(entry["signConsistent"])
+                and sufficient
+                and ci_excludes_zero
+            )
+            channel_out[channel] = {
+                "channel": channel,
+                "condition1_excess_positive_ci": condition1,
+                "condition2_not_saturated": condition2,
+                "condition3_channel_named": condition3,
+                "condition4_cross_family_stable": condition4,
+                "allConditionsHold": (
+                    condition1 and condition2 and condition3 and condition4
+                ),
+            }
+        per_policy_out[policy] = channel_out
+
+    return {
+        "minFamilies": int(min_families),
+        "ladderRef": TRACK_L_LADDER_REF,
+        "note": _TRACK_L_NOTE,
+        "perPolicy": per_policy_out,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Per-family computation.
+# ---------------------------------------------------------------------------
+
+
+def _decision_contexts(
+    traces_by_probe: Mapping[str, TraceState],
+    pool: Sequence[Mapping[str, Any]],
+) -> List[Tuple[List[Mapping[str, Any]], TraceState]]:
+    """Reconstruct decision-time ``(slate dicts, prefix trace)`` contexts.
+
+    For every probe episode and every round ``t``, the context is the slate
+    the probe saw at round ``t`` (cardIds mapped back to observable card
+    dicts) together with the trace prefix of rounds ``0..t-1`` (the history
+    available at decision time). The prefix is rebuilt by re-appending the
+    recorded round fields (``roundHash`` stripped — the trace recomputes its
+    own chain), so the contexts are a pure function of the recorded traces.
+    """
+    by_id = {card["cardId"]: card for card in pool}
+    contexts: List[Tuple[List[Mapping[str, Any]], TraceState]] = []
+    for probe_name in sorted(traces_by_probe):
+        rounds = traces_by_probe[probe_name].rounds()
+        for t in range(len(rounds)):
+            prefix = TraceState()
+            for record in rounds[:t]:
+                prefix.append_round(
+                    {k: v for k, v in record.items() if k != "roundHash"}
+                )
+            slate_dicts = [by_id[cid] for cid in rounds[t]["slate"]]
+            contexts.append((slate_dicts, prefix))
+    return contexts
+
+
+def _run_family(
+    base_seed: int,
+    H: int,
+    k: int,
+    pool_size: int,
+    n_permutations: int,
+    bases: Any,
+    archive_cfg: Mapping[str, Any],
+    policy_cfgs: Mapping[str, Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Run the expanded-probe leakage diagnostic for ONE seed family.
+
+    Pure function of its arguments (every episode, null permutation and
+    overlap audit is seeded from ``base_seed`` / the data itself), so the
+    inline replay audit can recompute it bit-identically.
+
+    Returns the JSON-ready family block: ``archiveHash`` / ``poolHash``,
+    the per-policy ``table`` (D-015 + D-016 + D-017 + delta keys, plus the
+    full per-channel ``channels`` blocks), the B-007 ``probeOverlap`` audit,
+    and the family's slate/trace hash lists for the report hash chain.
+    """
+    archive = build_archive(bases, dict(archive_cfg), base_seed)
+    pool = archive["cards"][:pool_size]
+    if len(pool) < pool_size:
+        raise ValueError(
+            f"E-019 실행: 아카이브 카드 수 {len(pool)} 가 pool_size={pool_size} "
+            "보다 작습니다"
+        )
+    pool_hash = canonical_hash([c["cardId"] for c in pool])
+
+    probe_versions = {
+        name: get_probe(name).probe_version() for name in EXPANDED_PROBE_SET
+    }
+
+    rows: List[Dict[str, Any]] = []
+    slate_hashes: List[str] = []
+    trace_hashes: List[str] = []
+    reference_traces: Mapping[str, TraceState] | None = None
+
+    for policy_name in sorted(E3_LEAKAGE_POLICIES):
+        policy_cls, _cfg_file = E3_LEAKAGE_POLICIES[policy_name]
+        cfg = policy_cfgs[policy_name]
+
+        traces_by_probe: Dict[str, TraceState] = {}
+        for probe_name in EXPANDED_PROBE_SET:
+            probe = PROBES[probe_name]
+            probe_trace = run_episode(
+                pool,
+                policy_cls(dict(cfg)),
+                base_seed,
+                H,
+                int(k),
+                bases,
+                select_fn=lambda slate, trace, seed, _p=probe: _p.select(
+                    slate, trace, seed
+                ),
+            )
+            traces_by_probe[probe_name] = probe_trace
+            trace_hashes.append(probe_trace.trace_hash())
+            slate_hashes.append(
+                canonical_hash([r["slate"] for r in probe_trace.rounds()])
+            )
+
+        if policy_name == E3_LEAKAGE_DELTA_REFERENCE:
+            reference_traces = traces_by_probe
+
+        leak = leakage_proxy_with_metadata(
+            traces_by_probe, probe_versions, n_permutations=n_permutations
+        )
+        null_corrected = leak["nullCorrected"]
+        channel_sep = channel_separated_separability(
+            traces_by_probe,
+            n_permutations=n_permutations,
+            precomputed_combined=null_corrected,
+        )
+        rows.append(
+            {
+                "policy": policy_name,
+                "policyVersion": policy_cls(dict(cfg)).policy_version(),
+                "leakage_proxy": leak["value"],
+                "isProxy": leak["isProxy"],
+                # D-015: observed/null/excess always travel together.
+                "observed_nmi": null_corrected["observed_nmi"],
+                "null_mean": null_corrected["null_mean"],
+                "null_std": null_corrected["null_std"],
+                "excess_nmi": null_corrected["excess_nmi"],
+                "excess_z": null_corrected["excess_z"],
+                # D-016: channel-separated excess trio + full channel blocks.
+                "slate_excess_nmi": channel_sep["slate_excess_nmi"],
+                "selection_excess_nmi": channel_sep["selection_excess_nmi"],
+                "combined_excess_nmi": channel_sep["combined_excess_nmi"],
+                "channels": channel_sep["channels"],
+                # D-017: saturation flags (diagnostics, never claims); the
+                # headline gate equals the combined channel's flag.
+                "saturation_flag": channel_sep["combined_saturation_flag"],
+                "slate_saturation_flag": channel_sep["slate_saturation_flag"],
+                "selection_saturation_flag": channel_sep[
+                    "selection_saturation_flag"
+                ],
+                "combined_saturation_flag": channel_sep[
+                    "combined_saturation_flag"
+                ],
+                "traceHashes": leak["traceHashes"],
+                "nullPermutations": int(null_corrected["n_permutations"]),
+            }
+        )
+        log_ko(
+            _logger,
+            "E-019 정책 진단 완료: "
+            f"family={base_seed}, policy={policy_name}, "
+            f"excess_nmi={null_corrected['excess_nmi']:+.6f}, "
+            f"slate={channel_sep['slate_excess_nmi']:+.6f}, "
+            f"selection={channel_sep['selection_excess_nmi']:+.6f}, "
+            f"saturation_flag={channel_sep['combined_saturation_flag']} "
+            "(확장 프로브 7종; PROXY 통계이며 클레임이 아닙니다)",
+        )
+
+    # D-011 convention: RELATIVE delta vs the seed-aligned reference policy.
+    reference_rows = [
+        row for row in rows if row["policy"] == E3_LEAKAGE_DELTA_REFERENCE
+    ]
+    if not reference_rows:
+        raise ValueError(
+            "E-019 실행: 기준 정책 행을 찾을 수 없습니다 "
+            f"(deltaReference={E3_LEAKAGE_DELTA_REFERENCE!r})."
+        )
+    reference_leakage = reference_rows[0]["leakage_proxy"]
+    for row in rows:
+        row["leakage_delta_vs_random"] = leakage_delta_vs_random(
+            row["leakage_proxy"], reference_leakage
+        )
+
+    # B-007 probe-overlap audit over the reference policy's decision-time
+    # contexts (slate seen + trace prefix available at that round).
+    assert reference_traces is not None  # guaranteed by the guard above
+    contexts = _decision_contexts(reference_traces, pool)
+    overlap = probe_overlap_audit(contexts, seed=int(base_seed))
+
+    return {
+        "base_seed": int(base_seed),
+        "archiveHash": archive["archiveHash"],
+        "poolHash": pool_hash,
+        "contextPolicy": E3_LEAKAGE_DELTA_REFERENCE,
+        "table": rows,
+        "probeOverlap": overlap,
+        "slateHashes": slate_hashes,
+        "traceHashes": trace_hashes,
+    }
+
+
+# ---------------------------------------------------------------------------
+# The runner.
+# ---------------------------------------------------------------------------
+
+
+def _validate_args(
+    base_seeds: Sequence[int], n_permutations: int
+) -> Tuple[int, ...]:
+    """Validate base_seeds + n_permutations, failing closed (Korean)."""
+    seeds = tuple(int(s) for s in base_seeds)
+    if not seeds:
+        raise ValueError(
+            "E-019 실행: base_seeds 가 비어 있습니다 (패밀리가 최소 1개 필요)."
+        )
+    if len(set(seeds)) != len(seeds):
+        raise ValueError(
+            f"E-019 실행: base_seeds 에 중복된 시드가 있습니다: {list(seeds)}."
+        )
+    if int(n_permutations) < 1:
+        raise ValueError(
+            f"E-019 실행: n_permutations 는 1 이상이어야 합니다 "
+            f"(입력값: {n_permutations})."
+        )
+    return seeds
+
+
+def run_leakage_diagnostic(
+    base_seeds: Sequence[int] = DEFAULT_BASE_SEEDS,
+    H: int | None = None,
+    k: int = 4,
+    pool_size: int = 64,
+    n_permutations: int = DEFAULT_NULL_PERMUTATIONS,
+    dry_run: bool = False,
+    replay_validate: bool = True,
+) -> dict:
+    """Run the E-019 expanded-probe leakage diagnostic and return a report.
+
+    Args:
+        base_seeds: the base-seed families (>= TRACK_L_MIN_FAMILIES = 5 for a
+            Track L condition-4 evaluation that can pass; smaller tuples are
+            allowed for development/tests and simply fail condition 4).
+        H: horizon (rounds); the horizon config default when ``None``.
+        k: slate size (main parameter 4).
+        pool_size: candidate pool size (main parameter 64).
+        n_permutations: D-015 permutation-null size per channel (the
+            documented default 200 for production; smaller for development).
+        dry_run: validate configs + freeze, compute per-family archive/pool
+            hashes, write nothing, run no episodes.
+        replay_validate: when true, recompute the FIRST family a second time
+            and compare canonical hashes (mode ``inline_recompute_first_family``);
+            a divergence is reported LOUDLY as ``replayable=False``.
+
+    Returns:
+        The report dict (a dry-run plan dict when ``dry_run`` is true).
+    """
+    seeds = _validate_args(base_seeds, n_permutations)
+
+    # 0. C-011 config-freeze gate (hard Korean ValueError before anything runs).
+    freeze = verify_trace_greedy_freeze()
+
+    # 1. Configs + horizon.
+    bases = load_bases(_BASES_CFG_PATH)
+    archive_cfg = _load_yaml(_ARCHIVE_CFG_PATH)
+    horizon_cfg = load_horizon(_HORIZON_CFG_PATH)
+    H = default_h(horizon_cfg) if H is None else validate_h(int(H), horizon_cfg)
+
+    policy_cfgs: Dict[str, Dict[str, Any]] = {}
+    for name, (_cls, cfg_file) in E3_LEAKAGE_POLICIES.items():
+        cfg = dict(_load_yaml(_POLICY_CFG_DIR / cfg_file))
+        cfg["k"] = int(k)
+        policy_cfgs[name] = cfg
+
+    run_params = {
+        "base_seeds": [int(s) for s in seeds],
+        "H": int(H),
+        "k": int(k),
+        "pool_size": int(pool_size),
+        "n_permutations": int(n_permutations),
+        "probeSet": "expanded_registry",
+        "probes": list(EXPANDED_PROBE_SET),
+        "policies": sorted(E3_LEAKAGE_POLICIES),
+        "deltaReference": E3_LEAKAGE_DELTA_REFERENCE,
+        "overlapThreshold": PROBE_OVERLAP_THRESHOLD,
+        "minFamilies": TRACK_L_MIN_FAMILIES,
+        "configFreeze": {
+            "policyName": freeze["policyName"],
+            "policyEffectiveConfigHash": freeze["frozenHash"],
+            "taskId": freeze["taskId"],
+        },
+    }
+    config_hash = canonical_hash(
+        {
+            "archive_cfg": archive_cfg,
+            "horizon_cfg": horizon_cfg,
+            "policy_cfgs": policy_cfgs,
+            "run_params": run_params,
+        }
+    )
+
+    # 2. Dry run: per-family archive/pool plan hashes, write nothing.
+    if dry_run:
+        families_plan: Dict[str, Any] = {}
+        for seed in seeds:
+            archive = build_archive(bases, dict(archive_cfg), int(seed))
+            pool = archive["cards"][:pool_size]
+            if len(pool) < pool_size:
+                raise ValueError(
+                    f"E-019 드라이런: 아카이브 카드 수 {len(pool)} 가 "
+                    f"pool_size={pool_size} 보다 작습니다 (base_seed={seed})"
+                )
+            families_plan[str(seed)] = {
+                "archiveHash": archive["archiveHash"],
+                "poolHash": canonical_hash([c["cardId"] for c in pool]),
+            }
+        log_ko(
+            _logger,
+            "E-019 드라이런 요약: "
+            f"families={[int(s) for s in seeds]}, "
+            f"probes={len(EXPANDED_PROBE_SET)}종(확장), "
+            f"policies={sorted(E3_LEAKAGE_POLICIES)}, H={H}, k={k}, "
+            f"pool_size={pool_size}, n_permutations={n_permutations}, "
+            f"configHash={config_hash[:12]} (파일 미작성)",
+        )
+        return {
+            "dryRun": True,
+            "config": run_params,
+            "configHash": config_hash,
+            "configFreeze": freeze,
+            "families": families_plan,
+        }
+
+    # 3. Run every family (the slow unit: Korean start/end logs per family).
+    family_blocks: Dict[str, Dict[str, Any]] = {}
+    for idx, seed in enumerate(seeds, start=1):
+        log_ko(
+            _logger,
+            f"E-019 패밀리 시작 ({idx}/{len(seeds)}): base_seed={seed}, "
+            f"probes={len(EXPANDED_PROBE_SET)}종(확장 레지스트리), "
+            f"H={H}, k={k}, pool_size={pool_size}.",
+        )
+        family_blocks[str(seed)] = _run_family(
+            int(seed), int(H), int(k), int(pool_size), int(n_permutations),
+            bases, archive_cfg, policy_cfgs,
+        )
+        log_ko(
+            _logger,
+            f"E-019 패밀리 완료 ({idx}/{len(seeds)}): base_seed={seed}, "
+            f"overlap 과다 쌍="
+            f"{len(family_blocks[str(seed)]['probeOverlap']['high_overlap_pairs'])}개.",
+        )
+
+    # 4. Cross-family aggregation + Track L condition evaluation (pure).
+    cross_block = build_cross_family_excess_block(
+        {family: block["table"] for family, block in family_blocks.items()}
+    )
+    track_l = evaluate_track_l_conditions(cross_block)
+    log_ko(
+        _logger,
+        "E-019 교차 패밀리 집계 완료: "
+        f"families={len(seeds)}, policies={len(cross_block['policies'])}, "
+        "Track L 조건 평가는 진단(DIAGNOSTIC)이며 클레임 잠금 해제는 "
+        "클레임 래더의 문서화된 결정(G-009)으로만 이루어집니다.",
+    )
+
+    # 5. Inline replay audit: recompute the FIRST family and compare hashes.
+    first_family = str(seeds[0])
+    if replay_validate:
+        recomputed = _run_family(
+            int(seeds[0]), int(H), int(k), int(pool_size), int(n_permutations),
+            bases, archive_cfg, policy_cfgs,
+        )
+        original_hash = canonical_hash(family_blocks[first_family])
+        recomputed_hash = canonical_hash(recomputed)
+        replayable = original_hash == recomputed_hash
+        if not replayable:
+            log_ko(
+                _logger,
+                "E-019 리플레이 감사 실패(LOUD): "
+                f"family={first_family} 재계산 해시가 다릅니다 "
+                f"(original={original_hash[:12]}, "
+                f"recomputed={recomputed_hash[:12]}) — 재현 불가는 숨기지 "
+                "않고 보고합니다",
+            )
+        else:
+            log_ko(
+                _logger,
+                "E-019 리플레이 감사 통과: "
+                f"family={first_family} 재계산이 비트 동일합니다 "
+                f"(hash={original_hash[:12]}).",
+            )
+        replay_section: Dict[str, Any] = {
+            "mode": "inline_recompute_first_family",
+            "family": first_family,
+            "replayable": replayable,
+            "familyBlockHash": original_hash,
+            "recomputedBlockHash": recomputed_hash,
+        }
+    else:
+        replay_section = {
+            "mode": "inline_recompute_first_family",
+            "family": first_family,
+            "replayable": None,
+            "note": "replay_validate=False — 인라인 재계산을 건너뛰었습니다.",
+        }
+
+    # 6. Self-describing leakage metadata (PROXY framing travels with the data).
+    null_permutations_used = int(
+        family_blocks[first_family]["table"][0]["nullPermutations"]
+    )
+    leakage_meta = {
+        "metric": "leakage_proxy",
+        "isProxy": IS_PROXY,
+        "disclaimer": PROXY_DISCLAIMER,
+        "deltaReference": E3_LEAKAGE_DELTA_REFERENCE,
+        "nullPermutations": null_permutations_used,
+        "saturationThreshold": SATURATION_UNIQUE_RATE_THRESHOLD,
+        "overlapThreshold": PROBE_OVERLAP_THRESHOLD,
+        "probeVersions": {
+            name: get_probe(name).probe_version() for name in EXPANDED_PROBE_SET
+        },
+    }
+
+    # 7. Hash chain + seedBatchId. Family hashes aggregate the children's.
+    seed_batch_id = canonical_hash(
+        {
+            "experiment": "E_LEAKAGE_DIAGNOSTIC",
+            "base_seeds": run_params["base_seeds"],
+            "H": int(H),
+            "k": int(k),
+            "pool_size": int(pool_size),
+            "n_permutations": int(n_permutations),
+            "probes": list(EXPANDED_PROBE_SET),
+            "policies": sorted(E3_LEAKAGE_POLICIES),
+        }
+    )
+    archive_hash = canonical_hash(
+        {family: block["archiveHash"] for family, block in family_blocks.items()}
+    )
+    pool_hash = canonical_hash(
+        {family: block["poolHash"] for family, block in family_blocks.items()}
+    )
+    slate_hash = canonical_hash(
+        {family: block["slateHashes"] for family, block in family_blocks.items()}
+    )
+    trace_hash = canonical_hash(
+        {family: block["traceHashes"] for family, block in family_blocks.items()}
+    )
+
+    per_family = {
+        family: {
+            key: value
+            for key, value in block.items()
+            if key not in ("slateHashes", "traceHashes")
+        }
+        for family, block in family_blocks.items()
+    }
+
+    results_body = {
+        "config": run_params,
+        "perFamily": per_family,
+        "crossFamilyExcess": cross_block,
+        "trackLConditions": track_l,
+        "leakageMeta": leakage_meta,
+        "replayAudit": replay_section,
+    }
+    output_hash = canonical_hash(results_body)
+
+    # 8. Report (reportHash computed over the report-minus-reportHash).
+    report: Dict[str, Any] = {
+        "schema": DIAGNOSTIC_SCHEMA,
+        "schemaVersion": DIAGNOSTIC_SCHEMA_VERSION,
+        "experiment": "E_LEAKAGE_DIAGNOSTIC",
+        "phaseNote": (
+            "E-019 (TRD E-019, Track L hardening): probe-separability "
+            "diagnostic over the EXPANDED B-007 probe registry across "
+            "multiple base-seed families. Reports null-corrected (D-015), "
+            "channel-separated (D-016), saturation-diagnosed (D-017) excess "
+            "NMI with a cross-family seeded-bootstrap CI (unit=seed_family), "
+            "plus the B-007 probe-overlap audit. The Track L conditions "
+            "block is a DIAGNOSTIC: unlocking the conditional rung is a "
+            "documented ladder decision (G-009), never an automatic effect "
+            "of this report. Every value is a PROXY — a system-level "
+            "statistic over a controlled testbed, NOT a privacy guarantee, "
+            "anonymity proof, identifiability bound, or legal/compliance "
+            "claim. Strategy probes are controlled instrumented inputs, not "
+            "synthetic users; no real-world generalization claim. E2/E3 "
+            "remain on the frozen DEFAULT_PROBE_SET, untouched."
+        ),
+        "config": run_params,
+        "configFreeze": freeze,
+        "seedBatchId": seed_batch_id,
+        "perFamily": per_family,
+        "crossFamilyExcess": cross_block,
+        "trackLConditions": track_l,
+        "leakageMeta": leakage_meta,
+        "replayAudit": replay_section,
+        "configHash": config_hash,
+        "archiveHash": archive_hash,
+        "poolHash": pool_hash,
+        "slateHash": slate_hash,
+        "traceHash": trace_hash,
+        "outputHash": output_hash,
+        "hashSemantics": (
+            "Report-level archiveHash / poolHash / slateHash / traceHash are "
+            "canonical hashes over the per-family hash maps (family -> "
+            "hash(es)), mirroring the E-014 convention; they are NOT a "
+            "re-hash of raw artifacts."
+        ),
+    }
+    report_hash = canonical_hash(report)
+    report["reportHash"] = report_hash
+
+    # 9. Reproducibility pack.
+    pack = ReproducibilityPack(
+        configHash=config_hash,
+        commitHash=_git_commit_hash(),
+        archiveHash=archive_hash,
+        poolHash=pool_hash,
+        slateHash=slate_hash,
+        traceHash=trace_hash,
+        outputHash=output_hash,
+        reportHash=report_hash,
+        seedBatchId=seed_batch_id,
+    )
+    report["reproducibilityPack"] = pack.to_dict()
+    report["packHash"] = pack.pack_hash()
+
+    # 10. Write the report json.
+    _REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = _REPORTS_DIR / f"leakage_diagnostic_{seed_batch_id[:12]}.json"
+    with open(out_path, "w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2, sort_keys=True, ensure_ascii=True)
+
+    log_ko(
+        _logger,
+        "E-019 보고서 작성 완료: "
+        f"path={out_path}, reportHash={report_hash[:12]}, "
+        f"seedBatchId={seed_batch_id[:12]}, families={len(seeds)}, "
+        f"replayable={replay_section['replayable']}.",
+    )
+    return report
+
+
+def main() -> None:
+    """CLI entry point. Parse args, run the diagnostic, log a Korean summary."""
+    parser = argparse.ArgumentParser(
+        prog="python -m echo_bench.experiments.e_leakage_diagnostic",
+        description=(
+            "ECHO-Bench E-019 expanded-probe leakage diagnostic runner."
+        ),
+    )
+    parser.add_argument(
+        "--base-seeds",
+        type=str,
+        default=",".join(str(s) for s in DEFAULT_BASE_SEEDS),
+        help="comma-separated base-seed families (default: 42,7,101,2025,31337)",
+    )
+    parser.add_argument(
+        "--H", type=int, default=None, help="horizon (default: config default)"
+    )
+    parser.add_argument("--k", type=int, default=4, help="slate size")
+    parser.add_argument(
+        "--pool-size", type=int, default=64, help="candidate pool size"
+    )
+    parser.add_argument(
+        "--n-permutations",
+        type=int,
+        default=DEFAULT_NULL_PERMUTATIONS,
+        help="D-015 permutation-null size per channel (default: 200)",
+    )
+    parser.add_argument(
+        "--no-replay-validate",
+        action="store_true",
+        help="skip the inline first-family recompute replay audit",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="validate + plan only; write no files",
+    )
+    args = parser.parse_args()
+
+    base_seeds = tuple(
+        int(token) for token in args.base_seeds.split(",") if token.strip()
+    )
+    result = run_leakage_diagnostic(
+        base_seeds=base_seeds,
+        H=args.H,
+        k=args.k,
+        pool_size=args.pool_size,
+        n_permutations=args.n_permutations,
+        dry_run=args.dry_run,
+        replay_validate=not args.no_replay_validate,
+    )
+
+    if result.get("dryRun"):
+        log_ko(
+            _logger,
+            "E-019 드라이런 완료: "
+            f"families={result['config']['base_seeds']}, "
+            f"configHash={result['configHash'][:12]} (파일 미작성)",
+        )
+    else:
+        log_ko(
+            _logger,
+            "E-019 실행 완료: "
+            f"families={result['config']['base_seeds']}, "
+            f"seedBatchId={result['seedBatchId'][:12]}, "
+            f"reportHash={result['reportHash'][:12]}, "
+            f"replayable={result['replayAudit']['replayable']}.",
+        )
+
+
+if __name__ == "__main__":
+    main()
