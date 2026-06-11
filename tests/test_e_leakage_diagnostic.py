@@ -140,6 +140,39 @@ def test_cross_family_block_rejects_mismatched_policy_sets():
         build_cross_family_excess_block(rows_by_family)
 
 
+def test_cross_family_block_rejects_duplicate_policy_rows():
+    # A duplicate policy row would silently shadow the earlier one in a dict
+    # build — it must fail closed instead.
+    rows_by_family = {
+        "42": [_row("A", 0.2, 0.1, 0.3), _row("A", 0.9, 0.9, 0.9)],
+        "7": [_row("A", 0.4, 0.2, 0.5)],
+    }
+    with pytest.raises(ValueError):
+        build_cross_family_excess_block(rows_by_family)
+
+
+def test_cross_family_ci_invariant_to_family_order():
+    # The bootstrap CI must depend on the family SET, not the argument order:
+    # the same per-family values listed in two different family orders give
+    # bit-identical CI bounds (perFamilyValues keeps the caller order).
+    seeds = ("42", "7", "101", "2025", "31337")
+    values = {"42": 0.2, "7": 0.25, "101": 0.3, "2025": 0.22, "31337": 0.28}
+    forward = {s: [_row("A", values[s], values[s], values[s])] for s in seeds}
+    reversed_order = {
+        s: [_row("A", values[s], values[s], values[s])]
+        for s in reversed(seeds)
+    }
+    block_fwd = build_cross_family_excess_block(forward)
+    block_rev = build_cross_family_excess_block(reversed_order)
+    for channel in CHANNEL_NAMES:
+        fwd = block_fwd["perPolicy"]["A"][channel]
+        rev = block_rev["perPolicy"]["A"][channel]
+        assert fwd["ci_low"] == rev["ci_low"]
+        assert fwd["ci_high"] == rev["ci_high"]
+        assert fwd["mean"] == pytest.approx(rev["mean"])
+        assert fwd["perFamilyValues"] == list(reversed(rev["perFamilyValues"]))
+
+
 def test_cross_family_block_rejects_empty_input():
     with pytest.raises(ValueError):
         build_cross_family_excess_block({})
@@ -312,6 +345,9 @@ def test_replay_audit_inline_recompute():
     audit = report["replayAudit"]
     assert audit["mode"] == "inline_recompute_first_family"
     assert audit["replayable"] is True
+    # The audit must state its partial coverage explicitly.
+    assert audit["scope"] == "first_family_only"
+    assert "first family" in audit["scopeNote"]
 
 
 def test_proxy_framing_carried():
@@ -345,9 +381,16 @@ def test_report_file_written_and_hashed():
 
 
 def test_dry_run_plans_and_writes_nothing():
-    before = set(_REPORTS_DIR.glob("*.json")) if _REPORTS_DIR.exists() else set()
+    # Scoped to this runner's own report prefix so concurrent writers of
+    # other report types (e.g. parallel test workers) cannot race the glob.
+    pattern = "leakage_diagnostic_*.json"
+    before = (
+        set(_REPORTS_DIR.glob(pattern)) if _REPORTS_DIR.exists() else set()
+    )
     plan = run_leakage_diagnostic(dry_run=True, **_KW)
-    after = set(_REPORTS_DIR.glob("*.json")) if _REPORTS_DIR.exists() else set()
+    after = (
+        set(_REPORTS_DIR.glob(pattern)) if _REPORTS_DIR.exists() else set()
+    )
     assert plan["dryRun"] is True
     assert plan["config"]["probes"] == list(EXPANDED_PROBE_SET)
     assert "configHash" in plan
@@ -377,6 +420,8 @@ def test_freeze_gate_hard_fails_on_drift(monkeypatch):
         {"base_seeds": ()},
         {"base_seeds": (42, 42)},
         {"n_permutations": 0},
+        {"pool_size": 0},
+        {"pool_size": -1},
     ],
 )
 def test_argument_validation_fails_closed(bad_kwargs):

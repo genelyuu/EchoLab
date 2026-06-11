@@ -98,6 +98,7 @@ from echo_bench.utils.hash import canonical_hash
 __all__ = [
     "channel_separated_separability",
     "signature_saturation_diagnostics",
+    "separability_row_fields",
     "CHANNEL_NAMES",
     "CHANNEL_SEPARABILITY_METRIC_NAME",
     "SATURATION_METRIC_NAME",
@@ -398,3 +399,39 @@ def signature_saturation_diagnostics(
         SATURATION_UNIQUE_RATE_THRESHOLD,
     )
     return result
+
+
+def separability_row_fields(
+    null_corrected: Mapping[str, Any],
+    channel_sep: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """The shared D-015 + D-016 + D-017 report-row fragment (E-019 review).
+
+    Maps one D-015 null-corrected block and one D-016/D-017 channel-separated
+    block to the exact row keys every leakage-style report table carries —
+    single source of truth so the E3 leakage rows and the E-019 diagnostic
+    rows can never silently diverge:
+
+    - D-015 quintet: ``observed_nmi`` / ``null_mean`` / ``null_std`` /
+      ``excess_nmi`` / ``excess_z`` (observed/null/excess always travel
+      together; absolute NMI alone is not report-grade),
+    - D-016 trio: ``slate_excess_nmi`` / ``selection_excess_nmi`` /
+      ``combined_excess_nmi``,
+    - D-017 quartet: ``saturation_flag`` (the headline gate — equals the
+      combined channel's flag) plus the three per-channel flags
+      (diagnostics, never claims).
+    """
+    return {
+        "observed_nmi": null_corrected["observed_nmi"],
+        "null_mean": null_corrected["null_mean"],
+        "null_std": null_corrected["null_std"],
+        "excess_nmi": null_corrected["excess_nmi"],
+        "excess_z": null_corrected["excess_z"],
+        "slate_excess_nmi": channel_sep["slate_excess_nmi"],
+        "selection_excess_nmi": channel_sep["selection_excess_nmi"],
+        "combined_excess_nmi": channel_sep["combined_excess_nmi"],
+        "saturation_flag": channel_sep["combined_saturation_flag"],
+        "slate_saturation_flag": channel_sep["slate_saturation_flag"],
+        "selection_saturation_flag": channel_sep["selection_saturation_flag"],
+        "combined_saturation_flag": channel_sep["combined_saturation_flag"],
+    }

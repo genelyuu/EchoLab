@@ -82,6 +82,7 @@ from echo_bench.metrics.leakage import (
 from echo_bench.metrics.separability import (
     SATURATION_UNIQUE_RATE_THRESHOLD,
     channel_separated_separability,
+    separability_row_fields,
 )
 from echo_bench.metrics.robustness import (
     FAULTS,
@@ -382,35 +383,15 @@ def run_e3_audit(
                 "policyVersion": cls(dict(cfg)).policy_version(),
                 "leakage_proxy": leak["value"],
                 "isProxy": leak["isProxy"],
-                # D-015: null-corrected separability — observed/null/excess are
-                # ALWAYS reported together (absolute NMI alone is not
-                # report-grade; the pooled NMI saturates under branching).
-                "observed_nmi": null_corrected["observed_nmi"],
-                "null_mean": null_corrected["null_mean"],
-                "null_std": null_corrected["null_std"],
-                "excess_nmi": null_corrected["excess_nmi"],
-                "excess_z": null_corrected["excess_z"],
-                # D-016: channel-separated excess NMI (additive; the legacy
-                # keys above are untouched). slate = branching of what was
-                # shown; selection = within-slate choice rank; combined = the
-                # legacy signature.
-                "slate_excess_nmi": channel_sep["slate_excess_nmi"],
-                "selection_excess_nmi": channel_sep["selection_excess_nmi"],
-                "combined_excess_nmi": channel_sep["combined_excess_nmi"],
-                # D-017: signature-saturation diagnostics (additive; flags
-                # are DIAGNOSTICS, never claims). saturation_flag is the
-                # headline gate — it equals the combined (legacy-signature)
-                # channel's flag, and saturation_flag=True forbids any
-                # headline leakage claim for this row
-                # (docs/12_CLAIM_LADDER.md Section 5 condition 2).
-                "saturation_flag": channel_sep["combined_saturation_flag"],
-                "slate_saturation_flag": channel_sep["slate_saturation_flag"],
-                "selection_saturation_flag": channel_sep[
-                    "selection_saturation_flag"
-                ],
-                "combined_saturation_flag": channel_sep[
-                    "combined_saturation_flag"
-                ],
+                # D-015 quintet + D-016 trio + D-017 flag quartet via the
+                # shared single-source-of-truth row fragment (E-019 review):
+                # observed/null/excess always travel together; the channel
+                # trio is additive; the saturation flags are DIAGNOSTICS,
+                # never claims (saturation_flag — the headline gate — equals
+                # the combined channel's flag and forbids any headline
+                # leakage claim for this row when True;
+                # docs/12_CLAIM_LADDER.md Section 5 condition 2).
+                **separability_row_fields(null_corrected, channel_sep),
                 "mean_coordinate_coverage": mean_coverage,
                 "utility_per_leakage": utility_per_leakage(
                     mean_coverage, leak["value"]
