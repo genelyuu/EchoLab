@@ -32,6 +32,16 @@ policies, never synthetic users. E2/E3 stay on the frozen
 ``DEFAULT_PROBE_SET`` — this runner imports their policy set but never
 modifies their behaviour.
 
+TERMINOLOGY (G-020)
+-------------------
+The primary report label for the measured statistic is
+``probe_separability_proxy`` (the probe-separability terminology this module
+already uses in prose); ``leakage_proxy`` is the legacy machine name, carried
+as ``legacyAlias`` in ``leakageMeta``. Machine keys and values — per-family
+row keys such as ``leakage_proxy``, ``excess_nmi`` and friends — stay
+byte-identical (label layer only, D-012 precedent). Module/file names keep
+the legacy "leakage diagnostic" wording; renaming files is out of scope.
+
 All identifiers, metric names, config keys and file paths stay English;
 runtime log messages are Korean per the project logging convention.
 """
@@ -886,7 +896,11 @@ def run_leakage_diagnostic(
     #    from its computed block); probeVersions is the same mapping threaded
     #    into every family.
     leakage_meta = {
-        "metric": "leakage_proxy",
+        # G-020: primary report label is probe_separability_proxy; the legacy
+        # machine name is kept as legacyAlias (D-012 precedent). Per-family
+        # table-row machine keys stay "leakage_proxy" byte-identically.
+        "metric": "probe_separability_proxy",
+        "legacyAlias": "leakage_proxy",
         "isProxy": IS_PROXY,
         "disclaimer": PROXY_DISCLAIMER,
         "deltaReference": E3_LEAKAGE_DELTA_REFERENCE,

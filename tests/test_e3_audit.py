@@ -1,4 +1,4 @@
-"""Tests for the E3 leakage/robustness/replay audit runner (Tasks E-003, D-011, D-012)."""
+"""Tests for the E3 leakage/robustness/replay audit runner (Tasks E-003, D-011, D-012, G-020)."""
 
 from __future__ import annotations
 
@@ -142,6 +142,28 @@ def test_e3_leakage_section_is_proxy_with_disclaimer():
         assert row["isProxy"] is True
         assert isinstance(row["leakage_proxy"], float)
         assert 0.0 <= row["leakage_proxy"] <= 1.0
+
+
+def test_e3_leakage_section_primary_label_and_legacy_alias_g020():
+    """G-020: the leakage section's primary report label is
+    probe_separability_proxy with leakage_proxy as the legacy alias (D-012
+    legacyAlias precedent); table-row MACHINE KEYS stay leakage_proxy."""
+    report = run_e3_audit(dry_run=False, **_KW)
+    leakage = report["leakage"]
+
+    assert leakage["metric"] == "probe_separability_proxy", (
+        f"E3 leakage section primary metric label must be "
+        f"'probe_separability_proxy', got {leakage.get('metric')!r}"
+    )
+    assert leakage["legacyAlias"] == "leakage_proxy", (
+        f"E3 leakage section legacyAlias must be 'leakage_proxy', "
+        f"got {leakage.get('legacyAlias')!r}"
+    )
+    # Machine row keys are UNCHANGED: every row still carries the
+    # leakage_proxy value under its legacy key (replay compatibility).
+    for row in leakage["table"]:
+        assert "leakage_proxy" in row
+        assert isinstance(row["leakage_proxy"], float)
 
 
 def test_e3_leakage_delta_and_ratio_fields():

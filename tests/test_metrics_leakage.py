@@ -1,11 +1,14 @@
-"""Tests for echo_bench.metrics.leakage (Tasks D-002, D-011).
+"""Tests for echo_bench.metrics.leakage (Tasks D-002, D-011, G-020).
 
 Covers: bounded range [0, 1]; determinism; the metric is explicitly labeled a
 PROXY (not a guarantee); the metric reads NO latent/user field (only observable
 slate/selection/probe identity); and the carried metadata holds the traceHashes
 and probeVersions. D-011 (TRD alias D-010) adds the comparison-ready metrics
 ``leakage_delta_vs_random`` / ``utility_per_leakage`` and the documented
-``LEAKAGE_RATIO_FLOOR`` constant.
+``LEAKAGE_RATIO_FLOOR`` constant. G-020 adds the primary terminology label
+``probe_separability_proxy`` (``PRIMARY_METRIC_NAME``) carried ADDITIVELY in
+the metadata (``primaryMetric`` / ``legacyAlias``) — machine keys/values stay
+byte-identical (the ``metric``/``value`` keys are unchanged, D-012 precedent).
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ from echo_bench.metrics.leakage import (
     IS_PROXY,
     LEAKAGE_RATIO_FLOOR,
     METRIC_NAME,
+    PRIMARY_METRIC_NAME,
     PROXY_DISCLAIMER,
     leakage_delta_vs_random,
     leakage_proxy,
@@ -106,6 +110,29 @@ def test_is_explicitly_a_proxy_not_a_guarantee():
     assert md["isProxy"] is True
     assert md["disclaimer"] == PROXY_DISCLAIMER
     assert md["metric"] == METRIC_NAME
+
+
+def test_primary_metric_name_constant_g020():
+    """G-020: the primary terminology label is probe_separability_proxy;
+    METRIC_NAME stays the legacy machine name (unchanged)."""
+    assert PRIMARY_METRIC_NAME == "probe_separability_proxy"
+    assert METRIC_NAME == "leakage_proxy"
+    assert "PRIMARY_METRIC_NAME" in leakage.__all__
+
+
+def test_metadata_carries_primary_metric_and_legacy_alias_g020():
+    """G-020: leakage_proxy_with_metadata ADDITIVELY carries the primary
+    label + legacy alias; existing machine keys are byte-identical."""
+    md = leakage_proxy_with_metadata(_separable_traces())
+    # Additive G-020 label layer (D-012 legacyAlias precedent).
+    assert md["primaryMetric"] == PRIMARY_METRIC_NAME == "probe_separability_proxy"
+    assert md["legacyAlias"] == METRIC_NAME == "leakage_proxy"
+    # Machine keys UNCHANGED: "metric" stays the legacy machine name and the
+    # value key keeps its name and statistic.
+    assert md["metric"] == METRIC_NAME
+    assert md["value"] == md["nullCorrected"]["observed_nmi"]
+    assert md["isProxy"] is True
+    assert md["disclaimer"] == PROXY_DISCLAIMER
 
 
 def test_metadata_carries_trace_hashes_and_probe_versions():

@@ -47,6 +47,17 @@ The metric is a pure deterministic function of the observable inputs: identical
 iterated in a stable name-sorted order; counts use canonical signatures. No RNG,
 wall-clock, or process entropy enters the computation.
 
+TERMINOLOGY (G-020)
+===================
+The primary report terminology for this statistic is
+``probe_separability_proxy`` (:data:`PRIMARY_METRIC_NAME`): it names what is
+actually measured — how separable the observable behaviour is by controlled
+probe identity. ``leakage_proxy`` (:data:`METRIC_NAME`) is retained as the
+LEGACY MACHINE NAME: every machine key and value (the ``metric``/``value``
+metadata keys, report row keys such as ``leakage_proxy``, and all function
+names) stays byte-identical for replay compatibility; the rename is a label
+layer only (``primaryMetric`` / ``legacyAlias``, the D-012 precedent).
+
 Identifiers, keys, and metric names stay English; runtime log lines are Korean
 per the project logging convention. Hashing is delegated to
 :func:`echo_bench.utils.hash.canonical_hash`.
@@ -83,6 +94,7 @@ __all__ = [
     "slate_member_ids",
     "signature_saturation_stats",
     "METRIC_NAME",
+    "PRIMARY_METRIC_NAME",
     "SEPARABILITY_METRIC_NAME",
     "IS_PROXY",
     "PROXY_DISCLAIMER",
@@ -94,8 +106,18 @@ __all__ = [
 
 _logger = get_logger(__name__)
 
-#: English machine-read metric name.
+#: English machine-read metric name. G-020: this is the LEGACY machine name —
+#: it stays byte-identical everywhere a machine key or value is read/written
+#: (report row keys, the ``metric``/``value`` metadata keys, hashes), so
+#: existing runs replay unchanged.
 METRIC_NAME = "leakage_proxy"
+
+#: G-020 primary report terminology for the same statistic: the value measures
+#: probe SEPARABILITY (how observable slate/selection distributions co-vary
+#: with controlled probe identity), so reports lead with this label and carry
+#: :data:`METRIC_NAME` as the legacy alias (D-012 legacyAlias precedent).
+#: A LABEL ONLY — no machine key, value, or function name changes with it.
+PRIMARY_METRIC_NAME = "probe_separability_proxy"
 
 #: Hard flag stating this metric is a proxy, surfaced in returned metadata so no
 #: downstream consumer can mistake it for a guarantee.
@@ -674,6 +696,8 @@ def leakage_proxy_with_metadata(
 
         {
             "metric": "leakage_proxy",
+            "primaryMetric": "probe_separability_proxy",
+            "legacyAlias": "leakage_proxy",
             "value": float in [0, 1],
             "isProxy": True,
             "disclaimer": PROXY_DISCLAIMER,
@@ -682,6 +706,10 @@ def leakage_proxy_with_metadata(
             "nullCorrected": {observed_nmi, null_mean, null_std,
                               excess_nmi, excess_z, n_permutations, ...},
         }
+
+    G-020: ``primaryMetric`` / ``legacyAlias`` are an ADDITIVE label layer
+    (D-012 precedent) — the existing machine keys (``metric``, ``value``, ...)
+    and their values are byte-identical to the pre-G-020 output.
 
     D-015: ``nullCorrected`` is the :func:`null_corrected_separability` block
     (``nullCorrected["observed_nmi"] == value`` — same pooled-NMI statistic).
@@ -707,6 +735,11 @@ def leakage_proxy_with_metadata(
     )
     return {
         "metric": METRIC_NAME,
+        # G-020 additive label layer (D-012 legacyAlias precedent): the primary
+        # terminology is probe_separability_proxy; "metric" above stays the
+        # legacy machine name byte-identically.
+        "primaryMetric": PRIMARY_METRIC_NAME,
+        "legacyAlias": METRIC_NAME,
         # Same pooled-NMI statistic as null_corrected["observed_nmi"]; kept as
         # "value" for backward compatibility with existing report consumers.
         "value": null_corrected["observed_nmi"],

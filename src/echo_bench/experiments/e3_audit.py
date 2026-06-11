@@ -3,12 +3,17 @@
 E3 is the Phase 3 audit experiment. It audits the policy set along three
 controlled, deterministic axes and assembles one fully hashed report:
 
-(a) LEAKAGE (PROXY)
+(a) PROBE SEPARABILITY (PROXY; legacy name: leakage)
     For a representative policy set, build per-probe traces (each probe threaded
     as the round runner's ``select_fn``) and compute
     :func:`echo_bench.metrics.leakage.leakage_proxy` over the probe-keyed trace
-    family. The value is reported **explicitly as a PROXY** (the leakage section
-    carries ``isProxy=True`` and the
+    family. G-020 terminology: the section's primary report label is
+    ``probe_separability_proxy``
+    (:data:`echo_bench.metrics.leakage.PRIMARY_METRIC_NAME`), with
+    ``leakage_proxy`` carried as the ``legacyAlias`` — a label layer only
+    (D-012 precedent); the table-row machine keys stay ``leakage_proxy``
+    byte-identically for replay compatibility. The value is reported
+    **explicitly as a PROXY** (the section carries ``isProxy=True`` and the
     :data:`echo_bench.metrics.leakage.PROXY_DISCLAIMER`): it measures how the
     observable slate/selection distribution co-varies with the controlled probe
     identity in this controlled testbed. It is **NOT** a privacy guarantee,
@@ -402,7 +407,8 @@ def run_e3_audit(
         )
         log_ko(
             _logger,
-            "E3 누출 프록시 완료: "
+            "E3 프로브 분리도 프록시(probe_separability_proxy, "
+            "레거시명 leakage_proxy) 완료: "
             f"policy={name}, leakage_proxy={leak['value']:.6f}, "
             f"excess_nmi={null_corrected['excess_nmi']:+.6f}, "
             f"excess_z={null_corrected['excess_z']:+.4f}, "
@@ -443,7 +449,11 @@ def run_e3_audit(
         )
 
     leakage_section = {
-        "metric": "leakage_proxy",
+        # G-020: primary report label is probe_separability_proxy; the legacy
+        # machine name is kept as legacyAlias (D-012 precedent). Table-row
+        # machine keys below stay "leakage_proxy" byte-identically.
+        "metric": "probe_separability_proxy",
+        "legacyAlias": "leakage_proxy",
         "isProxy": IS_PROXY,
         "disclaimer": PROXY_DISCLAIMER,
         "policies": sorted(E3_LEAKAGE_POLICIES),
@@ -610,7 +620,8 @@ def run_e3_audit(
         "experiment": "E3_AUDIT",
         "phaseNote": (
             "Phase 3 complete: E3 audits the policy set along three controlled, "
-            "deterministic axes. (a) leakage_proxy is a SYSTEM-LEVEL PROXY for how "
+            "deterministic axes. (a) probe_separability_proxy (legacy machine "
+            "name: leakage_proxy) is a SYSTEM-LEVEL PROXY for how "
             "observable slate/selection distributions co-vary with controlled "
             "probe identity; it is NOT a privacy guarantee, anonymity proof, "
             "identifiability bound, or legal/compliance claim. (b) robustness "

@@ -453,6 +453,16 @@ def test_replay_audit_inline_recompute():
     assert "first family" in audit["scopeNote"]
 
 
+def test_leakage_meta_primary_label_and_legacy_alias_g020():
+    """G-020: leakageMeta's primary report label is probe_separability_proxy
+    with leakage_proxy as the legacy alias (D-012 legacyAlias precedent);
+    row machine keys stay leakage_proxy (asserted elsewhere)."""
+    report = _report()
+    leakage_meta = report["leakageMeta"]
+    assert leakage_meta["metric"] == "probe_separability_proxy"
+    assert leakage_meta["legacyAlias"] == "leakage_proxy"
+
+
 def test_proxy_framing_carried():
     report = _report()
     leakage_meta = report["leakageMeta"]
