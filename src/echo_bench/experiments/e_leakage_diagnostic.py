@@ -50,9 +50,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Sequence, Tuple
 
 import yaml
 
@@ -97,10 +98,13 @@ __all__ = [
     "run_leakage_diagnostic",
     "main",
     "EXPANDED_PROBE_SET",
+    "REPLAY_MODES",
     "TRACK_L_MIN_FAMILIES",
     "build_cross_family_excess_block",
     "build_overlap_caveat",
+    "build_replay_section",
     "evaluate_track_l_conditions",
+    "select_replay_sample",
 ]
 
 _logger = get_logger(__name__)
@@ -119,6 +123,41 @@ TRACK_L_MIN_FAMILIES = 5
 #: Where the four conditions are defined; recorded in the report so the
 #: diagnostic block is self-describing.
 TRACK_L_LADDER_REF = "docs/12_CLAIM_LADDER.md Section 5"
+
+#: F-008 inline replay-audit modes. The staged policy (recorded verbatim in
+#: every replay section as ``samplePolicy``):
+#: diagnostic/dev runs -> ``first_family`` (cheap inline check);
+#: n=100 / final runs -> ``sampled_families`` (deterministic config-derived
+#: multi-family sample); camera-ready / artifact runs -> ``full`` (every
+#: family recomputed); ``none`` skips the inline audit entirely.
+REPLAY_MODES: Tuple[str, ...] = (
+    "first_family",
+    "sampled_families",
+    "full",
+    "none",
+)
+
+#: Honest scope label per replay mode (E-019 review principle: the section
+#: must say exactly what was and was NOT recomputed).
+_REPLAY_SCOPES = {
+    "first_family": "first_family_only",
+    "sampled_families": "sampled_families",
+    "full": "all_families",
+    "none": "skipped",
+}
+
+#: Salt mixed into the config-derived replay-sample seed so the sample stream
+#: can never collide with any other config-hash-seeded stream.
+_REPLAY_SAMPLE_SALT = "f008-replay-sample"
+
+#: The staged replay policy, carried in every replay section (F-008).
+REPLAY_SAMPLE_POLICY_NOTE = (
+    "Staged replay policy (F-008): diagnostic/dev runs use replay_mode="
+    "'first_family' (cheap inline first-family recompute); n=100/final runs "
+    "use 'sampled_families' (a deterministic, config-derived multi-family "
+    "sample); camera-ready/artifact runs use 'full' (every family "
+    "recomputed). 'none' skips the inline audit and reports replayable=null."
+)
 
 _TRACK_L_NOTE = (
     "DIAGNOSTIC only: this block states whether the Track L re-enable "
@@ -437,6 +476,199 @@ def build_overlap_caveat(
 
 
 # ---------------------------------------------------------------------------
+# F-008 inline replay audit (pure helpers + section assembly).
+# ---------------------------------------------------------------------------
+
+
+def _validate_replay_args(
+    replay_mode: str, replay_sample_size: int, n_families: int
+) -> None:
+    """Validate the F-008 replay arguments, failing closed (Korean)."""
+    if replay_mode not in REPLAY_MODES:
+        raise ValueError(
+            f"F-008 리플레이 감사: replay_mode={replay_mode!r} 는 허용되지 "
+            f"않습니다 (허용값: {list(REPLAY_MODES)})."
+        )
+    if replay_mode == "sampled_families":
+        m = int(replay_sample_size)
+        if m < 1 or m > int(n_families):
+            raise ValueError(
+                "F-008 리플레이 감사: replay_sample_size 는 1 이상, 패밀리 수"
+                f"({n_families}) 이하여야 합니다 (입력값: {replay_sample_size})."
+            )
+
+
+def select_replay_sample(
+    families: Sequence[str], sample_size: int, config_key: Any
+) -> List[str]:
+    """Deterministically sample families for the F-008 sampled replay (pure).
+
+    The sample is a pure function of ``(family set, sample_size,
+    config_key)``: the RNG is ``random.Random`` seeded from
+    ``canonical_hash({"configKey": config_key, "salt": "f008-replay-sample"})``
+    interpreted as an integer, drawn over the name-SORTED family list — no
+    wall clock, no global RNG state, no family argument-order dependence.
+    The same config therefore always replays the same families; a different
+    config key generally selects a different subset (single key pairs may
+    collide by chance — the guarantee is determinism, not distinctness).
+
+    Returns the sampled families name-sorted. Raises a Korean
+    :class:`ValueError` unless ``1 <= sample_size <= len(families)``.
+    """
+    family_list = sorted(str(f) for f in families)
+    m = int(sample_size)
+    if m < 1 or m > len(family_list):
+        raise ValueError(
+            "F-008 리플레이 감사: replay_sample_size 는 1 이상, 패밀리 수"
+            f"({len(family_list)}) 이하여야 합니다 (입력값: {sample_size})."
+        )
+    seed_int = int(
+        canonical_hash({"configKey": config_key, "salt": _REPLAY_SAMPLE_SALT}),
+        16,
+    )
+    rng = random.Random(seed_int)
+    return sorted(rng.sample(family_list, m))
+
+
+def _replay_scope_note(
+    replay_mode: str, targets: Sequence[str], n_families: int
+) -> str:
+    """The honest English scope note: what was and was NOT recomputed."""
+    if replay_mode == "first_family":
+        return (
+            "The inline audit recomputed ONLY the first family "
+            f"({targets[0]!r}) and compared canonical hashes; the other "
+            f"{n_families - 1} families were NOT re-run (the cross-family "
+            "aggregation layer is a pure function of the family blocks). "
+            "replayable=true therefore attests the first family's "
+            "bit-identity, not a whole-run re-execution; a full re-run "
+            "replay is replay_mode='full' or the replay-validator path."
+        )
+    if replay_mode == "sampled_families":
+        return (
+            f"The inline audit recomputed {len(targets)} of {n_families} "
+            f"families ({list(targets)}), deterministically sampled from the "
+            f"run config (salt {_REPLAY_SAMPLE_SALT!r}); the remaining "
+            f"{n_families - len(targets)} families were NOT re-run. The "
+            "cross-family aggregation layer is a pure function of the family "
+            "blocks, so per-family bit-identity is the load-bearing check. "
+            "replayable=true attests the sampled families only, not a "
+            "whole-run re-execution."
+        )
+    if replay_mode == "full":
+        return (
+            f"The inline audit recomputed ALL {n_families} families and "
+            "compared canonical hashes per family; replayable=true attests "
+            "the bit-identity of every family block. The cross-family "
+            "aggregation layer is a pure function of the family blocks and "
+            "is not separately re-executed."
+        )
+    return (
+        "The inline replay audit was SKIPPED (replay_mode='none'); no family "
+        "was recomputed and replayable is null, not true."
+    )
+
+
+def build_replay_section(
+    family_blocks: Mapping[str, Mapping[str, Any]],
+    recompute_fn: Callable[[str], Mapping[str, Any]],
+    replay_mode: str = "first_family",
+    replay_sample_size: int = 2,
+    config_key: Any = None,
+) -> Dict[str, Any]:
+    """Assemble the F-008 inline replay-audit section (pure given its args).
+
+    ``family_blocks`` is the already-computed family map (caller seed order);
+    ``recompute_fn(family)`` must recompute one family's block from scratch.
+    Targets per mode: ``first_family`` -> the first block in caller order;
+    ``sampled_families`` -> :func:`select_replay_sample` of
+    ``replay_sample_size`` families derived from ``config_key``; ``full`` ->
+    every family; ``none`` -> nothing (``replayable=None``).
+
+    Each recomputed family is compared by ``canonical_hash`` (exact, no
+    tolerance) and reported under ``perFamily``; ``replayable`` is True only
+    if EVERY recomputed family is bit-identical. Divergences are logged
+    LOUDLY in Korean per family — a non-replayable result is never hidden.
+    """
+    _validate_replay_args(replay_mode, replay_sample_size, len(family_blocks))
+
+    if replay_mode == "none":
+        log_ko(
+            _logger,
+            "E-019/F-008 리플레이 감사 건너뜀: replay_mode='none' — 어떤 "
+            "패밀리도 재계산하지 않았습니다 (replayable=None).",
+        )
+        return {
+            "mode": "inline_recompute",
+            "replayMode": "none",
+            "scope": _REPLAY_SCOPES["none"],
+            "sampledFamilies": [],
+            "perFamily": {},
+            "replayable": None,
+            "scopeNote": _replay_scope_note("none", [], len(family_blocks)),
+            "samplePolicy": REPLAY_SAMPLE_POLICY_NOTE,
+        }
+
+    if replay_mode == "first_family":
+        targets: List[str] = [next(iter(family_blocks))]
+    elif replay_mode == "sampled_families":
+        targets = select_replay_sample(
+            list(family_blocks), replay_sample_size, config_key
+        )
+    else:  # "full"
+        targets = list(family_blocks)
+
+    per_family: Dict[str, Dict[str, Any]] = {}
+    for family in targets:
+        original_hash = canonical_hash(family_blocks[family])
+        recomputed_hash = canonical_hash(recompute_fn(family))
+        family_ok = original_hash == recomputed_hash
+        per_family[family] = {
+            "replayable": family_ok,
+            "familyBlockHash": original_hash,
+            "recomputedBlockHash": recomputed_hash,
+        }
+        if not family_ok:
+            log_ko(
+                _logger,
+                "E-019/F-008 리플레이 감사 실패(LOUD): "
+                f"family={family} 재계산 해시가 다릅니다 "
+                f"(original={original_hash[:12]}, "
+                f"recomputed={recomputed_hash[:12]}) — 재현 불가는 숨기지 "
+                "않고 보고합니다",
+            )
+        else:
+            log_ko(
+                _logger,
+                "E-019/F-008 리플레이 감사 통과: "
+                f"family={family} 재계산이 비트 동일합니다 "
+                f"(hash={original_hash[:12]}).",
+            )
+
+    replayable = all(entry["replayable"] for entry in per_family.values())
+    log_ko(
+        _logger,
+        "E-019/F-008 리플레이 감사 요약: "
+        f"replay_mode={replay_mode}, scope={_REPLAY_SCOPES[replay_mode]}, "
+        f"재계산 패밀리 {len(targets)}/{len(family_blocks)}개, "
+        f"replayable={replayable}"
+        + ("" if replayable else " — 재현 불가(LOUD)") + ".",
+    )
+    return {
+        "mode": "inline_recompute",
+        "replayMode": replay_mode,
+        "scope": _REPLAY_SCOPES[replay_mode],
+        "sampledFamilies": list(targets),
+        "perFamily": per_family,
+        "replayable": replayable,
+        "scopeNote": _replay_scope_note(
+            replay_mode, targets, len(family_blocks)
+        ),
+        "samplePolicy": REPLAY_SAMPLE_POLICY_NOTE,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Per-family computation.
 # ---------------------------------------------------------------------------
 
@@ -690,6 +922,8 @@ def run_leakage_diagnostic(
     n_permutations: int = DEFAULT_NULL_PERMUTATIONS,
     dry_run: bool = False,
     replay_validate: bool = True,
+    replay_mode: str = "first_family",
+    replay_sample_size: int = 2,
 ) -> dict:
     """Run the E-019 expanded-probe leakage diagnostic and return a report.
 
@@ -704,14 +938,30 @@ def run_leakage_diagnostic(
             documented default 200 for production; smaller for development).
         dry_run: validate configs + freeze, compute per-family archive/pool
             hashes, write nothing, run no episodes.
-        replay_validate: when true, recompute the FIRST family a second time
-            and compare canonical hashes (mode ``inline_recompute_first_family``);
-            a divergence is reported LOUDLY as ``replayable=False``.
+        replay_validate: deprecated boolean seam kept for backward
+            compatibility — ``False`` forces the effective replay mode to
+            ``"none"``; ``True`` (default) defers to ``replay_mode``.
+        replay_mode: F-008 inline replay-audit mode, one of
+            :data:`REPLAY_MODES`. Staged policy: diagnostic/dev runs use the
+            default ``"first_family"``; n=100/final runs use
+            ``"sampled_families"``; camera-ready/artifact runs use ``"full"``.
+            Each selected family is recomputed via the same per-family
+            function and compared by canonical hash; any divergence is
+            reported LOUDLY as ``replayable=False``.
+        replay_sample_size: families to recompute in ``sampled_families``
+            mode (validated ``1 <= m <= len(base_seeds)``); the sample is a
+            deterministic pure function of the run config (see
+            :func:`select_replay_sample`).
 
     Returns:
         The report dict (a dry-run plan dict when ``dry_run`` is true).
     """
     seeds = _validate_args(base_seeds, n_permutations, pool_size)
+    # F-008: validate the replay arguments up front (fail closed BEFORE any
+    # slow family run). replay_validate=False is the deprecated boolean seam:
+    # it maps to the "none" mode.
+    _validate_replay_args(str(replay_mode), replay_sample_size, len(seeds))
+    effective_replay_mode = "none" if not replay_validate else str(replay_mode)
 
     # 0. C-011 config-freeze gate (hard Korean ValueError before anything runs).
     freeze = verify_trace_greedy_freeze()
@@ -749,6 +999,10 @@ def run_leakage_diagnostic(
         "overlapThreshold": PROBE_OVERLAP_THRESHOLD,
         "overlapExcludeThreshold": PROBE_OVERLAP_EXCLUDE_THRESHOLD,
         "minFamilies": TRACK_L_MIN_FAMILIES,
+        # F-008 replay-audit config echo (feeds configHash; seedBatchId is
+        # intentionally untouched so batches stay comparable across modes).
+        "replayMode": effective_replay_mode,
+        "replaySampleSize": int(replay_sample_size),
         "configFreeze": {
             "policyName": freeze["policyName"],
             "policyEffectiveConfigHash": freeze["frozenHash"],
@@ -839,56 +1093,20 @@ def run_leakage_diagnostic(
         "클레임 래더의 문서화된 결정(G-009)으로만 이루어집니다.",
     )
 
-    # 5. Inline replay audit: recompute the FIRST family and compare hashes.
-    first_family = str(seeds[0])
-    if replay_validate:
-        recomputed = _run_family(
-            int(seeds[0]), int(H), int(k), int(pool_size), int(n_permutations),
+    # 5. Inline replay audit (F-008 staged policy): recompute the selected
+    #    families via the same pure per-family function and compare canonical
+    #    hashes per family. The sample (sampled_families mode) is a
+    #    deterministic pure function of the run config (config_hash + salt).
+    replay_section = build_replay_section(
+        family_blocks,
+        lambda family: _run_family(
+            int(family), int(H), int(k), int(pool_size), int(n_permutations),
             bases, archive_cfg, policy_cfgs, probe_versions,
-        )
-        original_hash = canonical_hash(family_blocks[first_family])
-        recomputed_hash = canonical_hash(recomputed)
-        replayable = original_hash == recomputed_hash
-        if not replayable:
-            log_ko(
-                _logger,
-                "E-019 리플레이 감사 실패(LOUD): "
-                f"family={first_family} 재계산 해시가 다릅니다 "
-                f"(original={original_hash[:12]}, "
-                f"recomputed={recomputed_hash[:12]}) — 재현 불가는 숨기지 "
-                "않고 보고합니다",
-            )
-        else:
-            log_ko(
-                _logger,
-                "E-019 리플레이 감사 통과: "
-                f"family={first_family} 재계산이 비트 동일합니다 "
-                f"(hash={original_hash[:12]}).",
-            )
-        replay_section: Dict[str, Any] = {
-            "mode": "inline_recompute_first_family",
-            "scope": "first_family_only",
-            "scopeNote": (
-                "The inline audit recomputes ONLY the first family and "
-                "compares canonical hashes; families 2..N are not re-run "
-                "(the cross-family aggregation layer is a pure function of "
-                "the family blocks). replayable=true therefore attests the "
-                "first family's bit-identity, not a whole-run re-execution; "
-                "a full re-run replay is the replay-validator path."
-            ),
-            "family": first_family,
-            "replayable": replayable,
-            "familyBlockHash": original_hash,
-            "recomputedBlockHash": recomputed_hash,
-        }
-    else:
-        replay_section = {
-            "mode": "inline_recompute_first_family",
-            "scope": "skipped",
-            "family": first_family,
-            "replayable": None,
-            "note": "replay_validate=False — 인라인 재계산을 건너뛰었습니다.",
-        }
+        ),
+        replay_mode=effective_replay_mode,
+        replay_sample_size=replay_sample_size,
+        config_key=config_hash,
+    )
 
     # 6. Self-describing leakage metadata (PROXY framing travels with the
     #    data). nullPermutations is the validated run parameter threaded into
@@ -1065,9 +1283,31 @@ def main() -> None:
         help="D-015 permutation-null size per channel (default: 200)",
     )
     parser.add_argument(
+        "--replay-mode",
+        type=str,
+        choices=REPLAY_MODES,
+        default="first_family",
+        help=(
+            "F-008 inline replay-audit mode (staged policy: dev=first_family, "
+            "n=100/final=sampled_families, camera-ready/artifact=full)"
+        ),
+    )
+    parser.add_argument(
+        "--replay-sample-size",
+        type=int,
+        default=2,
+        help=(
+            "families to recompute in sampled_families mode "
+            "(deterministic config-derived sample; default: 2)"
+        ),
+    )
+    parser.add_argument(
         "--no-replay-validate",
         action="store_true",
-        help="skip the inline first-family recompute replay audit",
+        help=(
+            "deprecated seam: skip the inline replay audit entirely "
+            "(equivalent to --replay-mode none)"
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -1087,6 +1327,8 @@ def main() -> None:
         n_permutations=args.n_permutations,
         dry_run=args.dry_run,
         replay_validate=not args.no_replay_validate,
+        replay_mode=args.replay_mode,
+        replay_sample_size=args.replay_sample_size,
     )
 
     if result.get("dryRun"):

@@ -10,6 +10,11 @@ Covers:
   D-017 fields + leakage_delta_vs_random; per-family B-007 probe-overlap
   audit; cross-family excess block; Track L conditions block (DIAGNOSTIC);
   inline-recompute replay audit; report file + reproducibility pack.
+- F-008 staged inline replay: deterministic config-derived family sampling
+  (select_replay_sample) and the pure replay-section assembly
+  (build_replay_section) for first_family / sampled_families / full / none,
+  unit-tested with fake family blocks + a fake recompute_fn (no second
+  expensive integration run).
 - C-011 freeze gate hard-fails on a doctored manifest (monkeypatch only — the
   real frozen manifest is never touched).
 - Fail-closed argument validation.
@@ -29,11 +34,14 @@ from echo_bench.experiments.e3_audit import (
 )
 from echo_bench.experiments.e_leakage_diagnostic import (
     EXPANDED_PROBE_SET,
+    REPLAY_MODES,
     TRACK_L_MIN_FAMILIES,
     build_cross_family_excess_block,
     build_overlap_caveat,
+    build_replay_section,
     evaluate_track_l_conditions,
     run_leakage_diagnostic,
+    select_replay_sample,
 )
 from echo_bench.metrics.separability import CHANNEL_NAMES
 from echo_bench.probes.probe_overlap import PROBE_OVERLAP_EXCLUDE_THRESHOLD
@@ -444,13 +452,199 @@ def test_track_l_conditions_block_in_report():
 
 
 def test_replay_audit_inline_recompute():
+    # Default invocation keeps the cheap dev semantics: ONLY the first family
+    # is recomputed (F-008 staged policy: dev=first_family).
     report = _report()
     audit = report["replayAudit"]
-    assert audit["mode"] == "inline_recompute_first_family"
-    assert audit["replayable"] is True
-    # The audit must state its partial coverage explicitly.
+    assert audit["mode"] == "inline_recompute"
+    assert audit["replayMode"] == "first_family"
     assert audit["scope"] == "first_family_only"
+    assert audit["replayable"] is True
+    first_family = str(_KW["base_seeds"][0])
+    assert audit["sampledFamilies"] == [first_family]
+    assert sorted(audit["perFamily"]) == [first_family]
+    entry = audit["perFamily"][first_family]
+    assert entry["replayable"] is True
+    assert entry["familyBlockHash"] == entry["recomputedBlockHash"]
+    # The audit must state its partial coverage explicitly.
     assert "first family" in audit["scopeNote"]
+    assert "NOT" in audit["scopeNote"] or "not re-run" in audit["scopeNote"]
+    # The staged policy travels with the section, self-describing.
+    for stage_mode in ("first_family", "sampled_families", "full"):
+        assert stage_mode in audit["samplePolicy"]
+
+
+def test_replay_config_echo_in_run_params():
+    report = _report()
+    assert report["config"]["replayMode"] == "first_family"
+    assert report["config"]["replaySampleSize"] == 2
+
+
+# ---------------------------------------------------------------------------
+# F-008: deterministic replay sampling + replay-section assembly (pure)
+# ---------------------------------------------------------------------------
+
+_FAKE_FAMILIES = ("42", "7", "101", "2025", "31337")
+_FAKE_BLOCKS = {family: {"base_seed": family, "x": i} for i, family in
+                enumerate(_FAKE_FAMILIES)}
+
+
+def _identical_recompute(family):
+    """A recompute_fn whose result is bit-identical to the original block."""
+    return dict(_FAKE_BLOCKS[family])
+
+
+def test_replay_modes_constant():
+    assert REPLAY_MODES == ("first_family", "sampled_families", "full", "none")
+
+
+def test_select_replay_sample_is_deterministic():
+    a = select_replay_sample(_FAKE_FAMILIES, 2, "config-key-1")
+    b = select_replay_sample(_FAKE_FAMILIES, 2, "config-key-1")
+    assert a == b
+    assert len(a) == 2
+    assert set(a) <= set(_FAKE_FAMILIES)
+    # Argument order of the family list must not matter (sorted internally).
+    c = select_replay_sample(tuple(reversed(_FAKE_FAMILIES)), 2, "config-key-1")
+    assert c == a
+
+
+def test_select_replay_sample_varies_with_config_key():
+    # With C(5,2)=10 possible pairs, 8 distinct config keys yielding a single
+    # identical sample has probability ~1e-7: the sample must depend on the
+    # config key (any single pair of keys MAY collide by chance, documented).
+    samples = {
+        tuple(select_replay_sample(_FAKE_FAMILIES, 2, f"config-key-{i}"))
+        for i in range(8)
+    }
+    assert len(samples) > 1
+
+
+@pytest.mark.parametrize("bad_size", [0, -1, 6])
+def test_select_replay_sample_size_validation_fails_closed(bad_size):
+    with pytest.raises(ValueError):
+        select_replay_sample(_FAKE_FAMILIES, bad_size, "config-key-1")
+
+
+def test_build_replay_section_sampled_families_pass():
+    section = build_replay_section(
+        _FAKE_BLOCKS,
+        _identical_recompute,
+        replay_mode="sampled_families",
+        replay_sample_size=2,
+        config_key="config-key-1",
+    )
+    assert section["mode"] == "inline_recompute"
+    assert section["replayMode"] == "sampled_families"
+    assert section["scope"] == "sampled_families"
+    assert len(section["sampledFamilies"]) == 2
+    assert sorted(section["perFamily"]) == sorted(section["sampledFamilies"])
+    assert section["replayable"] is True
+    for entry in section["perFamily"].values():
+        assert entry["replayable"] is True
+        assert entry["familyBlockHash"] == entry["recomputedBlockHash"]
+    # Honest scope: states exactly how many of how many were recomputed and
+    # that the aggregation layer is a pure function of the family blocks.
+    assert "2 of 5" in section["scopeNote"]
+    assert "pure function" in section["scopeNote"]
+
+
+def test_build_replay_section_sampled_is_deterministic():
+    kwargs = dict(
+        replay_mode="sampled_families", replay_sample_size=2,
+        config_key="config-key-1",
+    )
+    first = build_replay_section(_FAKE_BLOCKS, _identical_recompute, **kwargs)
+    second = build_replay_section(_FAKE_BLOCKS, _identical_recompute, **kwargs)
+    assert first["sampledFamilies"] == second["sampledFamilies"]
+
+
+def test_build_replay_section_full_pass():
+    section = build_replay_section(
+        _FAKE_BLOCKS, _identical_recompute, replay_mode="full"
+    )
+    assert section["scope"] == "all_families"
+    assert section["sampledFamilies"] == list(_FAKE_BLOCKS)
+    assert sorted(section["perFamily"]) == sorted(_FAKE_BLOCKS)
+    assert section["replayable"] is True
+    assert "ALL 5" in section["scopeNote"]
+
+
+def test_build_replay_section_divergence_is_loud_per_family():
+    # One diverging family must fail that family AND the overall verdict,
+    # while matching families stay individually replayable (never hidden).
+    def diverging_recompute(family):
+        if family == "7":
+            return {"base_seed": family, "x": "DIVERGED"}
+        return dict(_FAKE_BLOCKS[family])
+
+    section = build_replay_section(
+        _FAKE_BLOCKS, diverging_recompute, replay_mode="full"
+    )
+    assert section["replayable"] is False
+    assert section["perFamily"]["7"]["replayable"] is False
+    assert (
+        section["perFamily"]["7"]["familyBlockHash"]
+        != section["perFamily"]["7"]["recomputedBlockHash"]
+    )
+    assert section["perFamily"]["42"]["replayable"] is True
+
+
+def test_build_replay_section_first_family_only():
+    calls = []
+
+    def tracking_recompute(family):
+        calls.append(family)
+        return dict(_FAKE_BLOCKS[family])
+
+    section = build_replay_section(
+        _FAKE_BLOCKS, tracking_recompute, replay_mode="first_family"
+    )
+    assert calls == ["42"]  # first family in block order, nothing else re-run
+    assert section["scope"] == "first_family_only"
+    assert section["sampledFamilies"] == ["42"]
+    assert section["replayable"] is True
+
+
+def test_build_replay_section_none_is_skipped():
+    def must_not_run(family):  # pragma: no cover - asserted not to be called
+        raise AssertionError("recompute_fn must not run in mode 'none'")
+
+    section = build_replay_section(
+        _FAKE_BLOCKS, must_not_run, replay_mode="none"
+    )
+    assert section["scope"] == "skipped"
+    assert section["replayable"] is None
+    assert section["sampledFamilies"] == []
+    assert section["perFamily"] == {}
+    assert "samplePolicy" in section
+
+
+def test_build_replay_section_rejects_unknown_mode():
+    with pytest.raises(ValueError):
+        build_replay_section(
+            _FAKE_BLOCKS, _identical_recompute, replay_mode="bogus"
+        )
+
+
+def test_run_rejects_bad_replay_args():
+    with pytest.raises(ValueError):
+        run_leakage_diagnostic(dry_run=True, replay_mode="bogus", **_KW)
+    # _KW has 2 families: a sample of 5 cannot be drawn.
+    with pytest.raises(ValueError):
+        run_leakage_diagnostic(
+            dry_run=True,
+            replay_mode="sampled_families",
+            replay_sample_size=5,
+            **_KW,
+        )
+    with pytest.raises(ValueError):
+        run_leakage_diagnostic(
+            dry_run=True,
+            replay_mode="sampled_families",
+            replay_sample_size=0,
+            **_KW,
+        )
 
 
 def test_leakage_meta_primary_label_and_legacy_alias_g020():
