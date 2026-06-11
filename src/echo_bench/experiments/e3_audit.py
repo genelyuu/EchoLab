@@ -71,6 +71,7 @@ from echo_bench.logging import get_logger, log_ko
 from echo_bench.logging.repro_pack import ReproducibilityPack
 from echo_bench.logging.replay_validator import validate_replay
 from echo_bench.metrics.leakage import (
+    DEFAULT_NULL_PERMUTATIONS,
     IS_PROXY,
     LEAKAGE_RATIO_FLOOR,
     PROXY_DISCLAIMER,
@@ -349,12 +350,21 @@ def run_e3_audit(
             coordinate_coverage(traces_by_probe[pn]) for pn in probe_names
         ]
         mean_coverage = sum(coverages) / len(coverages) if coverages else 0.0
+        null_corrected = leak["nullCorrected"]
         leakage_rows.append(
             {
                 "policy": name,
                 "policyVersion": cls(dict(cfg)).policy_version(),
                 "leakage_proxy": leak["value"],
                 "isProxy": leak["isProxy"],
+                # D-015: null-corrected separability — observed/null/excess are
+                # ALWAYS reported together (absolute NMI alone is not
+                # report-grade; the pooled NMI saturates under branching).
+                "observed_nmi": null_corrected["observed_nmi"],
+                "null_mean": null_corrected["null_mean"],
+                "null_std": null_corrected["null_std"],
+                "excess_nmi": null_corrected["excess_nmi"],
+                "excess_z": null_corrected["excess_z"],
                 "mean_coordinate_coverage": mean_coverage,
                 "utility_per_leakage": utility_per_leakage(
                     mean_coverage, leak["value"]
@@ -366,8 +376,11 @@ def run_e3_audit(
         log_ko(
             _logger,
             "E3 누출 프록시 완료: "
-            f"policy={name}, leakage_proxy={leak['value']:.6f} "
-            "(이는 PROXY 이며 프라이버시/법적 보증이 아닙니다)",
+            f"policy={name}, leakage_proxy={leak['value']:.6f}, "
+            f"excess_nmi={null_corrected['excess_nmi']:+.6f}, "
+            f"excess_z={null_corrected['excess_z']:+.4f} "
+            "(해석은 'null 초과 정보가 있다/없다'로만 하며, "
+            "이는 PROXY 이고 프라이버시/법적 보증이 아닙니다)",
         )
 
     # D-011 (TRD alias D-010): second pass — RELATIVE delta vs the RANDOM
@@ -411,6 +424,10 @@ def run_e3_audit(
         "ratioUtilityMetric": "coordinate_coverage",
         "ciAvailable": False,
         "ciUnavailableReason": _E3_LEAKAGE_CI_UNAVAILABLE_REASON,
+        # D-015: deterministic permutation-null correction is self-describing —
+        # every table row carries observed_nmi/null_mean/null_std/excess_nmi/
+        # excess_z computed with this many data-seeded label permutations.
+        "nullPermutations": DEFAULT_NULL_PERMUTATIONS,
         "probeVersions": {
             pn: get_probe(pn).probe_version() for pn in probe_names
         },

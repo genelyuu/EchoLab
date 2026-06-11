@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 
 import pytest
 
@@ -12,7 +13,11 @@ from echo_bench.experiments.e3_audit import (
     _REPORTS_DIR,
     run_e3_audit,
 )
-from echo_bench.metrics.leakage import LEAKAGE_RATIO_FLOOR, PROXY_DISCLAIMER
+from echo_bench.metrics.leakage import (
+    DEFAULT_NULL_PERMUTATIONS,
+    LEAKAGE_RATIO_FLOOR,
+    PROXY_DISCLAIMER,
+)
 from echo_bench.metrics.robustness import FAULTS
 from echo_bench.metrics.utility import CORE_METRIC_KEYS
 
@@ -173,6 +178,34 @@ def test_e3_leakage_delta_and_ratio_fields():
 
     # The RANDOM reference's own delta is 0.0 by definition (exact).
     assert rows[E3_LEAKAGE_DELTA_REFERENCE]["leakage_delta_vs_random"] == 0.0
+
+
+def test_e3_leakage_rows_carry_null_corrected_fields():
+    """D-015: every leakage-style report row carries observed/null/excess
+    together — the absolute NMI is never reported alone."""
+    report = run_e3_audit(dry_run=False, **_KW)
+    leakage = report["leakage"]
+
+    # Section-level: the permutation count is self-describing.
+    assert leakage["nullPermutations"] == DEFAULT_NULL_PERMUTATIONS
+
+    for row in leakage["table"]:
+        for field in (
+            "observed_nmi",
+            "null_mean",
+            "null_std",
+            "excess_nmi",
+            "excess_z",
+        ):
+            assert field in row, f"leakage row missing D-015 field: {field}"
+            assert math.isfinite(row[field])
+        # observed_nmi IS the legacy pooled NMI (same statistic, same value).
+        assert row["observed_nmi"] == row["leakage_proxy"]
+        assert row["excess_nmi"] == pytest.approx(
+            row["observed_nmi"] - row["null_mean"]
+        )
+        assert 0.0 <= row["null_mean"] <= 1.0
+        assert row["null_std"] >= 0.0
 
 
 def test_e3_trace_greedy_delta_vs_random_is_negative():

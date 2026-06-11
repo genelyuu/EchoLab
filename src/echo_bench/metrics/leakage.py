@@ -55,6 +55,7 @@ per the project logging convention. Hashing is delegated to
 from __future__ import annotations
 
 import math
+import random
 from typing import Any, Dict, List, Mapping, Tuple
 
 from echo_bench.logging import get_logger
@@ -63,12 +64,16 @@ from echo_bench.utils.hash import canonical_hash
 __all__ = [
     "leakage_proxy",
     "leakage_proxy_with_metadata",
+    "null_corrected_separability",
     "leakage_delta_vs_random",
     "utility_per_leakage",
     "METRIC_NAME",
+    "SEPARABILITY_METRIC_NAME",
     "IS_PROXY",
     "PROXY_DISCLAIMER",
     "LEAKAGE_RATIO_FLOOR",
+    "DEFAULT_NULL_PERMUTATIONS",
+    "NULL_STD_EPS",
 ]
 
 _logger = get_logger(__name__)
@@ -88,6 +93,20 @@ PROXY_DISCLAIMER = (
     "identifiability bound, or legal/compliance claim, and makes no real-world "
     "generalization claim."
 )
+
+# D-015: English machine-read metric name for the null-corrected statistic.
+SEPARABILITY_METRIC_NAME = "null_corrected_separability"
+
+# D-015: default number of deterministic label permutations for the null.
+DEFAULT_NULL_PERMUTATIONS = 200
+
+# D-015: documented near-zero threshold for the null standard deviation.
+# CONVENTION (bounded, never +/-inf or NaN): when ``null_std < NULL_STD_EPS``
+# the permutation null is (numerically) constant — every label permutation
+# yields the same NMI, so the observed value carries no information in excess
+# of the null and ``excess_z`` is defined as exactly ``0.0``. (In this regime
+# ``excess_nmi`` is itself ~0 because observed equals the constant null.)
+NULL_STD_EPS = 1e-12
 
 # D-011 (TRD alias D-010): denominator floor for :func:`utility_per_leakage`.
 # A leakage value below this floor is replaced by the floor before dividing, so
@@ -320,9 +339,159 @@ def leakage_proxy(traces_by_probe: Mapping[str, Any]) -> float:
     return value
 
 
+def null_corrected_separability(
+    traces_by_probe: Mapping[str, Any],
+    n_permutations: int = DEFAULT_NULL_PERMUTATIONS,
+) -> Dict[str, Any]:
+    """Null-corrected probe-separability **PROXY** (Task D-015, TRD D-015).
+
+    MOTIVATION
+    ==========
+    The naive pooled NMI of :func:`leakage_proxy` operates in a **saturation
+    regime** under trace-conditioned branching: the selection-signature space
+    explodes, signatures become (near-)unique, and the pooled NMI sits near
+    ``1.0`` even when the probe labels carry no information — i.e. even under
+    the null. The absolute NMI value is therefore not report-grade on its own.
+
+    DEFINITION
+    ==========
+    Compare the observed pooled NMI against a **deterministic permutation
+    null**: permute the probe labels over the *same* signature multiset
+    ``n_permutations`` times, recompute the NMI per permutation, and report
+
+    - ``observed_nmi``  — :func:`leakage_proxy`'s pooled NMI (same statistic),
+    - ``null_mean`` / ``null_std`` — mean / population std (ddof=0) of the
+      permutation-null NMI values,
+    - ``excess_nmi`` = ``observed_nmi - null_mean``,
+    - ``excess_z``  = ``(observed_nmi - null_mean) / null_std``, with the
+      bounded convention ``excess_z = 0.0`` whenever
+      ``null_std < NULL_STD_EPS`` (a constant null carries no excess; ±inf and
+      NaN are forbidden — see :data:`NULL_STD_EPS`).
+
+    Chance adjustment for information-theoretic clustering comparison follows
+    the discussion in Vinh et al. (JMLR 2010).
+
+    INTERPRETATION CONVENTION
+    =========================
+    Never "the NMI is high" — only "the observed signatures carry / do not
+    carry information in excess of the permutation null". Every leakage-style
+    report block must carry observed/null/excess together; the absolute NMI
+    alone is not reportable.
+
+    DETERMINISM
+    ===========
+    The permutation RNG is seeded **only** from the input data: a
+    ``random.Random`` seeded with ``int(canonical_hash(...), 16)`` over the
+    pooled ``(probe, signature)`` sequence plus ``n_permutations``. No
+    wall-clock, process entropy, or global RNG state enters (the global
+    ``random`` module state is untouched). Identical inputs (regardless of
+    mapping insertion order) yield a bit-identical output dict, so results are
+    replayable on CPU.
+
+    FAIL-CLOSED CONVENTION
+    ======================
+    Degenerate inputs (fewer than two probes with rounds, or no rounds at all)
+    have nothing to separate: the result is the defined zero dict
+    (``observed_nmi = null_mean = null_std = excess_nmi = excess_z = 0.0``)
+    with ``degenerate = True`` and no permutations executed.
+
+    This is a PROXY statistic over the controlled testbed (see
+    :data:`PROXY_DISCLAIMER`) — NOT a privacy guarantee, anonymity proof,
+    identifiability bound, or legal/compliance claim.
+
+    Raises ``ValueError`` if ``n_permutations < 1``.
+    """
+    if n_permutations < 1:
+        raise ValueError(
+            "null_corrected_separability: n_permutations 는 1 이상이어야 "
+            f"합니다 (받은 값: {n_permutations!r})"
+        )
+
+    pairs = _collect_labeled_signatures(traces_by_probe)
+    labels = [probe for probe, _sig in pairs]
+    signatures = [sig for _probe, sig in pairs]
+    observed = _normalized_mutual_information(pairs)
+    degenerate = len(pairs) == 0 or len(set(labels)) < 2
+
+    if degenerate:
+        null_mean = 0.0
+        null_std = 0.0
+        excess_nmi = 0.0
+        excess_z = 0.0
+        _logger.info(
+            "널 보정 분리도(null_corrected_separability): 입력이 퇴화 상태라 "
+            "fail-closed 0 값으로 보고합니다 (probes=%d, rounds=%d)",
+            len(traces_by_probe),
+            len(pairs),
+        )
+    else:
+        # Deterministic, data-derived permutation seed: canonical hash of the
+        # pooled labeled-signature sequence (already name-sorted) plus the
+        # permutation count. NO wall-clock / global RNG.
+        seed = int(
+            canonical_hash(
+                {
+                    "metric": SEPARABILITY_METRIC_NAME,
+                    "pairs": [[probe, sig] for probe, sig in pairs],
+                    "nPermutations": int(n_permutations),
+                }
+            ),
+            16,
+        )
+        rng = random.Random(seed)
+        permuted = list(labels)
+        null_values: List[float] = []
+        for _ in range(int(n_permutations)):
+            rng.shuffle(permuted)
+            null_values.append(
+                _normalized_mutual_information(list(zip(permuted, signatures)))
+            )
+        null_mean = sum(null_values) / len(null_values)
+        null_var = sum((v - null_mean) ** 2 for v in null_values) / len(
+            null_values
+        )
+        null_std = math.sqrt(null_var)
+        excess_nmi = observed - null_mean
+        if null_std < NULL_STD_EPS:
+            # Documented bounded convention: constant null -> zero excess z.
+            excess_z = 0.0
+        else:
+            excess_z = excess_nmi / null_std
+        _logger.info(
+            "널 보정 분리도(null_corrected_separability)를 계산했습니다 "
+            "(probes=%d, rounds=%d, observed_nmi=%.6f, null_mean=%.6f, "
+            "null_std=%.6f, excess_nmi=%+.6f, excess_z=%+.4f, "
+            "n_permutations=%d) — 해석은 'null 초과 정보가 있다/없다'로만 "
+            "하며, 이는 PROXY 이고 프라이버시/법적 보증이 아닙니다",
+            len(traces_by_probe),
+            len(pairs),
+            observed,
+            null_mean,
+            null_std,
+            excess_nmi,
+            excess_z,
+            n_permutations,
+        )
+
+    return {
+        "metric": SEPARABILITY_METRIC_NAME,
+        "observed_nmi": float(observed),
+        "null_mean": float(null_mean),
+        "null_std": float(null_std),
+        "excess_nmi": float(excess_nmi),
+        "excess_z": float(excess_z),
+        "n_permutations": int(n_permutations),
+        "degenerate": degenerate,
+        "nullStdEps": NULL_STD_EPS,
+        "isProxy": IS_PROXY,
+        "disclaimer": PROXY_DISCLAIMER,
+    }
+
+
 def leakage_proxy_with_metadata(
     traces_by_probe: Mapping[str, Any],
     probe_versions: Mapping[str, Any] | None = None,
+    n_permutations: int = DEFAULT_NULL_PERMUTATIONS,
 ) -> Dict[str, Any]:
     """Compute :func:`leakage_proxy` and return it with carried metadata.
 
@@ -339,7 +508,14 @@ def leakage_proxy_with_metadata(
             "disclaimer": PROXY_DISCLAIMER,
             "traceHashes": {probeName: traceHash, ...},
             "probeVersions": {probeName: probeVersion|None, ...},
+            "nullCorrected": {observed_nmi, null_mean, null_std,
+                              excess_nmi, excess_z, n_permutations, ...},
         }
+
+    D-015: ``nullCorrected`` is the :func:`null_corrected_separability` block
+    (``nullCorrected["observed_nmi"] == value`` — same pooled-NMI statistic).
+    Every leakage-style report path must surface observed/null/excess together;
+    the absolute ``value`` alone is not report-grade (saturation regime).
 
     Deterministic: identical inputs -> identical dict.
     """
@@ -355,11 +531,17 @@ def leakage_proxy_with_metadata(
         else:
             probe_version_map[name] = _probe_version(trace)
 
+    null_corrected = null_corrected_separability(
+        traces_by_probe, n_permutations=n_permutations
+    )
     return {
         "metric": METRIC_NAME,
-        "value": leakage_proxy(traces_by_probe),
+        # Same pooled-NMI statistic as null_corrected["observed_nmi"]; kept as
+        # "value" for backward compatibility with existing report consumers.
+        "value": null_corrected["observed_nmi"],
         "isProxy": IS_PROXY,
         "disclaimer": PROXY_DISCLAIMER,
         "traceHashes": trace_hashes,
         "probeVersions": probe_version_map,
+        "nullCorrected": null_corrected,
     }
