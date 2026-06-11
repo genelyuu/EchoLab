@@ -166,12 +166,19 @@ def _finalize_report(report: Dict[str, Any]) -> Dict[str, Any]:
     return report
 
 
-def _build_axs003(prereg: Dict[str, Any], p_hash: str, prereg_path_str: str) -> Dict[str, Any]:
+def _build_axs003(
+    prereg: Dict[str, Any],
+    p_hash: str,
+    prereg_path_str: str,
+    *,
+    prereg_commit: str = GOOD_PREREG_COMMIT,
+    run_commit: str = GOOD_RUN_COMMIT,
+) -> Dict[str, Any]:
     metric = "slate_excess_nmi"
     r = {
         "reportId": "rep-axs003-v1",
         "experimentId": "AXS-003",
-        "preregStamp": _build_stamp(prereg, p_hash, prereg_path_str),
+        "preregStamp": _build_stamp(prereg, p_hash, prereg_path_str, prereg_commit=prereg_commit, run_commit=run_commit),
         "replayAudit": {"replayable": True},
         "baselines": {"RANDOM": {"coordinate_coverage_mean": 0.90}},
         "arms": {
@@ -190,14 +197,21 @@ def _build_axs003(prereg: Dict[str, Any], p_hash: str, prereg_path_str: str) -> 
     return _finalize_report(r)
 
 
-def _build_axs009(prereg: Dict[str, Any], p_hash: str, prereg_path_str: str) -> Dict[str, Any]:
+def _build_axs009(
+    prereg: Dict[str, Any],
+    p_hash: str,
+    prereg_path_str: str,
+    *,
+    prereg_commit: str = GOOD_PREREG_COMMIT,
+    run_commit: str = GOOD_RUN_COMMIT,
+) -> Dict[str, Any]:
     metric_nmi = "slate_excess_nmi"
     metric_div = "post_freeze_incremental_divergence"
     # dose-response: freeze_at_1 ≤ quarter ≤ half ≤ freeze_none
     r = {
         "reportId": "rep-axs009-v1",
         "experimentId": "AXS-009",
-        "preregStamp": _build_stamp(prereg, p_hash, prereg_path_str),
+        "preregStamp": _build_stamp(prereg, p_hash, prereg_path_str, prereg_commit=prereg_commit, run_commit=run_commit),
         "replayAudit": {"replayable": True},
         "baselines": {"RANDOM": {"coordinate_coverage_mean": 0.90}},
         "arms": {
@@ -238,12 +252,19 @@ def _build_axs009(prereg: Dict[str, Any], p_hash: str, prereg_path_str: str) -> 
     return _finalize_report(r)
 
 
-def _build_axs004c(prereg: Dict[str, Any], p_hash: str, prereg_path_str: str) -> Dict[str, Any]:
+def _build_axs004c(
+    prereg: Dict[str, Any],
+    p_hash: str,
+    prereg_path_str: str,
+    *,
+    prereg_commit: str = GOOD_PREREG_COMMIT,
+    run_commit: str = GOOD_RUN_COMMIT,
+) -> Dict[str, Any]:
     metric = "slate_excess_nmi"
     r = {
         "reportId": "rep-axs004c-v1",
         "experimentId": "AXS-004c",
-        "preregStamp": _build_stamp(prereg, p_hash, prereg_path_str),
+        "preregStamp": _build_stamp(prereg, p_hash, prereg_path_str, prereg_commit=prereg_commit, run_commit=run_commit),
         "replayAudit": {"replayable": True},
         "baselines": {"RANDOM": {"coordinate_coverage_mean": 0.90}},
         "arms": {
@@ -262,12 +283,19 @@ def _build_axs004c(prereg: Dict[str, Any], p_hash: str, prereg_path_str: str) ->
     return _finalize_report(r)
 
 
-def _build_axs002(prereg: Dict[str, Any], p_hash: str, prereg_path_str: str) -> Dict[str, Any]:
+def _build_axs002(
+    prereg: Dict[str, Any],
+    p_hash: str,
+    prereg_path_str: str,
+    *,
+    prereg_commit: str = GOOD_PREREG_COMMIT,
+    run_commit: str = GOOD_RUN_COMMIT,
+) -> Dict[str, Any]:
     metric = "slate_excess_nmi_diff"
     r = {
         "reportId": "rep-axs002-v1",
         "experimentId": "AXS-002",
-        "preregStamp": _build_stamp(prereg, p_hash, prereg_path_str),
+        "preregStamp": _build_stamp(prereg, p_hash, prereg_path_str, prereg_commit=prereg_commit, run_commit=run_commit),
         "replayAudit": {"replayable": True},
         "baselines": {"RANDOM": {"coordinate_coverage_mean": 0.90}},
         "arms": {
@@ -403,152 +431,24 @@ def _build_full_set(
     def _stamper(p: Dict[str, Any], ph: str, pps: str) -> Dict[str, Any]:
         return _build_stamp(p, ph, pps, prereg_commit=prereg_commit, run_commit=run_commit)
 
-    def _axs003(p, ph, pps):
-        metric = "slate_excess_nmi"
-        r = {
-            "reportId": "rep-axs003-v1",
-            "experimentId": "AXS-003",
-            "preregStamp": _stamper(p, ph, pps),
-            "replayAudit": {"replayable": True},
-            "baselines": {"RANDOM": {"coordinate_coverage_mean": 0.90}},
-            "arms": {
-                "axs_ucb_default": {
-                    "perFamily": _per_family_present(metric),
-                    "bootstrap": _bootstrap_present(metric),
-                    "utility": {"coordinate_coverage_mean": 0.93},
-                },
-                "axs_ucb_alpha0": {
-                    "perFamily": _per_family_absent(metric),
-                    "bootstrap": _bootstrap_absent(metric),
-                    "utility": {"coordinate_coverage_mean": 0.91},
-                },
-            },
-        }
-        return _finalize_report(r)
-
-    def _axs009(p, ph, pps):
-        metric_nmi = "slate_excess_nmi"
-        metric_div = "post_freeze_incremental_divergence"
-        r = {
-            "reportId": "rep-axs009-v1",
-            "experimentId": "AXS-009",
-            "preregStamp": _stamper(p, ph, pps),
-            "replayAudit": {"replayable": True},
-            "baselines": {"RANDOM": {"coordinate_coverage_mean": 0.90}},
-            "arms": {
-                "freeze_at_1": {
-                    "perFamily": _per_family_present(metric_nmi, 0.06),
-                    "bootstrap": {
-                        metric_nmi: {"mean": 0.06, "ciLower": 0.03, "ciUpper": 0.09},
-                        metric_div: {"mean": -0.01, "ciLower": -0.04, "ciUpper": 0.00},
-                    },
-                    "utility": {"coordinate_coverage_mean": 0.92},
-                },
-                "freeze_at_quarter": {
-                    "perFamily": _per_family_present(metric_nmi, 0.07),
-                    "bootstrap": {
-                        metric_nmi: {"mean": 0.07, "ciLower": 0.04, "ciUpper": 0.10},
-                        metric_div: {"mean": -0.01, "ciLower": -0.04, "ciUpper": 0.00},
-                    },
-                    "utility": {"coordinate_coverage_mean": 0.93},
-                },
-                "freeze_at_half": {
-                    "perFamily": _per_family_present(metric_nmi, 0.075),
-                    "bootstrap": {
-                        metric_nmi: {"mean": 0.075, "ciLower": 0.04, "ciUpper": 0.10},
-                        metric_div: {"mean": -0.01, "ciLower": -0.04, "ciUpper": 0.00},
-                    },
-                    "utility": {"coordinate_coverage_mean": 0.93},
-                },
-                "freeze_none": {
-                    "perFamily": _per_family_present(metric_nmi, 0.08),
-                    "bootstrap": {
-                        metric_nmi: {"mean": 0.08, "ciLower": 0.05, "ciUpper": 0.11},
-                        metric_div: {"mean": 0.00, "ciLower": -0.01, "ciUpper": 0.01},
-                    },
-                    "utility": {"coordinate_coverage_mean": 0.93},
-                },
-            },
-        }
-        return _finalize_report(r)
-
-    def _axs004c(p, ph, pps):
-        metric = "slate_excess_nmi"
-        r = {
-            "reportId": "rep-axs004c-v1",
-            "experimentId": "AXS-004c",
-            "preregStamp": _stamper(p, ph, pps),
-            "replayAudit": {"replayable": True},
-            "baselines": {"RANDOM": {"coordinate_coverage_mean": 0.90}},
-            "arms": {
-                "axs_ucb_default": {
-                    "perFamily": _per_family_present(metric),
-                    "bootstrap": _bootstrap_present(metric),
-                    "utility": {"coordinate_coverage_mean": 0.93},
-                },
-                "axs_yoked_bonus": {
-                    "perFamily": _per_family_absent(metric),
-                    "bootstrap": _bootstrap_absent(metric),
-                    "utility": {"coordinate_coverage_mean": 0.91},
-                },
-            },
-        }
-        return _finalize_report(r)
-
-    def _axs002(p, ph, pps):
-        metric = "slate_excess_nmi_diff"
-        r = {
-            "reportId": "rep-axs002-v1",
-            "experimentId": "AXS-002",
-            "preregStamp": _stamper(p, ph, pps),
-            "replayAudit": {"replayable": True},
-            "baselines": {"RANDOM": {"coordinate_coverage_mean": 0.90}},
-            "arms": {
-                "utility_matched_contrast": {
-                    "perFamily": _per_family_present(metric),
-                    "bootstrap": _bootstrap_present(metric),
-                    "utility": {"coordinate_coverage_mean": 0.93},
-                },
-            },
-        }
-        return _finalize_report(r)
-
-    def _axs010_wrap(p, ph, pps):
-        return axs010_builder(p, ph, pps)
-
-    # Override stamp in axs010_builder by building with _stamper
-    # We need to rebuild AXS-010 with correct stamp too
+    # AXS-010: rebuild with correct stamp and tieBreak from axs010_builder
     def _axs010_with_stamp(p, ph, pps):
+        stamp = _stamper(p, ph, pps)
+        base = axs010_builder(p, ph, pps)
         r = {
             "reportId": "rep-axs010-v1",
             "experimentId": "AXS-010",
-            "preregStamp": _stamper(p, ph, pps),
+            "preregStamp": stamp,
             "replayAudit": {"replayable": True},
-            "tieBreak": {
-                "baseline": {
-                    "sign": "+",
-                    "estimate": 0.08,
-                    "ciLower": 0.05,
-                    "ciUpper": 0.11,
-                    "trackDecision": "S",
-                },
-                "variants": {
-                    "reverse": {"sign": "+", "estimate": 0.079, "trackDecision": "S"},
-                    "hash_seeded": {"sign": "+", "estimate": 0.081, "trackDecision": "S"},
-                    "feature_lexicographic": {"sign": "+", "estimate": 0.078, "trackDecision": "S"},
-                },
-            },
+            "tieBreak": base["tieBreak"],
         }
-        # If axs010_builder is not the default, apply its tieBreak override
-        base = axs010_builder(p, ph, pps)
-        r["tieBreak"] = base["tieBreak"]
         return _finalize_report(r)
 
     reports_data = [
-        _axs003(prereg, p_hash, ps),
-        _axs009(prereg, p_hash, ps),
-        _axs004c(prereg, p_hash, ps),
-        _axs002(prereg, p_hash, ps),
+        _build_axs003(prereg, p_hash, ps, prereg_commit=prereg_commit, run_commit=run_commit),
+        _build_axs009(prereg, p_hash, ps, prereg_commit=prereg_commit, run_commit=run_commit),
+        _build_axs004c(prereg, p_hash, ps, prereg_commit=prereg_commit, run_commit=run_commit),
+        _build_axs002(prereg, p_hash, ps, prereg_commit=prereg_commit, run_commit=run_commit),
         _axs010_with_stamp(prereg, p_hash, ps),
     ]
 
@@ -1253,3 +1153,274 @@ def test_cli_dynamic_sha_happy_path(tmp_path):
     written = json.loads(licenses_out.read_text())
     assert written["rungs"]["M2"] is True
     assert "AUDIT LOG ONLY" in written["note"]
+
+
+# ===========================================================================
+# ITEM 1: AXS-010 vacuous strict_pass (CRITICAL)
+# ===========================================================================
+
+
+def test_redteam_axs010_empty_tiebreak_fails(tmp_path):
+    """ITEM 1: tieBreak with empty baseline/variant objects → axs010_invariance fail, M2 False."""
+    def _empty_tiebreak_axs010(prereg, p_hash, ps):
+        r = {
+            "reportId": "rep-axs010-v1",
+            "experimentId": "AXS-010",
+            "preregStamp": _build_stamp(prereg, p_hash, ps),
+            "replayAudit": {"replayable": True},
+            "tieBreak": {
+                "baseline": {},
+                "variants": {
+                    "reverse": {},
+                    "hash_seeded": {},
+                    "feature_lexicographic": {},
+                },
+            },
+        }
+        return _finalize_report(r)
+
+    prereg_path, report_paths, ledger_path, _, _ = _build_full_set(
+        tmp_path, axs010_builder=_empty_tiebreak_axs010
+    )
+
+    result = evaluate_mechanism_license(
+        prereg_path,
+        report_paths,
+        ledger_path=ledger_path,
+        git_runner=_good_git_runner,
+    )
+    failed = [c for c in result["checks"] if not c["ok"]]
+    assert any(c["check"] == "axs010_invariance" for c in failed), (
+        "비어 있는 baseline/variant 객체는 axs010_invariance 실패를 유발해야 함"
+    )
+    assert result["rungs"]["M2"] is False
+
+
+# ===========================================================================
+# ITEM 2: Baseline omission disables degenerate policy
+# ===========================================================================
+
+
+def test_redteam_arms_complete_missing_baseline_coverage(tmp_path):
+    """ITEM 2: AXS-003 with RANDOM baseline removed + low-coverage arm → arms_complete fail."""
+    prereg_path, report_paths, ledger_path, prereg, p_hash = _build_full_set(tmp_path)
+
+    axs003_path = next(r for r in report_paths if "axs003" in r.name)
+    r = json.loads(axs003_path.read_text())
+    # Remove baselines.RANDOM entirely
+    del r["baselines"]["RANDOM"]
+    # Set one arm to very low coverage (would be below RANDOM if RANDOM were present)
+    r["arms"]["axs_ucb_alpha0"]["utility"]["coordinate_coverage_mean"] = 0.01
+    body = {k: v for k, v in r.items() if k != "reportHash"}
+    r["reportHash"] = canonical_hash(body)
+    axs003_path.write_text(json.dumps(r, indent=2), encoding="utf-8")
+
+    # Re-register in ledger
+    ledger = load_ledger(ledger_path)
+    new_entries = [e for e in ledger["entries"] if e.get("reportId") != r["reportId"]]
+    ledger["entries"] = new_entries
+    ledger_path.write_text(json.dumps(ledger, indent=2, ensure_ascii=False), encoding="utf-8")
+    _register_report(ledger_path, r, prereg, p_hash, axs003_path)
+
+    result = evaluate_mechanism_license(
+        prereg_path,
+        report_paths,
+        ledger_path=ledger_path,
+        git_runner=_good_git_runner,
+    )
+    failed = [c for c in result["checks"] if not c["ok"]]
+    assert any(c["check"] == "arms_complete" for c in failed), (
+        "baselines.RANDOM 누락 시 arms_complete 이 실패해야 함"
+    )
+
+
+# ===========================================================================
+# ITEM 3: Booleans/non-numerics consumed as metric values (CRITICAL)
+# ===========================================================================
+
+
+def test_redteam_boolean_per_family_fails(tmp_path):
+    """ITEM 3a: perFamily value is True (boolean) → acceptance_recomputed fails."""
+    prereg_path, report_paths, ledger_path, prereg, p_hash = _build_full_set(tmp_path)
+
+    axs003_path = next(r for r in report_paths if "axs003" in r.name)
+    r = json.loads(axs003_path.read_text())
+    # Set 2 families' perFamily metric to boolean True — enough to push count below minConsistentFamilies=4
+    r["arms"]["axs_ucb_default"]["perFamily"]["42"]["slate_excess_nmi"] = True
+    r["arms"]["axs_ucb_default"]["perFamily"]["7"]["slate_excess_nmi"] = True
+    body = {k: v for k, v in r.items() if k != "reportHash"}
+    r["reportHash"] = canonical_hash(body)
+    axs003_path.write_text(json.dumps(r, indent=2), encoding="utf-8")
+
+    # Re-register in ledger
+    ledger = load_ledger(ledger_path)
+    new_entries = [e for e in ledger["entries"] if e.get("reportId") != r["reportId"]]
+    ledger["entries"] = new_entries
+    ledger_path.write_text(json.dumps(ledger, indent=2, ensure_ascii=False), encoding="utf-8")
+    _register_report(ledger_path, r, prereg, p_hash, axs003_path)
+
+    result = evaluate_mechanism_license(
+        prereg_path,
+        report_paths,
+        ledger_path=ledger_path,
+        git_runner=_good_git_runner,
+    )
+    failed = [c for c in result["checks"] if not c["ok"]]
+    assert any(c["check"] == "acceptance_recomputed" for c in failed), (
+        "perFamily 값이 bool(True)일 때 acceptance_recomputed 가 실패해야 함"
+    )
+    assert result["rungs"]["M2"] is False
+
+
+def test_redteam_boolean_ci_lower_fails(tmp_path):
+    """ITEM 3b: bootstrap.ciLower is True (boolean) → acceptance_recomputed fails."""
+    prereg_path, report_paths, ledger_path, prereg, p_hash = _build_full_set(tmp_path)
+
+    axs003_path = next(r for r in report_paths if "axs003" in r.name)
+    r = json.loads(axs003_path.read_text())
+    # Set bootstrap ciLower to boolean True
+    r["arms"]["axs_ucb_default"]["bootstrap"]["slate_excess_nmi"]["ciLower"] = True
+    body = {k: v for k, v in r.items() if k != "reportHash"}
+    r["reportHash"] = canonical_hash(body)
+    axs003_path.write_text(json.dumps(r, indent=2), encoding="utf-8")
+
+    # Re-register in ledger
+    ledger = load_ledger(ledger_path)
+    new_entries = [e for e in ledger["entries"] if e.get("reportId") != r["reportId"]]
+    ledger["entries"] = new_entries
+    ledger_path.write_text(json.dumps(ledger, indent=2, ensure_ascii=False), encoding="utf-8")
+    _register_report(ledger_path, r, prereg, p_hash, axs003_path)
+
+    result = evaluate_mechanism_license(
+        prereg_path,
+        report_paths,
+        ledger_path=ledger_path,
+        git_runner=_good_git_runner,
+    )
+    failed = [c for c in result["checks"] if not c["ok"]]
+    assert any(c["check"] == "acceptance_recomputed" for c in failed), (
+        "bootstrap.ciLower 가 bool(True)일 때 acceptance_recomputed 가 실패해야 함"
+    )
+    assert result["rungs"]["M2"] is False
+
+
+# ===========================================================================
+# ITEM 4: Unknown experimentId laundered
+# ===========================================================================
+
+
+def test_redteam_unknown_experiment_id(tmp_path):
+    """ITEM 4: Report with experimentId not in prereg experiments → arms_complete fail."""
+    prereg_path, report_paths, ledger_path, prereg, p_hash = _build_full_set(tmp_path)
+
+    # Create a fake report with unknown experimentId
+    fake_r = {
+        "reportId": "rep-axs999-v1",
+        "experimentId": "AXS-999",
+        "preregStamp": _build_stamp(prereg, p_hash, str(prereg_path)),
+        "replayAudit": {"replayable": True},
+        "baselines": {"RANDOM": {"coordinate_coverage_mean": 0.90}},
+        "arms": {},
+    }
+    fake_r = _finalize_report(fake_r)
+    fake_path = tmp_path / "rep-axs999-v1.json"
+    fake_path.write_text(json.dumps(fake_r, indent=2, ensure_ascii=False), encoding="utf-8")
+    _register_report(ledger_path, fake_r, prereg, p_hash, fake_path)
+
+    all_reports = list(report_paths) + [fake_path]
+    result = evaluate_mechanism_license(
+        prereg_path,
+        all_reports,
+        ledger_path=ledger_path,
+        git_runner=_good_git_runner,
+    )
+    failed = [c for c in result["checks"] if not c["ok"]]
+    assert any(c["check"] == "arms_complete" for c in failed), (
+        "알 수 없는 experimentId 는 arms_complete 실패를 유발해야 함"
+    )
+
+
+# ===========================================================================
+# ITEM 5: Duplicate experimentId silent last-wins
+# ===========================================================================
+
+
+def test_redteam_duplicate_experiment_id(tmp_path):
+    """ITEM 5: Two reports for same experimentId → arms_complete fail."""
+    prereg_path, report_paths, ledger_path, prereg, p_hash = _build_full_set(tmp_path)
+
+    # Find AXS-003 report and submit it twice
+    axs003_path = next(r for r in report_paths if "axs003" in r.name)
+    duplicate_reports = list(report_paths) + [axs003_path]
+
+    result = evaluate_mechanism_license(
+        prereg_path,
+        duplicate_reports,
+        ledger_path=ledger_path,
+        git_runner=_good_git_runner,
+    )
+    failed = [c for c in result["checks"] if not c["ok"]]
+    assert any(c["check"] == "arms_complete" for c in failed), (
+        "동일한 experimentId 가 중복 제출되면 arms_complete 이 실패해야 함"
+    )
+
+
+# ===========================================================================
+# ITEM 6: requiresPass fail-open default
+# ===========================================================================
+
+
+def test_redteam_empty_requires_pass(tmp_path):
+    """ITEM 6: prereg with claimTransitions.M2.requiresPass=[] → acceptance_recomputed fail."""
+    real_prereg = load_prereg(_REAL_PREREG)
+    bad_prereg = copy.deepcopy(real_prereg)
+    bad_prereg["claimTransitions"]["M2"]["requiresPass"] = []
+
+    prereg_path, report_paths, ledger_path, _, _ = _build_full_set(
+        tmp_path, prereg_override=bad_prereg
+    )
+
+    result = evaluate_mechanism_license(
+        prereg_path,
+        report_paths,
+        ledger_path=ledger_path,
+        git_runner=_good_git_runner,
+    )
+    failed = [c for c in result["checks"] if not c["ok"]]
+    assert any(c["check"] == "acceptance_recomputed" for c in failed), (
+        "requiresPass 가 빈 목록이면 acceptance_recomputed 가 실패해야 함"
+    )
+
+
+# ===========================================================================
+# ITEM 7: Non-dict report JSON
+# ===========================================================================
+
+
+def test_cli_non_dict_report_exit1(tmp_path):
+    """ITEM 7: Report JSON containing [1,2,3] → exit 1, no traceback."""
+    prereg_path, report_paths, ledger_path, _, _ = _build_full_set(tmp_path)
+
+    # Write a JSON array as a report file
+    bad_report = tmp_path / "bad_report.json"
+    bad_report.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+
+    import io
+    import sys as _sys
+    old_stderr = _sys.stderr
+    _sys.stderr = io.StringIO()
+    try:
+        ret = main(
+            [
+                "--prereg", str(prereg_path),
+                "--reports", str(bad_report),
+                "--ledger", str(ledger_path),
+                "--licenses-out", str(tmp_path / "licenses.json"),
+            ]
+        )
+        stderr_output = _sys.stderr.getvalue()
+    finally:
+        _sys.stderr = old_stderr
+
+    assert ret == 1, "비-dict JSON 리포트는 exit 1 을 반환해야 함"
+    assert "Traceback" not in stderr_output, "트레이스백이 노출되어서는 안 됨"

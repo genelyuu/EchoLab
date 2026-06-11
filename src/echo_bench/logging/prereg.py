@@ -32,6 +32,7 @@ __all__ = [
     "append_ledger_entry",
     "load_ledger",
     "entries_for_prereg",
+    "run_git",
 ]
 
 _logger = get_logger(__name__)
@@ -171,7 +172,7 @@ def prereg_hash(prereg: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _run_git(args: List[str], git_runner: Optional[Callable[[List[str]], str]]) -> str:
+def run_git(args: List[str], git_runner: Optional[Callable[[List[str]], str]]) -> str:
     """Execute a git command and return its stripped stdout.
 
     If ``git_runner`` is provided, delegates to it (test injection). Otherwise
@@ -195,6 +196,10 @@ def _run_git(args: List[str], git_runner: Optional[Callable[[List[str]], str]]) 
         raise ValueError(
             f"git 명령 실행 실패: {args} — {exc}{stderr_detail}"
         ) from exc
+
+
+# Backward compatibility alias
+_run_git = run_git
 
 
 def build_prereg_stamp(

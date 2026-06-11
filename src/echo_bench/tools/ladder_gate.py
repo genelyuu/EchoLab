@@ -10,6 +10,10 @@ NON-NEGOTIABLE 원칙:
 - 실패 폐쇄(fail closed). 파일/키/arm 누락 → 검사 실패, 묵시적 통과 없음.
 - MVP 범위: 아래 명시된 검사만 구현. 그 이상 없음.
 
+MVP 수용 한계 (문서화된 제약):
+- replayAudit.replayable: 소비된 자가증명 불리언 (제한적 방향에서만 사용).
+- 동일 버전의 unconsumed_reported 원장 엔트리는 familyHistory 에 공개되지만 M2 를 차단하지 않음.
+
 로그/CLI 메시지: 한국어. 식별자·JSON 키: 영어.
 CLI 스타일: src/echo_bench/tools/claim_check.py 참조.
 """
@@ -19,7 +23,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -30,6 +33,7 @@ from echo_bench.logging.prereg import (
     load_ledger,
     load_prereg,
     prereg_hash,
+    run_git,
 )
 from echo_bench.utils.hash import canonical_hash
 
@@ -39,34 +43,15 @@ _logger = get_logger(__name__)
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
+
 # ---------------------------------------------------------------------------
-# git helper (injectable)
+# Strict numeric type guard (ITEM 3)
 # ---------------------------------------------------------------------------
 
 
-def _run_git(
-    args: List[str],
-    git_runner: Optional[Callable[[List[str]], str]],
-) -> str:
-    """git 명령 실행 후 stripped stdout 반환. git_runner 주입 시 위임."""
-    if git_runner is not None:
-        return git_runner(args).strip()
-    try:
-        result = subprocess.run(
-            ["git"] + args,
-            cwd=str(_REPO_ROOT),
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return result.stdout.strip()
-    except (subprocess.SubprocessError, OSError) as exc:
-        stderr_detail = ""
-        if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
-            stderr_detail = f" (stderr: {exc.stderr.strip()})"
-        raise ValueError(
-            f"git 명령 실행 실패: {args} — {exc}{stderr_detail}"
-        ) from exc
+def _strict_number(v: Any) -> bool:
+    """True iff v is a plain int or float — booleans and non-numerics return False."""
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
 # ---------------------------------------------------------------------------
@@ -108,14 +93,16 @@ def _separability_present(
         return False
 
     count = sum(
-        1 for fam in eval_fams if (per_family.get(fam) or {}).get(metric, 0) > 0
+        1 for fam in eval_fams
+        if _strict_number((per_family.get(fam) or {}).get(metric)) and
+        (per_family.get(fam) or {}).get(metric, 0) > 0
     )
     if count < min_fam:
         return False
 
     bootstrap = arm.get("bootstrap", {})
     ci_lower = (bootstrap.get(metric) or {}).get("ciLower")
-    if ci_lower is None:
+    if ci_lower is None or not _strict_number(ci_lower):
         return False
     return ci_lower > ci_bound
 
@@ -219,10 +206,32 @@ def _check_arms_complete(
     details = []
     degenerate_fields = {"degenerate", "degenerateReason", "includedInMechanismClaim"}
 
+    # ITEM 5: 중복 experimentId 검사 (먼저 수행)
+    seen_exp_ids: Dict[str, int] = {}
+    for i, r in enumerate(reports):
+        exp_id = r.get("experimentId", "")
+        if exp_id in seen_exp_ids:
+            ok = False
+            details.append(
+                f"중복 experimentId 감지: {exp_id!r} — 인덱스 {seen_exp_ids[exp_id]} 와 {i} 에서 중복"
+            )
+        else:
+            seen_exp_ids[exp_id] = i
+
     reports_by_exp: Dict[str, Dict[str, Any]] = {}
     for r in reports:
         exp_id = r.get("experimentId", "")
         reports_by_exp[exp_id] = r
+
+    # ITEM 4: 알 수 없는 experimentId 검사
+    known_exp_ids = set(prereg.get("experiments", {}).keys()) | {"AXS-010"}
+    for r in reports:
+        exp_id = r.get("experimentId", "")
+        if exp_id not in known_exp_ids:
+            ok = False
+            details.append(
+                f"알 수 없는 experimentId {exp_id!r}: prereg 에 등록되지 않은 실험"
+            )
 
     for exp_id, exp_cfg in prereg.get("experiments", {}).items():
         r = reports_by_exp.get(exp_id)
@@ -261,19 +270,31 @@ def _check_arms_complete(
             )
             continue
 
-        # RANDOM 기준 미달 arm 검사
+        # ITEM 2: baselines.RANDOM.coordinate_coverage_mean 필수
         random_cov = (r.get("baselines") or {}).get("RANDOM", {}).get(
             "coordinate_coverage_mean"
         )
+        if not _strict_number(random_cov):
+            ok = False
+            details.append(
+                f"{exp_id}: baselines.RANDOM.coordinate_coverage_mean 누락 또는 비숫자 "
+                f"(값: {random_cov!r}) — RANDOM 기준 없이 degenerate 정책 적용 불가"
+            )
+            continue
+
+        # ITEM 3: arm coverage 도 strict_number 로 검사
         for arm_id, arm_data in (r.get("arms") or {}).items():
             if arm_id not in prereg_arms:
                 continue
             arm_cov = (arm_data.get("utility") or {}).get("coordinate_coverage_mean")
-            if (
-                random_cov is not None
-                and arm_cov is not None
-                and arm_cov < random_cov
-            ):
+            if not _strict_number(arm_cov):
+                ok = False
+                details.append(
+                    f"{exp_id} arm {arm_id!r}: utility.coordinate_coverage_mean 누락 또는 비숫자 "
+                    f"(값: {arm_cov!r})"
+                )
+                continue
+            if arm_cov < random_cov:
                 # RANDOM 미달 → degenerate 3개 필드 필수, 값도 정확해야 함
                 for field in degenerate_fields:
                     if field not in arm_data:
@@ -331,16 +352,24 @@ def _check_acceptance_recomputed(
         reports_by_exp[exp_id] = r
 
     # requiresPass 강제: 사전등록에 명시된 실험 리포트가 모두 소비되어야 함
+    # ITEM 6: 빈 목록 또는 누락 → 즉시 실패 (fail-open 방지)
     requires_pass_exps = list(
         prereg.get("claimTransitions", {}).get("M2", {}).get("requiresPass", [])
     )
-    missing_exps = [exp for exp in requires_pass_exps if exp not in reports_by_exp]
-    if missing_exps:
+    if not requires_pass_exps:
         ok = False
         details.append(
-            f"requiresPass 실험 리포트 누락: {sorted(missing_exps)} — "
-            "해당 실험 리포트 없이는 M2 라이선스 발급 불가"
+            "claimTransitions.M2.requiresPass 가 비어 있거나 누락됨 — "
+            "M2 라이선스 발급 조건 미충족 (fail-open 방지)"
         )
+    else:
+        missing_exps = [exp for exp in requires_pass_exps if exp not in reports_by_exp]
+        if missing_exps:
+            ok = False
+            details.append(
+                f"requiresPass 실험 리포트 누락: {sorted(missing_exps)} — "
+                "해당 실험 리포트 없이는 M2 라이선스 발급 불가"
+            )
 
     # AXS-003
     r3 = reports_by_exp.get("AXS-003")
@@ -479,7 +508,7 @@ def _check_ledger_registered(
     # consumed 리포트별 hash 집합
     consumed_hashes: Dict[str, str] = {}  # reportId -> reportHash
     consumed_reports_out: List[Dict[str, Any]] = []
-    for r in reports:
+    for r, path in zip(reports, consumed_paths):
         rh = _report_hash(r)
         r_id = r.get("reportId", "")
         consumed_hashes[r_id] = rh
@@ -490,7 +519,7 @@ def _check_ledger_registered(
             details.append(
                 f"리포트 {r_id!r} (hash={rh[:12]}): 원장 미등록"
             )
-        consumed_reports_out.append({"path": consumed_paths[reports.index(r)], "reportHash": rh})
+        consumed_reports_out.append({"path": path, "reportHash": rh})
 
     # familyHistory 구성
     family_history: List[Dict[str, Any]] = []
@@ -541,11 +570,11 @@ def _check_ancestry(
 
         # merge-base --is-ancestor
         try:
-            _run_git(
+            run_git(
                 ["merge-base", "--is-ancestor", prereg_commit, run_commit],
                 git_runner,
             )
-        except (ValueError, Exception):
+        except ValueError:
             ok = False
             details.append(
                 f"리포트 {r_id!r}: preregCommit {prereg_commit[:12]} 이 "
@@ -555,7 +584,7 @@ def _check_ancestry(
 
         if release:
             try:
-                remote_out = _run_git(
+                remote_out = run_git(
                     ["branch", "-r", "--contains", prereg_commit],
                     git_runner,
                 )
@@ -565,7 +594,7 @@ def _check_ancestry(
                         f"리포트 {r_id!r}: preregCommit {prereg_commit[:12]} 이 "
                         "어떤 원격 브랜치에도 없음 (release=True 조건 실패)"
                     )
-            except Exception:
+            except ValueError:
                 ok = False
                 details.append(
                     f"리포트 {r_id!r}: 원격 브랜치 확인 실패 "
@@ -647,6 +676,22 @@ def _check_axs010_invariance(
     b_ci_upper = baseline.get("ciUpper")
     b_track = baseline.get("trackDecision")
 
+    # ITEM 1: fail closed — baseline required fields must be present and non-None
+    if b_sign is None or b_track is None or b_ci_lower is None or b_ci_upper is None:
+        return (
+            {
+                "check": "axs010_invariance",
+                "ok": False,
+                "detail": (
+                    "AXS-010: baseline 필수 필드 누락 "
+                    f"(sign={b_sign!r}, trackDecision={b_track!r}, "
+                    f"ciLower={b_ci_lower!r}, ciUpper={b_ci_upper!r}) — fail closed"
+                ),
+            },
+            False,
+            True,
+        )
+
     all_signs_match = True
     all_tracks_match = True
     all_within_ci = True
@@ -656,14 +701,27 @@ def _check_axs010_invariance(
         v_track = var_data.get("trackDecision")
         v_est = var_data.get("estimate")
 
+        # ITEM 1: variant required fields must be present and non-None
+        if v_sign is None or v_track is None:
+            return (
+                {
+                    "check": "axs010_invariance",
+                    "ok": False,
+                    "detail": (
+                        f"AXS-010: 변형 {var_id!r} 필수 필드 누락 "
+                        f"(sign={v_sign!r}, trackDecision={v_track!r}) — fail closed"
+                    ),
+                },
+                False,
+                True,
+            )
+
         if v_sign != b_sign:
             all_signs_match = False
         if v_track != b_track:
             all_tracks_match = False
         if (
             v_est is not None
-            and b_ci_lower is not None
-            and b_ci_upper is not None
             and not (b_ci_lower <= v_est <= b_ci_upper)
         ):
             all_within_ci = False
@@ -753,6 +811,12 @@ def evaluate_mechanism_license(
                 r = json.load(fh)
         except (OSError, json.JSONDecodeError) as exc:
             raise ValueError(f"리포트 파일 로드 실패: {rp} — {exc}") from exc
+        # ITEM 7: 리포트가 dict 가 아닌 경우 즉시 실패 (list, string 등 비허용)
+        if not isinstance(r, dict):
+            raise ValueError(
+                f"리포트 파일이 JSON 객체(dict) 가 아닙니다: {rp} "
+                f"(타입: {type(r).__name__}) — 유효한 리포트 JSON 이 아님"
+            )
         reports.append(r)
         str_report_paths.append(str(rp))
 
@@ -792,15 +856,8 @@ def evaluate_mechanism_license(
     # M3 always False (MVP; AXS-001 필요)
     all_ok = all(c["ok"] for c in checks)
 
-    # M2: 모든 검사 통과 AND requiresPass 실험 모두 통과 AND AXS-010 >= soft_pass
-    # requiresPass 실험 통과 = acceptance_recomputed ok AND arms_complete ok
-    requires_pass_exps = set(
-        prereg.get("claimTransitions", {}).get("M2", {}).get("requiresPass", [])
-    )
-    # AXS-010 invariance >= soft_pass: axs010_present=True AND c9["ok"]=True
-    axs010_ok = axs010_present and c9["ok"]
-
-    m2 = all_ok and axs010_ok
+    # M2: 모든 검사 통과 AND AXS-010 >= soft_pass (axs010_present + c9["ok"])
+    m2 = all_ok and axs010_present
     # M2 also requires caveat is not a blocker (soft_pass allows M2 with caveat)
 
     rungs = {
@@ -879,8 +936,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     audit_output = dict(result)
     audit_output["note"] = _AUDIT_NOTE
-    with open(out_path, "w", encoding="utf-8") as fh:
-        json.dump(audit_output, fh, indent=2, sort_keys=True, ensure_ascii=False)
+    tmp_out = out_path.with_suffix(".json.tmp")
+    try:
+        with open(tmp_out, "w", encoding="utf-8") as fh:
+            json.dump(audit_output, fh, indent=2, sort_keys=True, ensure_ascii=False)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_out, out_path)
+    except Exception:
+        if tmp_out.exists():
+            tmp_out.unlink(missing_ok=True)
+        raise
 
     # 한국어 요약 출력
     rungs = result["rungs"]
