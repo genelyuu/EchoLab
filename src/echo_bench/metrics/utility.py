@@ -17,7 +17,7 @@ inside the controlled testbed (per the project guardrails).
 
 Phase scope
 -----------
-The four trace-only metrics (need no strategy probe, no oracle reference) plus
+The seven trace-only metrics (need no strategy probe, no oracle reference) plus
 the probe-driven :func:`strategy_sensitivity` (B-004 probes, Phase 2) are
 implemented:
 
@@ -25,9 +25,12 @@ implemented:
 - :func:`artifact_diversity`
 - :func:`redundancy_rate`
 - :func:`round_coherence`
+- :func:`coordinate_entropy`   (D-010 / TRD D-009 distribution metric)
+- :func:`cell_visit_gini`      (D-010 / TRD D-009 distribution metric)
+- :func:`time_to_saturation`   (D-010 / TRD D-009 distribution metric)
 - :func:`strategy_sensitivity`  (over multiple traces keyed by probe)
 
-:func:`compute_all` returns the four *single-trace* metrics plus the
+:func:`compute_all` returns the seven *single-trace* metrics plus the
 ``traceHash`` they were computed over; it never invokes
 :func:`strategy_sensitivity` (which inherently needs more than one trace).
 :func:`compute_all_with_strategy` additionally folds in
@@ -57,12 +60,19 @@ __all__ = [
     "artifact_diversity",
     "redundancy_rate",
     "round_coherence",
+    "coordinate_entropy",
+    "cell_visit_gini",
+    "time_to_saturation",
     "compute_all",
     "compute_all_with_strategy",
     "compute_all_with_oracle",
     "strategy_sensitivity",
     "regret_to_oracle",
+    "regret_to_oracle_for",
+    "OBJECTIVE_ACHIEVERS",
     "oracle_reference_from_objectives",
+    "coordinate_cell",
+    "CORE_METRIC_KEYS",
     "METRIC_KEYS",
     "COORDINATE_GRID_BINS",
     "REDUNDANCY_NEAR_DUP_EPS",
@@ -72,19 +82,58 @@ __all__ = [
 
 _logger = get_logger(__name__)
 
-# The four trace-only metric keys returned by :func:`compute_all` (alongside
-# ``traceHash``). Kept as an explicit constant so callers/tests can assert the
-# exact key set.
-METRIC_KEYS = (
+# The original four trace-only utility keys that were the sole numerics in
+# ``compute_all`` before the D-010 distribution metrics were added (commit
+# boundary: C-011 config freeze). Pinned here so robustness_score (D-003) and
+# the S3 scramble sensitivity (E-006) can keep a stable denominator of four
+# keys across the C-011 freeze boundary, preserving comparability with
+# pre-D-010 runs. D-010 distribution metrics are excluded from these
+# sensitivity/robustness denominators; they appear only in METRIC_KEYS below.
+CORE_METRIC_KEYS = (
     "coordinate_coverage",
     "artifact_diversity",
     "redundancy_rate",
     "round_coherence",
 )
 
+# The seven trace-only metric keys returned by :func:`compute_all` (alongside
+# ``traceHash``). Kept as an explicit constant so callers/tests can assert the
+# exact key set. Built from CORE_METRIC_KEYS plus the three D-010 (TRD alias
+# D-009) coverage-DISTRIBUTION metrics to avoid duplication; the distribution
+# keys are appended additively so the original four keep their order and
+# values. They stay informative when raw ``coordinate_coverage`` saturates at
+# its 1.0 ceiling (TRD V-003). Note: the D-010 distribution metrics are
+# excluded from sensitivity/robustness denominators — use CORE_METRIC_KEYS
+# when pinning those computations to preserve comparability across the C-011
+# freeze boundary.
+METRIC_KEYS = CORE_METRIC_KEYS + (
+    "coordinate_entropy",
+    "cell_visit_gini",
+    "time_to_saturation",
+)
+
 # Number of bins per coordinate dimension used to discretize the coordinate
 # space for :func:`coordinate_coverage`. Deterministic, fixed constant.
 COORDINATE_GRID_BINS = 8
+
+
+def coordinate_cell(vec, bins: int = COORDINATE_GRID_BINS) -> tuple:
+    """Map a ``coordinateContribution`` vector to its uniform-grid cell.
+
+    Each component is clamped to ``[0, 1]`` and binned into one of ``bins`` bins
+    (the ``1.0`` edge maps into the last bin). Returns the per-dimension bin-index
+    tuple — the single source of truth for the coordinate discretization shared by
+    :func:`coordinate_coverage`, the C-008 diversity-regularized contrast
+    baseline, and the C-010 coverage objective. Deterministic.
+    """
+    cell = []
+    for component in vec:
+        c = _clamp01(float(component))
+        idx = int(c * bins)
+        if idx >= bins:  # c == 1.0 edge maps into the last bin
+            idx = bins - 1
+        cell.append(idx)
+    return tuple(cell)
 
 # L2 distance below which two coordinate-contribution vectors are treated as
 # near-duplicates in :func:`redundancy_rate`.
@@ -185,18 +234,7 @@ def coordinate_coverage(trace) -> float:
     if n_rounds == 0:
         return 0.0
 
-    bins = COORDINATE_GRID_BINS
-    cells = set()
-    for vec in vectors:
-        cell = []
-        for component in vec:
-            c = _clamp01(component)
-            idx = int(c * bins)
-            if idx >= bins:  # c == 1.0 edge maps into the last bin
-                idx = bins - 1
-            cell.append(idx)
-        cells.add(tuple(cell))
-
+    cells = {coordinate_cell(vec) for vec in vectors}
     return _clamp01(len(cells) / n_rounds)
 
 
@@ -344,10 +382,175 @@ def round_coherence(trace) -> float:
     return _clamp01(1.0 - mean_step)
 
 
+def _round_cells(trace) -> List[Optional[tuple]]:
+    """Per-round coordinate-grid cell of the selected card, aligned with rounds.
+
+    Each round's ``coordinateContribution`` is mapped through
+    :func:`coordinate_cell` — the SAME single-source-of-truth cell binning
+    :func:`coordinate_coverage` uses (``COORDINATE_GRID_BINS`` bins per
+    dimension, components clamped to ``[0, 1]``) — so every D-010 distribution
+    metric shares the coverage definition of a "cell". Rounds with a missing or
+    empty contribution contribute ``None`` (no cell visit). Pure deterministic
+    function of the observable trace; reads no user/persona/latent field.
+    """
+    cells: List[Optional[tuple]] = []
+    for vec in _coordinate_vectors(trace):
+        cells.append(coordinate_cell(vec) if vec else None)
+    return cells
+
+
+def _grid_cell_total(visited: Sequence[tuple], bins: int = COORDINATE_GRID_BINS) -> int:
+    """Total number of grid cells ``C = bins ** d`` for the visited cells.
+
+    ``d`` is the (maximum) dimensionality of the visited cell tuples — for the
+    benchmark's fixed-width ``coordinateContribution`` vectors every cell has
+    the same length, so this is simply the coordinate dimension. Returns ``0``
+    when nothing was visited (callers fail closed to ``0.0``). Deterministic.
+    """
+    if not visited:
+        return 0
+    d = max(len(cell) for cell in visited)
+    if d <= 0:
+        return 0
+    return bins ** d
+
+
+def coordinate_entropy(trace) -> float:
+    """Normalized Shannon entropy of selected-card cell visits over the grid.
+
+    Definition (D-010, TRD alias D-009): each round's selected-card
+    ``coordinateContribution`` is binned to its coordinate-grid cell via
+    :func:`coordinate_cell` (identical binning to :func:`coordinate_coverage`).
+    Over the empirical distribution of cell visits across ALL ``C`` grid cells
+    (``C = COORDINATE_GRID_BINS ** d`` for coordinate dimension ``d``; unvisited
+    cells have probability ``0`` and contribute nothing to the sum), the metric
+    is the Shannon entropy ``H`` (natural log) normalized by ``log(C)``.
+
+    - ``0.0`` = every visit lands in one cell (maximal concentration);
+    - ``1.0`` = visits perfectly uniform over the WHOLE grid.
+
+    Unlike :func:`coordinate_coverage` (which saturates at ``1.0`` once every
+    round finds a distinct cell), this stays informative under the coverage
+    ceiling: it measures how visits are *distributed*, not merely whether they
+    are distinct (TRD V-003). Edge cases: a trace with zero selected-card cell
+    visits returns ``0.0``; ``C <= 1`` returns ``0.0`` (no div-by-zero).
+    Deterministic and bounded to ``[0.0, 1.0]``.
+    """
+    visited = [c for c in _round_cells(trace) if c is not None]
+    n = len(visited)
+    if n == 0:
+        return 0.0
+
+    total_cells = _grid_cell_total(visited)
+    if total_cells <= 1:
+        return 0.0
+
+    counts: Dict[tuple, int] = {}
+    for cell in visited:
+        counts[cell] = counts.get(cell, 0) + 1
+
+    entropy = 0.0
+    for c in counts.values():
+        p = c / n
+        entropy -= p * math.log(p)
+
+    return _clamp01(entropy / math.log(total_cells))
+
+
+def cell_visit_gini(trace) -> float:
+    """Gini coefficient of per-cell visit counts over ALL grid cells.
+
+    Definition (D-010, TRD alias D-009): bin every round's selected-card
+    ``coordinateContribution`` to its coordinate-grid cell via
+    :func:`coordinate_cell` (the :func:`coordinate_coverage` binning), count
+    visits per cell over ALL ``C = COORDINATE_GRID_BINS ** d`` grid cells
+    (unvisited cells count ``0``), and compute the Gini coefficient of those
+    counts using the standard mean-absolute-difference formulation (evaluated
+    via the sorted-counts identity ``G = 2 * sum_i(i * x_(i)) / (C * n)
+    - (C + 1) / C`` with 1-based ranks over ascending counts — integer counts,
+    so the sort is stable and the value deterministic; the zero cells are
+    handled arithmetically rather than materialized).
+
+    - ``0.0`` = perfectly equal visits across the whole grid;
+    - higher = visits concentrated in few cells (the all-in-one-cell extreme
+      gives ``(C - 1) / C``, approaching ``1.0`` for large grids).
+
+    Zero total visits (empty trace or no coordinate data) returns ``0.0``.
+    Deterministic and bounded to ``[0.0, 1.0]``.
+    """
+    visited = [c for c in _round_cells(trace) if c is not None]
+    n = len(visited)
+    if n == 0:
+        return 0.0
+
+    total_cells = _grid_cell_total(visited)
+    if total_cells <= 1:
+        return 0.0
+
+    counts: Dict[tuple, int] = {}
+    for cell in visited:
+        counts[cell] = counts.get(cell, 0) + 1
+
+    # Ascending per-cell counts: (total_cells - m) implicit zeros occupy ranks
+    # 1..(total_cells - m) and contribute 0 to the weighted sum; the m visited
+    # cells' sorted counts occupy the top ranks.
+    m = len(counts)
+    sorted_counts = sorted(counts.values())
+    weighted = 0.0
+    for j, count in enumerate(sorted_counts, start=1):
+        rank = (total_cells - m) + j  # 1-based rank in the full ascending list
+        weighted += rank * count
+
+    gini = (2.0 * weighted) / (total_cells * n) - (total_cells + 1) / total_cells
+    return _clamp01(gini)
+
+
+def time_to_saturation(trace) -> float:
+    """Normalized round index at which distinct-cell coverage stops growing.
+
+    Definition (D-010, TRD alias D-009): walk the rounds in order (1-based
+    index ``r`` over ALL ``H`` rounds), accumulating the set of distinct
+    coordinate-grid cells visited by the selected cards (the
+    :func:`coordinate_coverage` binning via :func:`coordinate_cell`). The
+    metric is ``r* / H`` where ``r*`` is the FIRST round at which the
+    cumulative distinct-cell set equals the session's final distinct-cell set
+    — i.e. the round that contributed the last new cell.
+
+    - Lower = the trace saturated its final coverage earlier (all later rounds
+      revisit known cells);
+    - ``1.0`` = the final round still added a new cell (a single-round session
+      with a selection also returns ``1.0``).
+
+    Edge cases: an empty trace returns ``0.0``; a trace whose rounds carry no
+    coordinate data (final distinct-cell set empty) also fails closed to
+    ``0.0``. Deterministic and bounded to ``[0.0, 1.0]`` (strictly ``(0, 1]``
+    whenever at least one cell was visited).
+    """
+    cells = _round_cells(trace)
+    horizon = len(cells)
+    if horizon == 0:
+        return 0.0
+
+    final_distinct = len({c for c in cells if c is not None})
+    if final_distinct == 0:
+        return 0.0
+
+    seen: set = set()
+    saturation_round = horizon  # overwritten below; defensive default
+    for r, cell in enumerate(cells, start=1):
+        if cell is not None:
+            seen.add(cell)
+        if len(seen) == final_distinct:
+            saturation_round = r
+            break
+
+    return _clamp01(saturation_round / horizon)
+
+
 def compute_all(trace) -> Dict[str, Any]:
     """Compute every trace-only utility metric over ``trace``.
 
-    Returns a dict containing exactly the four trace-only metric values
+    Returns a dict containing exactly the seven trace-only metric values
     (:data:`METRIC_KEYS`) plus the ``traceHash`` they were computed over::
 
         {
@@ -356,10 +559,16 @@ def compute_all(trace) -> Dict[str, Any]:
             "artifact_diversity": float in [0, 1],
             "redundancy_rate":    float in [0, 1],
             "round_coherence":    float in [0, 1],
+            "coordinate_entropy": float in [0, 1],
+            "cell_visit_gini":    float in [0, 1],
+            "time_to_saturation": float in [0, 1],
         }
 
-    The two probe/oracle-dependent metrics are deferred and are **never**
-    invoked here. Deterministic: identical traces produce an identical dict.
+    The last three are the D-010 (TRD alias D-009) coverage-distribution
+    metrics; they are purely additive — the original four metric values are
+    unchanged for identical traces. The two probe/oracle-dependent metrics are
+    deferred and are **never** invoked here. Deterministic: identical traces
+    produce an identical dict.
     """
     trace_hash = trace.trace_hash()
     result: Dict[str, Any] = {
@@ -368,6 +577,9 @@ def compute_all(trace) -> Dict[str, Any]:
         "artifact_diversity": artifact_diversity(trace),
         "redundancy_rate": redundancy_rate(trace),
         "round_coherence": round_coherence(trace),
+        "coordinate_entropy": coordinate_entropy(trace),
+        "cell_visit_gini": cell_visit_gini(trace),
+        "time_to_saturation": time_to_saturation(trace),
     }
     _logger.info(
         "유틸리티 지표를 계산했습니다 (traceHash=%s, metrics=%d)",
@@ -521,12 +733,12 @@ def strategy_sensitivity(traces_by_probe: Dict[str, Any]) -> float:
 def compute_all_with_strategy(
     trace, traces_by_probe: Dict[str, Any]
 ) -> Dict[str, Any]:
-    """Compute the four trace-only metrics + ``strategy_sensitivity`` + hash.
+    """Compute the seven trace-only metrics + ``strategy_sensitivity`` + hash.
 
     This is the variant the experiment runner (E2) uses when it has, for one
     policy/seed, the family of traces produced under each controlled probe.
-    Returns the dict from :func:`compute_all` (the four trace-only metric values
-    plus ``traceHash`` computed over ``trace``) with an additional
+    Returns the dict from :func:`compute_all` (the seven trace-only metric
+    values plus ``traceHash`` computed over ``trace``) with an additional
     ``strategy_sensitivity`` key computed over ``traces_by_probe``::
 
         {
@@ -535,6 +747,9 @@ def compute_all_with_strategy(
             "artifact_diversity": ...,
             "redundancy_rate": ...,
             "round_coherence": ...,
+            "coordinate_entropy": ...,
+            "cell_visit_gini": ...,
+            "time_to_saturation": ...,
             "strategy_sensitivity": float in [0, 1],
         }
 
@@ -705,10 +920,107 @@ def regret_to_oracle(trace, oracle_ref: Sequence[float]) -> float:
     return value
 
 
+def _achieved_coverage_gain(trace) -> List[float]:
+    """Per-round achieved objective = coordinate-COVERAGE gain of the round.
+
+    The objective the C-010 ``ORACLE_COVERAGE`` oracle maximizes: a round scores
+    ``1.0`` when its selected card lands in a coordinate-grid cell not visited by
+    any earlier round, else ``0.0`` (it added no new coverage). This is the
+    per-round marginal contribution to :func:`coordinate_coverage`. Pure
+    deterministic function of the observable trace; aligned with ``trace.rounds()``.
+    """
+    gains: List[float] = []
+    visited: set = set()
+    for record in trace.rounds():
+        cc = record.get("coordinateContribution")
+        if not cc:
+            gains.append(0.0)
+            continue
+        cell = coordinate_cell(cc)
+        gains.append(0.0 if cell in visited else 1.0)
+        visited.add(cell)
+    return gains
+
+
+def _achieved_diversity_gain(trace) -> List[float]:
+    """Per-round achieved objective = complexity-band DIVERSITY gain of the round.
+
+    The objective the C-010 ``ORACLE_DIVERSITY`` oracle maximizes: a round scores
+    ``1.0 / (1.0 + prior_count)`` where ``prior_count`` is how many earlier rounds
+    already used the round's ``complexityBand`` — so a fresh/rare band scores high
+    and a repeated band scores low. This rewards spreading the complexity-band
+    distribution (the quantity :func:`artifact_diversity` measures). Pure
+    deterministic function of the observable trace; aligned with ``trace.rounds()``.
+    """
+    gains: List[float] = []
+    counts: Dict[Any, int] = {}
+    for record in trace.rounds():
+        band = record.get("complexityBand")
+        prior = counts.get(band, 0)
+        gains.append(1.0 / (1.0 + prior))
+        counts[band] = prior + 1
+    return gains
+
+
+# Registry of per-round achieved-objective functions, keyed by the OBJECTIVE name
+# the C-010 oracle variants optimize. ``COORD_NOVELTY`` is the C-007 default.
+OBJECTIVE_ACHIEVERS = {
+    "COORD_NOVELTY": _achieved_coordinate_novelty,
+    "COVERAGE_GAIN": _achieved_coverage_gain,
+    "DIVERSITY_GAIN": _achieved_diversity_gain,
+}
+
+
+def regret_to_oracle_for(
+    trace, oracle_ref: Sequence[float], objective_key: str = "COORD_NOVELTY"
+) -> float:
+    """Objective-specific regret: shortfall of the trace vs. an oracle reference.
+
+    Generalizes :func:`regret_to_oracle` to any objective in
+    :data:`OBJECTIVE_ACHIEVERS` (Task C-010). The achieved per-round objective is
+    computed by that objective's achiever; ``oracle_ref`` must be the matching
+    objective's per-round oracle reference (e.g. the ``ORACLE_COVERAGE`` oracle's
+    per-round ``COVERAGE_GAIN``). The regret is the same normalized one-sided mean
+    shortfall as :func:`regret_to_oracle`::
+
+        mean_i( clip(oracle_i - achieved_i, 0, None) ) / REGRET_SCALE
+
+    clamped to ``[0, 1]``. The oracle is objective-specific, NOT a universal
+    utility upper bound: a coverage oracle bounds coverage gain, a diversity
+    oracle bounds diversity gain. System-level metric over the controlled testbed;
+    no user/real-world claim. Deterministic.
+
+    :raises ValueError: (Korean message) on an unknown ``objective_key``, a
+        ``None`` ``oracle_ref``, or a length mismatch (never silently padded).
+    """
+    if objective_key not in OBJECTIVE_ACHIEVERS:
+        raise ValueError(
+            "regret_to_oracle_for: 알 수 없는 objective_key=%r (사용 가능: %s)"
+            % (objective_key, sorted(OBJECTIVE_ACHIEVERS))
+        )
+    achieved = OBJECTIVE_ACHIEVERS[objective_key](trace)
+    n = len(achieved)
+    if oracle_ref is None:
+        raise ValueError(
+            "regret_to_oracle_for: oracle_ref 가 None 입니다 (objective=%s, rounds=%d)"
+            % (objective_key, n)
+        )
+    ref = oracle_reference_from_objectives(list(oracle_ref))
+    if len(ref) != n:
+        raise ValueError(
+            "regret_to_oracle_for: oracle_ref 길이(%d)가 트레이스 라운드 수(%d)와 "
+            "일치하지 않습니다 (objective=%s)" % (len(ref), n, objective_key)
+        )
+    if n == 0:
+        return 0.0
+    shortfall = sum(max(ref[i] - achieved[i], 0.0) for i in range(n))
+    return _clamp01((shortfall / n) / REGRET_SCALE)
+
+
 def compute_all_with_oracle(
     trace, traces_by_probe: Dict[str, Any], oracle_ref: Sequence[float]
 ) -> Dict[str, Any]:
-    """Four trace-only metrics + ``strategy_sensitivity`` + ``regret_to_oracle``.
+    """Seven trace-only metrics + ``strategy_sensitivity`` + ``regret_to_oracle``.
 
     The variant the experiment runner (E2/E3) uses when it has, for one
     policy/seed, both the probe-keyed trace family AND the C-007 oracle per-round
@@ -721,6 +1033,9 @@ def compute_all_with_oracle(
             "artifact_diversity": ...,
             "redundancy_rate": ...,
             "round_coherence": ...,
+            "coordinate_entropy": ...,
+            "cell_visit_gini": ...,
+            "time_to_saturation": ...,
             "strategy_sensitivity": float in [0, 1],
             "regret_to_oracle": float in [0, 1],
         }

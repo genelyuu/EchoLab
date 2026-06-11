@@ -1,0 +1,13 @@
+# ECHO-Bench PSEUDO_USER_MODEL — diversity-regularized variant (Task C-008).
+#
+# A STRONGER contrast baseline. The BASIC static-latent baseline collapses
+# artifact_diversity toward 0 (a straw man); this variant makes complexity-band
+# coverage the primary selection key and de-duplicates coordinate cells within
+# the slate, so the contrast baseline keeps positive artifact diversity while
+# remaining the only latent-vector policy. The synthetic latent vector stays
+# internal-only; no user/persona/emotion field is read or emitted.
+policy: PSEUDO_USER_MODEL
+k: 4
+latent_dim: 6
+latent_seed: 12345
+variant: DIVERSITY_REG

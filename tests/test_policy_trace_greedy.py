@@ -156,3 +156,58 @@ def test_raises_when_pool_smaller_than_k() -> None:
     policy = TraceGreedyPolicy({"k": 4})
     with pytest.raises(ValueError):
         policy.select(pool, TraceState(), 7)
+
+
+# --- C-009: session-level objective redesign (no long-horizon collapse) ------
+
+from pathlib import Path  # noqa: E402
+
+import yaml  # noqa: E402
+
+from echo_bench.archive.builder import build_archive  # noqa: E402
+from echo_bench.basis.schema import load_bases  # noqa: E402
+from echo_bench.env.round_runner import run_episode  # noqa: E402
+from echo_bench.metrics.utility import (  # noqa: E402
+    coordinate_coverage,
+    redundancy_rate,
+)
+
+_REPO = Path(__file__).resolve().parents[1]
+
+
+def _real_pool(n: int = 64):
+    bases = load_bases(_REPO / "configs" / "basis" / "bases.yaml")
+    with open(_REPO / "configs" / "archive" / "archive.yaml", encoding="utf-8") as fh:
+        archive_cfg = yaml.safe_load(fh)
+    archive = build_archive(bases, archive_cfg, 42)
+    return archive["cards"][:n], bases
+
+
+def test_components_include_session_terms():
+    pool = _make_pool()
+    policy = TraceGreedyPolicy({"k": 4})
+    policy.select(pool, TraceState(), 7)
+    for comp in policy.last_score_components.values():
+        # The pre-existing keys remain, plus the new session-level terms.
+        assert {"novelty", "progression", "redundancy", "total"} <= set(comp)
+        assert {"session_coverage", "cell_repulsion"} <= set(comp)
+
+
+def test_no_long_horizon_coverage_collapse():
+    # The diagnostic showed the OLD objective collapsing at long horizons
+    # (coverage 0.95 -> 0.33, redundancy 0.025 -> 0.665 over H 4 -> 20). The
+    # redesigned session-level objective must hold coverage up and redundancy
+    # down at H=20.
+    pool, bases = _real_pool()
+    trace = run_episode(pool, TraceGreedyPolicy({"k": 4}), 7, 20, 4, bases)
+    cov = coordinate_coverage(trace)
+    red = redundancy_rate(trace)
+    assert cov > 0.5, f"coverage collapsed at H=20: {cov}"
+    assert red < 0.5, f"redundancy too high at H=20: {red}"
+
+
+def test_redesigned_policy_is_deterministic():
+    pool, bases = _real_pool()
+    a = run_episode(pool, TraceGreedyPolicy({"k": 4}), 7, 12, 4, bases)
+    b = run_episode(pool, TraceGreedyPolicy({"k": 4}), 7, 12, 4, bases)
+    assert a.trace_hash() == b.trace_hash()

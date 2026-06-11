@@ -3,12 +3,17 @@
 E3 is the Phase 3 audit experiment. It audits the policy set along three
 controlled, deterministic axes and assembles one fully hashed report:
 
-(a) LEAKAGE (PROXY)
+(a) PROBE SEPARABILITY (PROXY; legacy name: leakage)
     For a representative policy set, build per-probe traces (each probe threaded
     as the round runner's ``select_fn``) and compute
     :func:`echo_bench.metrics.leakage.leakage_proxy` over the probe-keyed trace
-    family. The value is reported **explicitly as a PROXY** (the leakage section
-    carries ``isProxy=True`` and the
+    family. G-020 terminology: the section's primary report label is
+    ``probe_separability_proxy``
+    (:data:`echo_bench.metrics.leakage.PRIMARY_METRIC_NAME`), with
+    ``leakage_proxy`` carried as the ``legacyAlias`` — a label layer only
+    (D-012 precedent); the table-row machine keys stay ``leakage_proxy``
+    byte-identically for replay compatibility. The value is reported
+    **explicitly as a PROXY** (the section carries ``isProxy=True`` and the
     :data:`echo_bench.metrics.leakage.PROXY_DISCLAIMER`): it measures how the
     observable slate/selection distribution co-varies with the controlled probe
     identity in this controlled testbed. It is **NOT** a privacy guarantee,
@@ -71,27 +76,46 @@ from echo_bench.logging import get_logger, log_ko
 from echo_bench.logging.repro_pack import ReproducibilityPack
 from echo_bench.logging.replay_validator import validate_replay
 from echo_bench.metrics.leakage import (
+    DEFAULT_NULL_PERMUTATIONS,
     IS_PROXY,
+    LEAKAGE_RATIO_FLOOR,
     PROXY_DISCLAIMER,
+    leakage_delta_vs_random,
     leakage_proxy_with_metadata,
+    utility_per_leakage,
+)
+from echo_bench.metrics.separability import (
+    SATURATION_UNIQUE_RATE_THRESHOLD,
+    channel_separated_separability,
+    separability_row_fields,
 )
 from echo_bench.metrics.robustness import (
     FAULTS,
+    ROBUSTNESS_DIRECTION,
     robustness_score_with_metadata,
 )
-from echo_bench.metrics.utility import compute_all
+from echo_bench.metrics.utility import (
+    CORE_METRIC_KEYS,
+    compute_all,
+    coordinate_coverage,
+)
 from echo_bench.policies.fixed_balanced import FixedBalancedPolicy
 from echo_bench.policies.fixed_low_to_high import FixedLowToHighPolicy
 from echo_bench.policies.random import RandomPolicy
 from echo_bench.policies.trace_greedy import TraceGreedyPolicy
 from echo_bench.policies.trace_lin_ucb import TraceLinUcbPolicy
-from echo_bench.probes.strategy_probes import PROBES, get_probe
+from echo_bench.probes.strategy_probes import (
+    DEFAULT_PROBE_SET,
+    PROBES,
+    get_probe,
+)
 from echo_bench.utils.hash import canonical_hash
 
 __all__ = [
     "run_e3_audit",
     "main",
     "E3_LEAKAGE_POLICIES",
+    "E3_LEAKAGE_DELTA_REFERENCE",
     "E3_ROBUSTNESS_POLICY",
     "FAULT_PARAMS",
 ]
@@ -111,6 +135,23 @@ E3_LEAKAGE_POLICIES = {
     "TRACE_GREEDY": (TraceGreedyPolicy, "trace_greedy.yaml"),
     "TRACE_LIN_UCB": (TraceLinUcbPolicy, "trace_lin_ucb.yaml"),
 }
+
+# D-011 (TRD alias D-010): the reference policy for the RELATIVE leakage claim.
+# Every leakage row reports ``leakage_delta_vs_random`` = leakage(policy) -
+# leakage(reference), seed-aligned; the reference's own delta is exactly 0.0.
+E3_LEAKAGE_DELTA_REFERENCE = "RANDOM"
+
+# D-011: why the leakage delta carries no confidence interval in this report.
+# leakage_proxy is ONE scalar per policy (pooled NMI over the probe-keyed trace
+# family at a single base seed) — there are no per-seed leakage values to pair,
+# so the bootstrap CI machinery (metrics/aggregate.py) has nothing to resample.
+# leakage_proxy is NOT redefined to manufacture per-seed values.
+_E3_LEAKAGE_CI_UNAVAILABLE_REASON = (
+    "leakage_proxy is a single scalar per policy (pooled NMI over the "
+    "probe-keyed trace family at one base seed); no per-seed leakage values "
+    "exist to pair, so no bootstrap CI can be computed without redefining the "
+    "metric."
+)
 
 # The policy whose robustness to each controlled fault is audited.
 E3_ROBUSTNESS_POLICY = ("TRACE_GREEDY", "trace_greedy.yaml")
@@ -210,7 +251,10 @@ def run_e3_audit(
     horizon_cfg = load_horizon(_HORIZON_CFG_PATH)
     H = default_h(horizon_cfg) if H is None else validate_h(int(H), horizon_cfg)
 
-    probe_names = sorted(PROBES)
+    # E3 runs the frozen B-004 probe trio (DEFAULT_PROBE_SET), NOT the full
+    # registry: the B-007 / TRD B-008 registry expansion must not change this
+    # run's probe list or report hashes. E-019 opts into the expanded set.
+    probe_names = sorted(DEFAULT_PROBE_SET)
     fault_names = sorted(FAULTS)
 
     leakage_policy_cfgs: Dict[str, Dict[str, Any]] = {}
@@ -290,6 +334,10 @@ def run_e3_audit(
     # 4. (a) LEAKAGE PROXY section. Per policy, build the probe-keyed trace family
     #    and compute leakage_proxy (carried with the explicit proxy disclaimer).
     leakage_rows: List[Dict[str, Any]] = []
+    # D-015 cleanup: the section-level nullPermutations is read back from the
+    # computed null-corrected block (single source of truth), not hard-coded;
+    # the constant only serves as the fallback when no row was computed.
+    null_permutations_used: int = DEFAULT_NULL_PERMUTATIONS
     for name in sorted(E3_LEAKAGE_POLICIES):
         cls, _cfg_file = E3_LEAKAGE_POLICIES[name]
         cfg = leakage_policy_cfgs[name]
@@ -317,28 +365,117 @@ def run_e3_audit(
             )
 
         leak = leakage_proxy_with_metadata(traces_by_probe, probe_versions)
+        # D-011: mean coordinate_coverage over this policy's E3-aligned
+        # per-probe traces — the numerator of utility_per_leakage.
+        coverages = [
+            coordinate_coverage(traces_by_probe[pn]) for pn in probe_names
+        ]
+        mean_coverage = sum(coverages) / len(coverages) if coverages else 0.0
+        null_corrected = leak["nullCorrected"]
+        null_permutations_used = int(null_corrected["n_permutations"])
+        # D-016: channel-separated excess statistics over the SAME probe-keyed
+        # trace family. The combined channel reproduces the legacy D-015
+        # statistic exactly (combined_excess_nmi == excess_nmi below). The
+        # already-computed nullCorrected block is passed through as the
+        # precomputed combined channel so the deterministic 200-permutation
+        # null runs ONCE per policy (D-016 review follow-up), bit-identically.
+        channel_sep = channel_separated_separability(
+            traces_by_probe, precomputed_combined=null_corrected
+        )
         leakage_rows.append(
             {
                 "policy": name,
                 "policyVersion": cls(dict(cfg)).policy_version(),
                 "leakage_proxy": leak["value"],
                 "isProxy": leak["isProxy"],
+                # D-015 quintet + D-016 trio + D-017 flag quartet via the
+                # shared single-source-of-truth row fragment (E-019 review):
+                # observed/null/excess always travel together; the channel
+                # trio is additive; the saturation flags are DIAGNOSTICS,
+                # never claims (saturation_flag — the headline gate — equals
+                # the combined channel's flag and forbids any headline
+                # leakage claim for this row when True;
+                # docs/12_CLAIM_LADDER.md Section 5 condition 2).
+                **separability_row_fields(null_corrected, channel_sep),
+                "mean_coordinate_coverage": mean_coverage,
+                "utility_per_leakage": utility_per_leakage(
+                    mean_coverage, leak["value"]
+                ),
                 "traceHashes": leak["traceHashes"],
                 "probeVersions": leak["probeVersions"],
             }
         )
         log_ko(
             _logger,
-            "E3 누출 프록시 완료: "
-            f"policy={name}, leakage_proxy={leak['value']:.6f} "
-            "(이는 PROXY 이며 프라이버시/법적 보증이 아닙니다)",
+            "E3 프로브 분리도 프록시(probe_separability_proxy, "
+            "레거시명 leakage_proxy) 완료: "
+            f"policy={name}, leakage_proxy={leak['value']:.6f}, "
+            f"excess_nmi={null_corrected['excess_nmi']:+.6f}, "
+            f"excess_z={null_corrected['excess_z']:+.4f}, "
+            f"slate_excess_nmi={channel_sep['slate_excess_nmi']:+.6f}, "
+            f"selection_excess_nmi={channel_sep['selection_excess_nmi']:+.6f}, "
+            f"saturation_flag={channel_sep['combined_saturation_flag']} "
+            "(해석은 'null 초과 정보가 있다/없다'로만 하며, "
+            "saturation_flag=True 인 채널의 절대 NMI 는 헤드라인 클레임 금지 — "
+            "이는 PROXY 이고 프라이버시/법적 보증이 아닙니다)",
+        )
+
+    # D-011 (TRD alias D-010): second pass — RELATIVE delta vs the RANDOM
+    # reference (seed-aligned: every policy ran the identical seed / horizon /
+    # pool / probe family above). The reference's own delta is exactly 0.0.
+    # D-012 ride-along: explicit guard so a missing RANDOM reference raises a
+    # clear error instead of an opaque StopIteration.
+    ref_matches = [row for row in leakage_rows if row["policy"] == E3_LEAKAGE_DELTA_REFERENCE]
+    if not ref_matches:
+        raise ValueError(
+            f"E3 감사: leakage_rows 에서 deltaReference 정책을 찾을 수 없습니다 "
+            f"(E3_LEAKAGE_DELTA_REFERENCE={E3_LEAKAGE_DELTA_REFERENCE!r}). "
+            "E3_LEAKAGE_POLICIES 에 해당 정책이 포함되어 있는지 확인하세요."
+        )
+    reference_row = ref_matches[0]
+    reference_leakage = reference_row["leakage_proxy"]
+    for row in leakage_rows:
+        row["leakage_delta_vs_random"] = leakage_delta_vs_random(
+            row["leakage_proxy"], reference_leakage
+        )
+        log_ko(
+            _logger,
+            "E3 누출 상대 지표(D-011): "
+            f"policy={row['policy']}, "
+            f"leakage_delta_vs_random={row['leakage_delta_vs_random']:+.6f} "
+            f"(기준={E3_LEAKAGE_DELTA_REFERENCE}), "
+            f"utility_per_leakage={row['utility_per_leakage']:.6f} "
+            f"(floor={LEAKAGE_RATIO_FLOOR}) — 상대 비교용 PROXY 통계입니다",
         )
 
     leakage_section = {
-        "metric": "leakage_proxy",
+        # G-020: primary report label is probe_separability_proxy; the legacy
+        # machine name is kept as legacyAlias (D-012 precedent). Table-row
+        # machine keys below stay "leakage_proxy" byte-identically.
+        "metric": "probe_separability_proxy",
+        "legacyAlias": "leakage_proxy",
         "isProxy": IS_PROXY,
         "disclaimer": PROXY_DISCLAIMER,
         "policies": sorted(E3_LEAKAGE_POLICIES),
+        # D-011 self-describing comparison fields: the delta reference policy,
+        # the documented ratio floor + utility metric, and the explicit
+        # statement that no CI is structurally available (with the reason).
+        "deltaReference": E3_LEAKAGE_DELTA_REFERENCE,
+        "ratioFloor": LEAKAGE_RATIO_FLOOR,
+        "ratioUtilityMetric": "coordinate_coverage",
+        "ciAvailable": False,
+        "ciUnavailableReason": _E3_LEAKAGE_CI_UNAVAILABLE_REASON,
+        # D-015: deterministic permutation-null correction is self-describing —
+        # every table row carries observed_nmi/null_mean/null_std/excess_nmi/
+        # excess_z (and the D-016 per-channel excess trio) computed with this
+        # many data-seeded label permutations, read back from the computed
+        # block rather than hard-coded.
+        "nullPermutations": null_permutations_used,
+        # D-017: documented saturation threshold — every row's saturation_flag
+        # (and per-channel flags) is computed against this unique-signature
+        # rate; recorded here so the report is self-describing. The flags are
+        # diagnostics, never claims.
+        "saturationThreshold": SATURATION_UNIQUE_RATE_THRESHOLD,
         "probeVersions": {
             pn: get_probe(pn).probe_version() for pn in probe_names
         },
@@ -377,36 +514,51 @@ def run_e3_audit(
             canonical_hash([r["slate"] for r in faulted_trace.rounds()])
         )
 
-        score = robustness_score_with_metadata(baseline_metrics, faulted_metrics)
+        score = robustness_score_with_metadata(
+            baseline_metrics, faulted_metrics, keys=CORE_METRIC_KEYS
+        )
         robustness_rows.append(
             {
                 "fault": fault_name,
                 "faultParams": FAULT_PARAMS[fault_name],
                 "faultedPoolSize": len(faulted_pool),
+                # D-012: primary label is sensitivity_score; legacy alias kept for
+                # backward compatibility.
+                "sensitivity_score": score["value"],
+                "legacyAlias": "robustness_score",
                 "robustness_score": score["value"],
                 "baselineTraceHash": score["baselineTraceHash"],
                 "faultedTraceHash": score["faultedTraceHash"],
                 "sharedKeys": score["sharedKeys"],
+                "metricKeys": score["metricKeys"],
             }
         )
         log_ko(
             _logger,
             "E3 강건성 완료: "
             f"policy={rob_name}, fault={fault_name}, "
-            f"robustness_score={score['value']:.6f} (controlled fault)",
+            f"sensitivity_score={score['value']:.6f} (controlled fault)",
         )
 
     robustness_section = {
-        "metric": "robustness_score",
+        # D-012: primary metric label is sensitivity_score; legacy alias kept for
+        # backward compatibility.
+        "metric": "sensitivity_score",
+        "legacyAlias": "robustness_score",
+        "direction": ROBUSTNESS_DIRECTION,
         "policy": rob_name,
         "policyVersion": rob_policy_cls(dict(rob_cfg)).policy_version(),
         "note": (
             "Controlled, fully-specified fault transforms (FAULTS), NOT "
             "real-world distribution shift; system-level sensitivity over a "
-            "controlled testbed."
+            "controlled testbed. sensitivity_score (legacyAlias: robustness_score) "
+            "is a SENSITIVITY magnitude: "
+            + ROBUSTNESS_DIRECTION
+            + "."
         ),
         "baselineTraceHash": baseline_trace.trace_hash(),
         "faults": fault_names,
+        "metricKeys": list(CORE_METRIC_KEYS),
         "table": robustness_rows,
     }
 
@@ -468,7 +620,8 @@ def run_e3_audit(
         "experiment": "E3_AUDIT",
         "phaseNote": (
             "Phase 3 complete: E3 audits the policy set along three controlled, "
-            "deterministic axes. (a) leakage_proxy is a SYSTEM-LEVEL PROXY for how "
+            "deterministic axes. (a) probe_separability_proxy (legacy machine "
+            "name: leakage_proxy) is a SYSTEM-LEVEL PROXY for how "
             "observable slate/selection distributions co-vary with controlled "
             "probe identity; it is NOT a privacy guarantee, anonymity proof, "
             "identifiability bound, or legal/compliance claim. (b) robustness "

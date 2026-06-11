@@ -1,0 +1,14 @@
+# ECHO-Bench PSEUDO_USER_MODEL — session-embedding variant (Task C-008).
+#
+# A STRONGER contrast baseline. Like the diversity-regularized variant it keeps
+# complexity-band coverage as the primary selection key (so artifact_diversity
+# stays positive), but its secondary key adds a coordinate-novelty term against
+# the session centroid of prior rounds — an internal, synthetic session
+# embedding that adapts across the episode. The session embedding is a synthetic
+# scoring construct, NOT a model of a real person; the latent vector stays
+# internal-only and no user/persona/emotion field is read or emitted.
+policy: PSEUDO_USER_MODEL
+k: 4
+latent_dim: 6
+latent_seed: 12345
+variant: SESSION_EMBEDDING

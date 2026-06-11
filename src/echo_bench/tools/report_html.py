@@ -45,7 +45,7 @@ _METRIC_DESC = [
     ("strategy_sensitivity", "통제된 프로브에 따른 관측 트레이스의 변화량"),
     ("regret_to_oracle", "C-007 오라클 기준 대비 정규화 후회(좌표 신규성)"),
     ("leakage_proxy", "관측 분포가 프로브 정체성과 공변하는 정도(PROXY; 보증 아님)"),
-    ("robustness_score", "통제된 결함 하 시스템 수준 민감도"),
+    ("sensitivity_score (legacy: robustness_score)", "통제된 결함 하 시스템 수준 민감도"),
     ("replay_consistency", "config + seed 로부터의 정확 재현(재현 불가 시 주장 불가)"),
 ]
 
@@ -112,7 +112,8 @@ def _build_data() -> Dict[str, Any]:
         for r in sorted(e3.get("leakage", {}).get("table", []), key=lambda x: x["policy"])
     ]
     e3_rob = [
-        {"fault": r["fault"], "robustness_score": r["robustness_score"],
+        {"fault": r["fault"],
+         "sensitivity_score": r.get("sensitivity_score", r.get("robustness_score")),
          "faultedPoolSize": r.get("faultedPoolSize")}
         for r in sorted(e3.get("robustness", {}).get("table", []), key=lambda x: x["fault"])
     ]
@@ -387,7 +388,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
         <p class="cap"><b>PROXY</b> — 분리도 측정이며 프라이버시/법적 보증이 아님.</p>
       </div>
       <div class="card">
-        <h3>E3 — robustness_score (결함별)</h3>
+        <h3>E3 — sensitivity_score (legacy: robustness_score) (결함별)</h3>
         <div class="chartbox"><canvas id="rob"></canvas></div>
         <p class="cap" id="robcap">통제된 결함 하 시스템 수준 민감도.</p>
       </div>
@@ -540,14 +541,14 @@ new Chart(document.getElementById("leak"),{type:"bar",
             x:{ticks:{font:{size:9},maxRotation:60,minRotation:35}}},
     plugins:{legend:{display:false}}}});
 
-// 6) E3 robustness
+// 6) E3 sensitivity (legacy: robustness_score)
 const rb = DATA.e3.robustness;
 new Chart(document.getElementById("rob"),{type:"bar",
-  data:{labels:rb.map(r=>r.fault),datasets:[{label:"robustness_score",
-    data:rb.map(r=>r.robustness_score),backgroundColor:"#23b39acc"}]},
+  data:{labels:rb.map(r=>r.fault),datasets:[{label:"sensitivity_score (legacy: robustness_score)",
+    data:rb.map(r=>r.sensitivity_score),backgroundColor:"#23b39acc"}]},
   options:{responsive:true,maintainAspectRatio:false,
-    scales:{y:{min:0,max:Math.max(0.2,...rb.map(r=>r.robustness_score))*1.2,
-      title:{display:true,text:"robustness_score"}}},
+    scales:{y:{min:0,max:Math.max(0.2,...rb.map(r=>r.sensitivity_score))*1.2,
+      title:{display:true,text:"sensitivity_score (legacy: robustness_score)"}}},
     plugins:{legend:{display:false}}}});
 
 // E2 표

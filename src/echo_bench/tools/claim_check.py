@@ -40,6 +40,45 @@ This is a **guardrail aid, not a guarantee**: it is a deterministic heuristic
 that catches the common claim-style violations and suppresses the known
 legitimate constructs. It does not replace human review of novel phrasings.
 
+G-008 / TRD G-012 — Oracle-terminology guardrail
+-------------------------------------------------
+Oracle policies are **objective-specific references**, never global optima. The
+phrase set ``"global upper bound"``, ``"global optimum"``, ``"globally optimal"``
+is forbidden in assertion-style claim text (docs / reports). Negated forms (e.g.
+the exact ``REFERENCE_NOTE`` string ``"objective-specific reference, not global
+optimum"``) are suppressed by the existing negator heuristic.
+
+In addition, when scanning a JSON report file the function
+:func:`check_oracle_note` enforces a JSON-level rule: if a report carries both
+``oraclePolicy`` and ``oraclePolicyDisplayName`` (post-C-014 format), the
+``oracleNote`` field must equal ``REFERENCE_NOTE`` exactly. Legacy reports that
+have ``oraclePolicy`` but no ``oraclePolicyDisplayName`` emit a Korean warning
+log but do NOT fail.
+
+G-010 — Leakage-improvement / privacy claim-FORM patterns
+----------------------------------------------------------
+Claim ladder v2 (``docs/12_CLAIM_LADDER.md``, ``ladderVersion: claim-ladder-2``)
+permanently quarantines leakage-improvement-style and privacy-style claim
+FORMS. :data:`FORBIDDEN_CLAIM_PATTERNS` holds case-insensitive **regex**
+patterns (vs. the literal phrases in :data:`FORBIDDEN_PHRASES`) that target
+these forms in English claim text:
+
+- ``reduce(?:s|d)?\\s+leakage`` / ``improv(?:e|es|ed|ing)\\s+leakage``
+  (leakage-improvement claims);
+- ``leaks?\\s+user\\s+information`` (user-information-leak claims);
+- ``privacy[-\\s]preserving`` (privacy-guarantee claims);
+- ``is\\s+privacy\\s+leakage`` (equating probe separability with privacy
+  leakage).
+
+Pattern matches run through the SAME context heuristics as the phrase list, so
+the established quoting mechanisms stay scanner-safe: a **backtick code span**
+(mention, not assertion — the mechanism the ladder's forbidden-forms list uses),
+a **negated / denial** line, and the ``## Forbidden ...`` enumeration section
+are all suppressed. When a pattern fires, the CLI prints a Korean guidance
+message naming the pattern and the required reframing: the statement must be
+rewritten as a **probe separability diagnostic** (approved replacement
+sentences are printed; see ``docs/12_CLAIM_LADDER.md`` Section 3).
+
 CLI
 ---
 ``python -m echo_bench.tools.claim_check [paths...]`` scans the default targets
@@ -53,20 +92,29 @@ the project logging convention.
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Sequence
 
+from echo_bench.logging import get_logger
+from echo_bench.policies.display_names import REFERENCE_NOTE
+
 __all__ = [
     "FORBIDDEN_PHRASES",
+    "FORBIDDEN_CLAIM_PATTERNS",
+    "OracleNoteViolation",
     "Finding",
+    "check_oracle_note",
     "scan_text",
     "scan_path",
     "scan_paths",
     "main",
 ]
+
+_logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Forbidden-phrase set
@@ -92,7 +140,76 @@ FORBIDDEN_PHRASES: tuple[str, ...] = (
     "emotion",
     "persona",
     "preference",
+    # G-008 / TRD G-012: oracle-terminology tokens.
+    # Oracle policies are objective-specific references, never global optima.
+    # Negated forms (e.g. REFERENCE_NOTE: "...not global optimum") are
+    # suppressed by the existing negator heuristic.
+    "global upper bound",
+    "global optimum",
+    "globally optimal",
 )
+
+# G-010 (claim ladder v2): forbidden claim-FORM regex patterns. Unlike
+# FORBIDDEN_PHRASES (literal phrases), these are case-insensitive regexes that
+# target the permanently quarantined leakage-improvement / privacy claim FORMS
+# (docs/12_CLAIM_LADDER.md Section 4). They are matched per line with the same
+# whole-token boundaries and run through the same suppression heuristics
+# (negation, denial enumeration, backtick code spans, Forbidden section), so
+# the ladder's own backtick-quoted forbidden-forms list never trips the scan.
+FORBIDDEN_CLAIM_PATTERNS: tuple[str, ...] = (
+    # Leakage-improvement claims ("X reduces/improves leakage").
+    r"reduce(?:s|d)?\s+leakage",
+    r"improv(?:e|es|ed|ing)\s+leakage",
+    # User-information-leak claims ("X leaks user information").
+    r"leaks?\s+user\s+information",
+    # Privacy-guarantee claims ("the system is privacy-preserving").
+    r"privacy[-\s]preserving",
+    # Equating probe separability with privacy leakage.
+    r"is\s+privacy\s+leakage",
+)
+
+# Compiled forms with the same whole-token boundary guards as _match_iter.
+_FORBIDDEN_PATTERN_RES: tuple[tuple[str, "re.Pattern[str]"], ...] = tuple(
+    (
+        pattern,
+        re.compile(
+            r"(?<![A-Za-z0-9])(?:" + pattern + r")(?![A-Za-z0-9])",
+            re.IGNORECASE,
+        ),
+    )
+    for pattern in FORBIDDEN_CLAIM_PATTERNS
+)
+
+# Korean guidance for G-010 pattern hits (identifiers / metric names stay
+# English per the logging convention). The required reframing is the
+# probe-separability-diagnostic register of docs/12_CLAIM_LADDER.md.
+_G010_REFRAME_GUIDANCE = (
+    "leakage 개선형/프라이버시형 claim 표현은 영구 격리되어 있음 "
+    "(docs/12_CLAIM_LADDER.md §4) — 'probe separability diagnostic' "
+    "표현으로 재구성할 것"
+)
+
+# Approved replacement sentences (docs/12_CLAIM_LADDER.md Section 3) printed
+# in the CLI guidance output when a G-010 pattern fires.
+_G010_APPROVED_REPLACEMENTS: tuple[str, ...] = (
+    "The expanded diagnostic removes the saturation failure observed in the "
+    "earlier leakage proxy.",
+    "TRACE_LIN_UCB is the only policy showing consistently positive "
+    "above-null probe separability across all seed families.",
+    "TRACE_GREEDY does not show positive excess probe separability under the "
+    "expanded diagnostic, while maintaining strong utility.",
+    "We therefore report probe separability as a diagnostic axis rather than "
+    "a privacy or leakage improvement claim.",
+)
+
+
+class OracleNoteViolation(ValueError):
+    """Raised when a post-C-014 JSON report has a missing or wrong oracleNote.
+
+    This is a hard failure: the report carries ``oraclePolicy`` and
+    ``oraclePolicyDisplayName`` (post-C-014 format) but the ``oracleNote``
+    field is absent or does not equal ``REFERENCE_NOTE`` exactly.
+    """
 
 
 @dataclass(frozen=True)
@@ -101,9 +218,15 @@ class Finding:
 
     Attributes:
         file: path to the file the hit was found in (English).
-        line: 1-based line number.
-        phrase: the forbidden phrase that matched (from FORBIDDEN_PHRASES).
-        text: the full text of the offending line (stripped of trailing newline).
+        line: 1-based line number for phrase-match findings; ``0`` for
+            structural JSON rule violations (G-008 oracle-note rule, see
+            :func:`check_oracle_note`).
+        phrase: the forbidden phrase that matched (from :data:`FORBIDDEN_PHRASES`
+            for phrase-match findings); the sentinel ``"oracleNote"`` for
+            structural JSON rule violations produced by :func:`scan_path`.
+        text: the full text of the offending line (stripped of trailing newline)
+            for phrase-match findings; the :class:`OracleNoteViolation` message
+            string for oracle-note sentinel findings.
     """
 
     file: str
@@ -238,6 +361,30 @@ def _match_iter(text: str, phrase: str) -> Iterable[re.Match]:
     return pat.finditer(text)
 
 
+def _iter_line_matches(line: str) -> Iterable[tuple[str, re.Match]]:
+    """Yield ``(label, match)`` for every forbidden phrase AND pattern hit.
+
+    The label is the literal phrase (for :data:`FORBIDDEN_PHRASES`) or the
+    regex source string (for :data:`FORBIDDEN_CLAIM_PATTERNS`, G-010). Both
+    kinds of hit go through the identical suppression heuristics downstream.
+    """
+    for phrase in FORBIDDEN_PHRASES:
+        for m in _match_iter(line, phrase):
+            yield phrase, m
+    for pattern, rx in _FORBIDDEN_PATTERN_RES:
+        for m in rx.finditer(line):
+            yield pattern, m
+
+
+def _label_order(label: str) -> int:
+    """Deterministic ordering index across phrases, patterns, and sentinels."""
+    if label in FORBIDDEN_PHRASES:
+        return FORBIDDEN_PHRASES.index(label)
+    if label in FORBIDDEN_CLAIM_PATTERNS:
+        return len(FORBIDDEN_PHRASES) + FORBIDDEN_CLAIM_PATTERNS.index(label)
+    return len(FORBIDDEN_PHRASES) + len(FORBIDDEN_CLAIM_PATTERNS)
+
+
 def _is_identifier_context(line: str, start: int, end: int) -> bool:
     r"""True if the match is part of a code identifier / config key / quoted token.
 
@@ -308,6 +455,55 @@ def _is_denial_enumeration(line: str, start: int, end: int) -> bool:
     return any(word in low for word in _ENUM_DENIAL_WORDS)
 
 
+# --- G-008 oracle-note rule ---
+
+
+def check_oracle_note(report: dict, *, file: str = "<report>") -> None:
+    """Validate the oracle-note field in a parsed JSON report (G-008 / TRD G-012).
+
+    Rules:
+    - If the report has **neither** ``oraclePolicy`` **nor**
+      ``oraclePolicyDisplayName``, there is nothing to check and the function
+      returns silently.
+    - If the report has ``oraclePolicy`` but **no** ``oraclePolicyDisplayName``
+      (legacy pre-C-014 format), a Korean warning log line is emitted but the
+      function does **not** raise (legacy reports are not retroactively failed).
+    - If the report has **both** ``oraclePolicy`` and
+      ``oraclePolicyDisplayName`` (post-C-014 format), the ``oracleNote``
+      field MUST be present and equal :data:`REFERENCE_NOTE` exactly;
+      otherwise :class:`OracleNoteViolation` is raised.
+
+    Args:
+        report: parsed JSON report dict.
+        file: label used in log/error messages (English identifier).
+
+    Raises:
+        OracleNoteViolation: when the post-C-014 oracle-note rule is violated.
+    """
+    has_oracle_policy = "oraclePolicy" in report
+    has_display_name = "oraclePolicyDisplayName" in report
+
+    if not has_oracle_policy:
+        return  # no oracle policy; nothing to check.
+
+    if not has_display_name:
+        # Legacy report: emit Korean warning, do not fail.
+        _logger.warning(
+            "[경고] 레거시 리포트 감지: oraclePolicyDisplayName 없음 — %s "
+            "(C-014 이전 형식; oracleNote 검증 생략)",
+            file,
+        )
+        return
+
+    # Post-C-014 format: oracleNote must equal REFERENCE_NOTE exactly.
+    note = report.get("oracleNote")
+    if note != REFERENCE_NOTE:
+        raise OracleNoteViolation(
+            f"oracleNote 불일치 — "
+            f"예상: {REFERENCE_NOTE!r}, 실제: {note!r}"
+        )
+
+
 def scan_text(text: str, *, file: str = "<text>") -> List[Finding]:
     """Scan ``text`` and return genuine assertion-style forbidden-claim findings.
 
@@ -372,55 +568,80 @@ def scan_text(text: str, *, file: str = "<text>") -> List[Finding]:
         line_has_negator = _NEGATOR_RE.search(line) is not None
         line_has_denial_word = any(w in line_low for w in _ENUM_DENIAL_WORDS)
 
-        for phrase in FORBIDDEN_PHRASES:
-            for m in _match_iter(line, phrase):
-                start, end = m.start(), m.end()
-                if _is_identifier_context(line, start, end):
-                    continue
-                if _is_negated(line, start):
-                    continue
-                if _is_denial_enumeration(line, start, end):
-                    continue
-                # Suppress a wrapped enumeration fragment whose denial cue lived
-                # on the previous (still-open) line, as long as this fragment
-                # introduces no fresh assertion verb of its own.
-                if (
-                    continues_denial
-                    and (
-                        _line_is_enumeration(line, start, end)
-                        or prev_ends_list_connector
-                    )
-                    and not re.search(
-                        r"\b(is|are|was|were|prefer|improve|improves|show|shows"
-                        r"|prove|proves|demonstrate|demonstrates)\b",
-                        line_low,
-                    )
-                ):
-                    continue
-                findings.append(
-                    Finding(file=file, line=idx, phrase=phrase, text=line.strip())
+        for phrase, m in _iter_line_matches(line):
+            start, end = m.start(), m.end()
+            if _is_identifier_context(line, start, end):
+                continue
+            if _is_negated(line, start):
+                continue
+            if _is_denial_enumeration(line, start, end):
+                continue
+            # Suppress a wrapped enumeration fragment whose denial cue lived
+            # on the previous (still-open) line, as long as this fragment
+            # introduces no fresh assertion verb of its own.
+            if (
+                continues_denial
+                and (
+                    _line_is_enumeration(line, start, end)
+                    or prev_ends_list_connector
                 )
+                and not re.search(
+                    r"\b(is|are|was|were|prefer|improve|improves|show|shows"
+                    r"|prove|proves|demonstrate|demonstrates)\b",
+                    line_low,
+                )
+            ):
+                continue
+            findings.append(
+                Finding(file=file, line=idx, phrase=phrase, text=line.strip())
+            )
 
         if line.strip():
             prev_line = line
             prev_was_denial_context = line_has_negator or line_has_denial_word
 
-    findings.sort(key=lambda f: (f.line, f.text, FORBIDDEN_PHRASES.index(f.phrase)))
+    findings.sort(key=lambda f: (f.line, f.text, _label_order(f.phrase)))
     return findings
 
 
 def scan_path(path: str | Path) -> List[Finding]:
     """Scan a single file and return its genuine findings.
 
-    Non-text / unreadable files are skipped (returns an empty list). The file
-    path string is recorded on each finding.
+    For JSON files the function additionally runs the G-008 oracle-note rule
+    via :func:`check_oracle_note`. A post-C-014 violation is converted to a
+    :class:`Finding` with ``phrase="oracleNote"`` and ``line=0``; a legacy
+    warning is logged but produces no Finding. Non-text / unreadable files are
+    skipped (returns an empty list). The file path string is recorded on each
+    finding.
     """
     p = Path(path)
     try:
         text = p.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return []
-    return scan_text(text, file=str(p))
+
+    findings = scan_text(text, file=str(p))
+
+    # G-008: run oracle-note JSON rule on .json files.
+    if p.suffix.lower() == ".json":
+        try:
+            report = json.loads(text)
+        except json.JSONDecodeError:
+            report = None
+        if isinstance(report, dict):
+            try:
+                check_oracle_note(report, file=str(p))
+            except OracleNoteViolation as exc:
+                findings.append(
+                    Finding(
+                        file=str(p),
+                        line=0,
+                        phrase="oracleNote",
+                        text=str(exc),
+                    )
+                )
+
+    return findings
 
 
 # File suffixes scanned by default (claim text lives in markdown + JSON reports).
@@ -483,6 +704,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         for f in findings:
             # Identifiers / paths stay English.
             print(f"{f.file}:{f.line}: forbidden claim '{f.phrase}': {f.text}")
+        # G-010: Korean guidance for leakage-improvement / privacy claim-form
+        # pattern hits — name the pattern and the required reframing.
+        g010_hits = [f for f in findings if f.phrase in FORBIDDEN_CLAIM_PATTERNS]
+        if g010_hits:
+            for f in g010_hits:
+                print(
+                    f"[G-010] 금지 패턴 '{f.phrase}' 감지 "
+                    f"({f.file}:{f.line}) — {_G010_REFRAME_GUIDANCE}"
+                )
+            print(
+                "[G-010] 승인된 대체 문장 "
+                "(probe separability diagnostic 표현, "
+                "docs/12_CLAIM_LADDER.md §3):"
+            )
+            for sentence in _G010_APPROVED_REPLACEMENTS:
+                print(f"  - {sentence}")
         # Korean summary line.
         print(
             f"클레임 스캔 실패: 금지된 주장 {len(findings)}건 발견 "

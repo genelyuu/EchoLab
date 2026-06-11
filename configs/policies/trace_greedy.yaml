@@ -2,8 +2,9 @@
 #
 # Trace-only greedy policy: scores candidates using ONLY observable trace fields
 # (accumulated coordinateContribution, complexityBand progress, in-slate
-# redundancy). It must NEVER read latent / persona / emotion / preference /
-# demographic / free-text signals. Score weights live here.
+# redundancy, plus the C-009 session-level coverage memory). It must NEVER read
+# latent / persona / emotion / preference / demographic / free-text signals.
+# Score weights live here.
 policy: TRACE_GREEDY
 k: 4
 weights:
@@ -13,3 +14,10 @@ weights:
   progression: 0.5
   # Penalize closeness to cards already chosen within the slate being built.
   redundancy: 1.0
+  # C-009 session-level terms (fix the long-horizon coverage collapse):
+  # Reward landing in a coordinate-grid cell the trace has NOT yet visited.
+  session_coverage: 2.0
+  # Penalize revisiting an already-visited cell (cross-round, not just in-slate).
+  cell_repulsion: 0.75
+  # Small deterministic epsilon (seeded) so the greedy does not lock onto one cell.
+  exploration: 0.1

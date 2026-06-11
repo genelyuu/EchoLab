@@ -47,10 +47,11 @@ import yaml
 from echo_bench.env.constraints import check_slate, required_distinct_bases
 from echo_bench.logging import get_logger, log_ko
 from echo_bench.policies.base import Policy
+from echo_bench.probes.oracle_objectives import get_oracle_objective
 from echo_bench.probes.strategy_probes import get_probe
 from echo_bench.utils.hash import canonical_hash
 
-__all__ = ["OracleStrategyPolicy"]
+__all__ = ["OracleStrategyPolicy", "DEFAULT_PROBE"]
 
 _logger = get_logger(__name__)
 
@@ -108,10 +109,19 @@ class OracleStrategyPolicy(Policy):
         seed: int,
         config: Dict[str, Any] | None = None,
     ) -> List[Any]:
-        """Return the constraint-satisfying slate maximizing the probe objective."""
-        effective = config if config is not None else self.config
+        """Return the constraint-satisfying slate maximizing the oracle objective.
+
+        Two objective sources are supported. When ``config['objective']`` is set
+        (C-010: ``COVERAGE_GAIN`` / ``DIVERSITY_GAIN``) the oracle ranks cards by
+        that objective-specific scorer — making the oracle an explicit reference
+        for *that* objective, NOT a universal upper bound. Otherwise it falls back
+        to the C-007 probe-encoded objective (default ``PREFER_COORD_NOVELTY``).
+        """
+        # Merge: the round runner passes only ``{"k": k}``; the policy's own
+        # config (``probe`` / ``objective``) must still apply during an episode.
+        effective = {**self.config, **(config or {})}
         k = int(effective["k"])
-        probe_name = effective.get("probe", DEFAULT_PROBE)
+        objective_name = effective.get("objective")
 
         if k > len(pool):
             raise ValueError(
@@ -119,12 +129,55 @@ class OracleStrategyPolicy(Policy):
                 "슬레이트를 구성할 수 없습니다"
             )
 
+        pool_hash = canonical_hash([c["cardId"] for c in pool])
+        bases_cfg = _load_bases_cfg()
+        min_required, _prefer_four, _ns = required_distinct_bases(k)
+
+        # ---- C-010 objective-specific oracle (no probe; objective scorer) -----
+        if objective_name:
+            score_fn = get_oracle_objective(objective_name)
+            seed_material = canonical_hash(
+                {"poolHash": pool_hash, "objective": objective_name, "seed": seed}
+            )
+            rng = random.Random(int(seed_material, 16))
+            tiebreak = {c["cardId"]: rng.random() for c in pool}
+            objective = {c["cardId"]: float(score_fn(c, trace)) for c in pool}
+            ordered = sorted(
+                pool,
+                key=lambda c: (-objective[c["cardId"]], tiebreak[c["cardId"]], c["cardId"]),
+            )
+            slate = self._assemble_max_objective_slate(
+                ordered, k, min_required, objective, tiebreak, bases_cfg, seed
+            )
+            if slate is None:
+                raise ValueError(
+                    f"ORACLE_STRATEGY 정책: objective={objective_name} 에 대해 k={k} "
+                    f"제약을 만족하는 슬레이트를 구성하지 못했습니다 (poolHash={pool_hash})"
+                )
+            self.log_score_components(
+                {
+                    c["cardId"]: {
+                        "objectiveValue": round(objective[c["cardId"]], 12),
+                        "objective": objective_name,
+                    }
+                    for c in slate
+                }
+            )
+            log_ko(
+                _logger,
+                "ORACLE_STRATEGY 슬레이트 확정(objective): "
+                f"objective={objective_name}, k={k}, poolHash={pool_hash}",
+            )
+            return [c["cardId"] for c in slate]
+
+        # ---- C-007 probe-encoded objective (default; byte-identical path) -----
+        probe_name = effective.get("probe", DEFAULT_PROBE)
+
         # Explicit, confined oracle access to the probe.
         probe = get_probe(probe_name)
         probe_version = probe.probe_version()
 
         # Deterministic seeded tie-break from (poolHash, probeVersion, seed).
-        pool_hash = canonical_hash([c["cardId"] for c in pool])
         seed_material = canonical_hash(
             {
                 "poolHash": pool_hash,
@@ -135,8 +188,6 @@ class OracleStrategyPolicy(Policy):
         rng = random.Random(int(seed_material, 16))
         tiebreak = {c["cardId"]: rng.random() for c in pool}
 
-        bases_cfg = _load_bases_cfg()
-
         # Probe objective per card (documented system-level objective the probe
         # encodes). Higher is better.
         objective = {c["cardId"]: float(probe._score(c, trace)) for c in pool}
@@ -145,8 +196,6 @@ class OracleStrategyPolicy(Policy):
             pool,
             key=lambda c: (-objective[c["cardId"]], tiebreak[c["cardId"]], c["cardId"]),
         )
-
-        min_required, _prefer_four, _ns = required_distinct_bases(k)
 
         slate = self._assemble_max_objective_slate(
             ordered, k, min_required, objective, tiebreak, bases_cfg, seed

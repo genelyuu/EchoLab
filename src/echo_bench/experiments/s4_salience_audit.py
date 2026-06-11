@@ -54,6 +54,7 @@ from echo_bench.env.round_runner import run_episode
 from echo_bench.env.seed_batch import derive_child_seeds, seed_batch_id
 from echo_bench.logging import get_logger, log_ko
 from echo_bench.logging.repro_pack import ReproducibilityPack
+from echo_bench.metrics.aggregate import aggregate_values
 from echo_bench.metrics.salience import (
     SALIENCE_AUDIT_CONFIG_PATH,
     load_salience_config,
@@ -127,7 +128,7 @@ def _mean(values: List[float]) -> float:
 
 def run_s4_salience_audit(
     base_seed: int = 42,
-    n: int = 2,
+    n: int = 10,
     H: int | None = None,
     k: int = 4,
     pool_size: int = 64,
@@ -255,6 +256,12 @@ def run_s4_salience_audit(
             "salience_outlier_rate": outlier_rate,
             "salience_control": control,
             "overConcentratesOnHighSalience": over_concentrates,
+            "stats": {
+                "salience_outlier_rate": aggregate_values(
+                    outlier_rates, "salience_outlier_rate"
+                ),
+                "salience_control": aggregate_values(controls, "salience_control"),
+            },
             "traceHashes": cell_trace_hashes,
         }
         table.append(row)
@@ -365,7 +372,7 @@ def main() -> None:
         description="ECHO-Bench S4 salience-audit runner.",
     )
     parser.add_argument("--seed", type=int, default=42, help="base seed")
-    parser.add_argument("--n", type=int, default=2, help="child seeds per policy")
+    parser.add_argument("--n", type=int, default=10, help="child seeds per policy")
     parser.add_argument(
         "--H", type=int, default=None, help="horizon (default: config default)"
     )

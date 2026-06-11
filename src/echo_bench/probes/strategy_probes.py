@@ -1,4 +1,4 @@
-"""Strategy probes for ECHO-Bench (Task B-004).
+"""Strategy probes for ECHO-Bench (Tasks B-004, B-007 / TRD B-008).
 
 GUARDRAIL — READ FIRST
 ======================
@@ -10,7 +10,7 @@ demographic vector anywhere in this module, and a probe never reads such a field
 because the trace and card schemas do not contain one (see
 :mod:`echo_bench.env.trace_state`). Probes select purely from *observable card
 fields* (``complexityBand``, ``salienceScore``, ``coordinateContribution``,
-``cardId``, ``basis``).
+``visualMetrics``, ``cardId``, ``basis``).
 
     "Probes are controlled instrumented inputs, not models of people; the
     testbed is intentionally controlled, not ecologically realistic."
@@ -30,6 +30,31 @@ global RNG, wall-clock, or process entropy. Changing a probe's ``probeVersion``
 changes its derived RNG seed *and* the recorded probe identity, so a different
 version is distinguishable in the trace/manifest.
 
+Probe set expansion (B-007 / TRD B-008)
+=======================================
+The registry carries seven probes so that probe-separability measurement has a
+sufficiently diverse separation target. Each probe maps one TRD diagnostic axis
+onto a REAL observable card field:
+
+- complexity  -> ``complexityBand``               (PREFER_HIGH_COMPLEXITY)
+- salience    -> ``salienceScore``                (PREFER_LOW_SALIENCE)
+- novelty     -> ``coordinateContribution`` vs trace (PREFER_COORD_NOVELTY)
+- boundary    -> ``visualMetrics.edgeDensity``    (PREFER_HIGH_EDGE_DENSITY)
+- fragment    -> ``visualMetrics.spatialFrequency`` (PREFER_HIGH_SPATIAL_FREQUENCY)
+- gravity     -> L2 magnitude of ``coordinateContribution`` (PREFER_LOW_COORD_MAGNITUDE)
+- residue     -> nearness to the trace coordinate centroid  (PREFER_COORD_RESIDUE)
+
+The TRD's suggested "basis-switching" axis is intentionally NOT registered: the
+trace round record stores only ``selectedCardId`` (no ``basis``), so the basis
+of the previously selected card is not an observable trace field and a probe
+scoring it would violate the observable-fields-only contract.
+
+Experiments E2/E3 consume the frozen :data:`DEFAULT_PROBE_SET` (the original
+B-004 trio), NOT the full registry — growing the registry must never change
+existing experiment behaviour or report hashes. E-019 opts experiments into the
+expanded set explicitly. Pairwise overlap diagnostics for the expanded set live
+in :mod:`echo_bench.probes.probe_overlap`.
+
 All identifiers, keys, and version strings stay English; runtime log messages
 are Korean per the project logging convention (see :mod:`echo_bench.logging`).
 """
@@ -47,7 +72,12 @@ __all__ = [
     "PreferHighComplexityProbe",
     "PreferLowSalienceProbe",
     "PreferCoordNoveltyProbe",
+    "PreferHighEdgeDensityProbe",
+    "PreferHighSpatialFrequencyProbe",
+    "PreferLowCoordMagnitudeProbe",
+    "PreferCoordResidueProbe",
     "PROBES",
+    "DEFAULT_PROBE_SET",
     "get_probe",
     "COMPLEXITY_BAND_ORDER",
 ]
@@ -125,11 +155,57 @@ def _l2_distance(a: Sequence[float], b: Sequence[float]) -> float:
     return sum((float(a[i]) - float(b[i])) ** 2 for i in range(length)) ** 0.5
 
 
+def _visual_metric(card: Mapping[str, Any], key: str) -> float:
+    """Return an observable ``visualMetrics`` scalar, defaulting to 0.0.
+
+    Reads only the card's own ``visualMetrics`` dict (real image statistics from
+    A-006) — never any user/latent/semantic field. Missing metrics score 0.0 so
+    selection on degenerate inputs falls through to the deterministic tie-break.
+    """
+    metrics = card.get("visualMetrics")
+    if not isinstance(metrics, Mapping):
+        return 0.0
+    try:
+        return float(metrics.get(key, 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _coordinate_centroid(trace: Any) -> Optional[List[float]]:
+    """Mean of the observable per-round ``coordinateContribution`` vectors.
+
+    Returns ``None`` when the trace has no rounds with a readable
+    ``coordinateContribution`` (no centroid yet). Only the observable
+    coordinate field is read — never any user/latent field.
+    """
+    if trace is None:
+        return None
+    rounds_fn = getattr(trace, "rounds", None)
+    if not callable(rounds_fn):
+        return None
+    acc: Optional[List[float]] = None
+    count = 0
+    for record in rounds_fn():
+        contrib = record.get("coordinateContribution")
+        if contrib is None:
+            continue
+        vec = [float(x) for x in contrib]
+        if acc is None:
+            acc = list(vec)
+        else:
+            length = min(len(acc), len(vec))
+            acc = [acc[i] + vec[i] for i in range(length)]
+        count += 1
+    if acc is None or count == 0:
+        return None
+    return [x / count for x in acc]
+
+
 class StrategyProbe:
     """Base class for a controlled, deterministic strategy probe.
 
     A probe is an instrumented *input policy*, not a synthetic user. Subclasses
-    implement :meth:`_score` (higher score = more preferred) over observable
+    implement :meth:`_score` (higher score = selected first) over observable
     card fields only. The base :meth:`select` finds the max-scoring card(s) and
     breaks ties with a seeded local RNG, guaranteeing a deterministic, in-slate
     selection. No subclass may introduce any latent user/persona/preference
@@ -148,7 +224,7 @@ class StrategyProbe:
     def _score(
         self, card: Mapping[str, Any], trace: Any
     ) -> float:
-        """Return a preference score for a card (higher = more preferred).
+        """Return a selection score for a card (higher = selected first).
 
         Must read only observable card fields (and observable trace fields via
         ``trace``). Subclasses override this.
@@ -248,12 +324,107 @@ class PreferCoordNoveltyProbe(StrategyProbe):
         return _l2_distance(contrib, accumulated)
 
 
+class PreferHighEdgeDensityProbe(StrategyProbe):
+    """Pick the card with the highest observable ``visualMetrics.edgeDensity``.
+
+    Controlled input strategy for the TRD "boundary" axis: "always surface the
+    option with the most boundary/edge structure". Scores the real A-006
+    gradient-magnitude edge-density statistic of the rendered raster. Reads only
+    ``visualMetrics.edgeDensity``. Not a model of any person.
+    """
+
+    name = "PREFER_HIGH_EDGE_DENSITY"
+    version = "p1"
+
+    def _score(self, card: Mapping[str, Any], trace: Any) -> float:
+        return _visual_metric(card, "edgeDensity")
+
+
+class PreferHighSpatialFrequencyProbe(StrategyProbe):
+    """Pick the card with the highest observable ``visualMetrics.spatialFrequency``.
+
+    Controlled input strategy for the TRD "fragment" axis: "always surface the
+    option with the most fine-grained / fragmented structure", measured by the
+    real A-006 high-frequency FFT energy ratio of the rendered raster. Reads
+    only ``visualMetrics.spatialFrequency``. Not a model of any person.
+    """
+
+    name = "PREFER_HIGH_SPATIAL_FREQUENCY"
+    version = "p1"
+
+    def _score(self, card: Mapping[str, Any], trace: Any) -> float:
+        return _visual_metric(card, "spatialFrequency")
+
+
+class PreferLowCoordMagnitudeProbe(StrategyProbe):
+    """Pick the card whose ``coordinateContribution`` has the smallest L2 norm.
+
+    Controlled input strategy for the TRD "gravity" axis: "always surface the
+    option that pulls the accumulated trace coordinates toward the origin".
+    Scores the negated Euclidean magnitude of the card's observable
+    ``coordinateContribution`` (missing vectors score as magnitude 0.0, i.e.
+    maximal pull). Reads only ``coordinateContribution``. Not a model of any
+    person.
+    """
+
+    name = "PREFER_LOW_COORD_MAGNITUDE"
+    version = "p1"
+
+    def _score(self, card: Mapping[str, Any], trace: Any) -> float:
+        contrib = card.get("coordinateContribution")
+        if contrib is None:
+            return 0.0
+        return -sum(float(x) ** 2 for x in contrib) ** 0.5
+
+
+class PreferCoordResidueProbe(StrategyProbe):
+    """Pick the card nearest the trace's accumulated coordinate centroid.
+
+    Controlled input strategy for the TRD "residue" axis — the anti-novelty
+    counterpart of :class:`PreferCoordNoveltyProbe`: "always surface the option
+    that stays closest to where the trace has already gone". The score is the
+    negated Euclidean distance between the card's observable
+    ``coordinateContribution`` and the centroid (mean) of the per-round
+    ``coordinateContribution`` vectors recorded in the observable trace. When
+    the trace is empty there is no centroid, so every card scores ``0.0`` and
+    selection falls through to the deterministic seeded tie-break. Reads only
+    ``coordinateContribution``. Not a model of any person.
+    """
+
+    name = "PREFER_COORD_RESIDUE"
+    version = "p1"
+
+    def _score(self, card: Mapping[str, Any], trace: Any) -> float:
+        centroid = _coordinate_centroid(trace)
+        if centroid is None:
+            return 0.0
+        contrib = card.get("coordinateContribution")
+        if contrib is None:
+            return 0.0
+        return -_l2_distance(contrib, centroid)
+
+
 # Registry of named probes. Names are English machine-read identifiers.
 PROBES = {
     PreferHighComplexityProbe.name: PreferHighComplexityProbe(),
     PreferLowSalienceProbe.name: PreferLowSalienceProbe(),
     PreferCoordNoveltyProbe.name: PreferCoordNoveltyProbe(),
+    PreferHighEdgeDensityProbe.name: PreferHighEdgeDensityProbe(),
+    PreferHighSpatialFrequencyProbe.name: PreferHighSpatialFrequencyProbe(),
+    PreferLowCoordMagnitudeProbe.name: PreferLowCoordMagnitudeProbe(),
+    PreferCoordResidueProbe.name: PreferCoordResidueProbe(),
 }
+
+# Frozen default subset consumed by the existing experiments (E2 / E3): exactly
+# the original B-004 trio, in registration order. Growing PROBES (B-007 / TRD
+# B-008) must be bit-identical for those runs — same probe list, same report
+# hashes — so the experiments iterate THIS constant, never the full registry.
+# E-019 opts experiments into the expanded set explicitly.
+DEFAULT_PROBE_SET = (
+    PreferHighComplexityProbe.name,
+    PreferLowSalienceProbe.name,
+    PreferCoordNoveltyProbe.name,
+)
 
 
 def get_probe(name: str) -> StrategyProbe:

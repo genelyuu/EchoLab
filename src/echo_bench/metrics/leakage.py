@@ -47,6 +47,17 @@ The metric is a pure deterministic function of the observable inputs: identical
 iterated in a stable name-sorted order; counts use canonical signatures. No RNG,
 wall-clock, or process entropy enters the computation.
 
+TERMINOLOGY (G-020)
+===================
+The primary report terminology for this statistic is
+``probe_separability_proxy`` (:data:`PRIMARY_METRIC_NAME`): it names what is
+actually measured — how separable the observable behaviour is by controlled
+probe identity. ``leakage_proxy`` (:data:`METRIC_NAME`) is retained as the
+LEGACY MACHINE NAME: every machine key and value (the ``metric``/``value``
+metadata keys, report row keys such as ``leakage_proxy``, and all function
+names) stays byte-identical for replay compatibility; the rename is a label
+layer only (``primaryMetric`` / ``legacyAlias``, the D-012 precedent).
+
 Identifiers, keys, and metric names stay English; runtime log lines are Korean
 per the project logging convention. Hashing is delegated to
 :func:`echo_bench.utils.hash.canonical_hash`.
@@ -55,7 +66,17 @@ per the project logging convention. Hashing is delegated to
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, List, Mapping, Tuple
+import random
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 from echo_bench.logging import get_logger
 from echo_bench.utils.hash import canonical_hash
@@ -63,15 +84,40 @@ from echo_bench.utils.hash import canonical_hash
 __all__ = [
     "leakage_proxy",
     "leakage_proxy_with_metadata",
+    "null_corrected_separability",
+    "leakage_delta_vs_random",
+    "utility_per_leakage",
+    # Documented shared machinery (D-015/D-016/D-017 cores; consumed by
+    # echo_bench.metrics.separability — see the SHARED MACHINERY note below).
+    "collect_labeled_signatures",
+    "null_corrected_stats",
+    "slate_member_ids",
+    "signature_saturation_stats",
     "METRIC_NAME",
+    "PRIMARY_METRIC_NAME",
+    "SEPARABILITY_METRIC_NAME",
     "IS_PROXY",
     "PROXY_DISCLAIMER",
+    "LEAKAGE_RATIO_FLOOR",
+    "DEFAULT_NULL_PERMUTATIONS",
+    "NULL_STD_EPS",
+    "SATURATION_UNIQUE_RATE_THRESHOLD",
 ]
 
 _logger = get_logger(__name__)
 
-#: English machine-read metric name.
+#: English machine-read metric name. G-020: this is the LEGACY machine name —
+#: it stays byte-identical everywhere a machine key or value is read/written
+#: (report row keys, the ``metric``/``value`` metadata keys, hashes), so
+#: existing runs replay unchanged.
 METRIC_NAME = "leakage_proxy"
+
+#: G-020 primary report terminology for the same statistic: the value measures
+#: probe SEPARABILITY (how observable slate/selection distributions co-vary
+#: with controlled probe identity), so reports lead with this label and carry
+#: :data:`METRIC_NAME` as the legacy alias (D-012 legacyAlias precedent).
+#: A LABEL ONLY — no machine key, value, or function name changes with it.
+PRIMARY_METRIC_NAME = "probe_separability_proxy"
 
 #: Hard flag stating this metric is a proxy, surfaced in returned metadata so no
 #: downstream consumer can mistake it for a guarantee.
@@ -86,32 +132,157 @@ PROXY_DISCLAIMER = (
     "generalization claim."
 )
 
+# D-015: English machine-read metric name for the null-corrected statistic.
+SEPARABILITY_METRIC_NAME = "null_corrected_separability"
+
+# D-015: default number of deterministic label permutations for the null.
+DEFAULT_NULL_PERMUTATIONS = 200
+
+# D-017 (TRD V-004 diagnostics): saturation threshold over the unique
+# signature rate. When the distinct-signature count is at least this fraction
+# of the pooled sample count, (nearly) every signature is unique, the pooled
+# NMI sits at/near its observed-achievable maximum under EVERY labeling, and
+# the absolute NMI value is not report-grade — `saturation_flag` is then True.
+# The flag is a DIAGNOSTIC over the measurement (it catches measurement
+# failure automatically), never a claim. NOTE the fail-closed corollary: a
+# minuscule sample (e.g. a single pooled round) trivially has unique-rate 1.0
+# and therefore flags as saturated — by design, since its NMI is equally
+# uninformative.
+SATURATION_UNIQUE_RATE_THRESHOLD = 0.95
+
+# D-015: documented near-zero threshold for the null standard deviation.
+# CONVENTION (bounded, never +/-inf or NaN): when ``null_std < NULL_STD_EPS``
+# the permutation null is (numerically) constant — every sampled label
+# permutation yields the same NMI — so ``excess_z`` is defined as exactly
+# ``0.0``. (In this regime ``excess_nmi`` is typically ~0 as well, e.g. in the
+# fully saturated all-unique-signature case where every labeling gives NMI 1.0,
+# but a sampled null cannot logically guarantee observed == null, so only
+# ``excess_z`` carries the hard convention.)
+NULL_STD_EPS = 1e-12
+
+# D-011 (TRD alias D-010): denominator floor for :func:`utility_per_leakage`.
+# A leakage value below this floor is replaced by the floor before dividing, so
+# a near-zero leakage cannot explode the ratio. Documented constant — every E3
+# report section that carries the ratio also records this floor (``ratioFloor``)
+# so the reported number is self-describing.
+LEAKAGE_RATIO_FLOOR = 0.05
+
 # Fields the metric is permitted to read from a round record. Reading anything
 # outside this set (in particular any latent/user field) is a contract
 # violation; tests assert the implementation honours it.
 _OBSERVABLE_ROUND_FIELDS = ("slate", "selectedCardId")
 
 
-def _selection_signature(record: Mapping[str, Any]) -> str:
-    """Build a canonical observable selection signature for one round.
+def _clamp01(value: float) -> float:
+    """Clamp ``value`` into the closed unit interval ``[0.0, 1.0]``."""
+    v = float(value)
+    if v <= 0.0:
+        return 0.0
+    if v >= 1.0:
+        return 1.0
+    return v
 
-    The signature combines only observable fields: the round's
-    ``selectedCardId`` and the *set* of card ids present in its ``slate``
-    (order-independent). It deliberately reads no other field. The signature is
-    a stable canonical hash so equal observable rounds map to an equal label.
+
+def leakage_delta_vs_random(
+    policy_leakage: float, random_leakage: float
+) -> float:
+    """RELATIVE leakage-proxy delta of a policy vs the RANDOM reference (D-011).
+
+    ``leakage_delta_vs_random = leakage(policy) - leakage(RANDOM)``, computed
+    over seed-aligned runs (same base seed / horizon / pool / probes for both
+    policies). Both inputs are :func:`leakage_proxy` values and are clamped into
+    ``[0.0, 1.0]`` before differencing, so the delta is bounded to
+    ``[-1.0, 1.0]``.
+
+    This is a **relative, comparison-ready** statistic — the supported claim is
+    "policy X's leakage proxy is lower/higher than RANDOM's under identical
+    controlled conditions", never an absolute leakage level. A negative delta
+    means the policy's observable behaviour is LESS separable by controlled
+    probe identity than the RANDOM reference's; positive means MORE separable.
+    The reference compared with itself yields exactly ``0.0``.
+
+    Both operands are PROXY values (see :data:`PROXY_DISCLAIMER`): the delta is
+    likewise a proxy statistic over the controlled testbed and is NOT a privacy
+    guarantee, anonymity proof, identifiability bound, or legal/compliance
+    claim.
+    """
+    return _clamp01(policy_leakage) - _clamp01(random_leakage)
+
+
+def utility_per_leakage(
+    mean_utility: float,
+    leakage: float,
+    floor: float = LEAKAGE_RATIO_FLOOR,
+) -> float:
+    """Descriptive utility/leakage trade-off ratio for one policy (D-011).
+
+    ``utility_per_leakage = mean_utility / max(leakage, floor)`` where
+    ``mean_utility`` is e.g. the mean ``coordinate_coverage`` over the
+    policy's per-probe traces (the caller supplies any ``[0,1]``-bounded
+    utility aggregate) and ``leakage`` is its :func:`leakage_proxy` value.
+    Note: E3 pools per-probe traces at ONE base seed — there are no multiple
+    seed-aligned runs to average; the numerator is the per-probe trace mean
+    over the probe family at that base seed.
+    Both numerator and denominator inputs are clamped into ``[0.0, 1.0]``
+    before the ratio; the denominator is then floored at
+    :data:`LEAKAGE_RATIO_FLOOR` (default ``0.05``) so a near-zero leakage proxy
+    cannot explode the ratio. Bounds: ``[0.0, 1.0 / floor]`` (``[0.0, 20.0]``
+    at the default floor); continuous at the floor.
+
+    Higher = a better observed utility-per-leakage trade-off **within the
+    controlled testbed**. This is a descriptive, relative ranking aid only: the
+    denominator is a PROXY (see :data:`PROXY_DISCLAIMER`), so the ratio
+    inherits every proxy limitation and is NOT a privacy guarantee or any
+    absolute leakage/utility claim. Report sections carrying this ratio must
+    also record the floor (``ratioFloor``) so the number is self-describing.
+
+    Raises ``ValueError`` if ``floor`` is not strictly positive.
+    """
+    if floor <= 0.0:
+        raise ValueError(
+            f"utility_per_leakage: floor 는 양수여야 합니다 (받은 값: {floor!r})"
+        )
+    return _clamp01(mean_utility) / max(_clamp01(leakage), float(floor))
+
+
+def slate_member_ids(record: Mapping[str, Any]) -> List[str]:
+    """Name-sorted observable slate member ids of one round (shared, D-016).
+
+    Slate entries may be card-id strings or card dicts; reduce to ids and sort
+    the string forms so the result is independent of stored slate order.
+    Duplicate ids are PRESERVED (this is the sorted member list, not a set).
+    Reads only the observable ``slate`` field. Documented shared machinery for
+    the legacy combined signature below and the D-016/D-017 channel signatures
+    in :mod:`echo_bench.metrics.separability`.
     """
     slate = record.get("slate") or []
-    # Slate entries may be card-id strings or card dicts; reduce to ids,
-    # order-independent (a set), so signature is permutation-invariant.
     slate_ids = []
     for entry in slate:
         if isinstance(entry, Mapping):
             slate_ids.append(entry.get("cardId"))
         else:
             slate_ids.append(entry)
+    return sorted(str(s) for s in slate_ids)
+
+
+def _selection_signature(record: Mapping[str, Any]) -> str:
+    """Build a canonical observable selection signature for one round.
+
+    The signature combines only observable fields: the round's
+    ``selectedCardId`` and the name-sorted list of card ids present in its
+    ``slate`` (order-independent; duplicate member ids are preserved — see
+    :func:`slate_member_ids`, this is NOT a set reduction). It deliberately
+    reads no other field. The signature is a stable canonical hash so equal
+    observable rounds map to an equal label.
+
+    D-016 NOTE: this is the **combined** channel signature — byte-identical
+    construction is an invariant relied upon by
+    :func:`echo_bench.metrics.separability.channel_separated_separability`
+    (its ``combined`` channel must reproduce legacy values exactly).
+    """
     sig = {
         "selectedCardId": record.get("selectedCardId"),
-        "slateMembers": sorted(str(s) for s in slate_ids),
+        "slateMembers": slate_member_ids(record),
     }
     return canonical_hash(sig)
 
@@ -132,15 +303,22 @@ def _probe_version(trace: Any) -> Any:
     return None
 
 
-def _collect_labeled_signatures(
-    traces_by_probe: Mapping[str, Any]
+def collect_labeled_signatures(
+    traces_by_probe: Mapping[str, Any],
+    signature_fn: Optional[Callable[[Mapping[str, Any]], str]] = None,
 ) -> List[Tuple[str, str]]:
-    """Return ``(probeName, selectionSignature)`` pairs over all pooled rounds.
+    """Return ``(probeName, signature)`` pairs over all pooled rounds (shared).
 
-    Reads **only** the observable ``slate``/``selectedCardId`` fields of each
-    round via :func:`_selection_signature`. Probes are visited in name-sorted
-    order so the pooled sequence is deterministic.
+    ``signature_fn`` maps one round record to its canonical signature string
+    and defaults to the legacy combined :func:`_selection_signature`; D-016
+    passes per-channel signature functions. Every supported signature function
+    reads **only** the observable ``slate``/``selectedCardId`` fields. Probes
+    are visited in name-sorted order so the pooled sequence is deterministic.
+    Documented shared machinery for
+    :mod:`echo_bench.metrics.separability` (D-016/D-017).
     """
+    if signature_fn is None:
+        signature_fn = _selection_signature
     pairs: List[Tuple[str, str]] = []
     for name in sorted(traces_by_probe):
         trace = traces_by_probe[name]
@@ -148,7 +326,7 @@ def _collect_labeled_signatures(
         if not callable(rounds_fn):
             continue
         for record in rounds_fn():
-            pairs.append((name, _selection_signature(record)))
+            pairs.append((name, signature_fn(record)))
     return pairs
 
 
@@ -207,6 +385,167 @@ def _normalized_mutual_information(pairs: List[Tuple[str, str]]) -> float:
     return float(value)
 
 
+def signature_saturation_stats(signatures: Sequence[str]) -> Dict[str, Any]:
+    """Signature-space saturation **DIAGNOSTICS** over pooled signatures (D-017).
+
+    TRD V-004 diagnostics: detects automatically when the signature space is
+    too large relative to the sample — when (nearly) every pooled signature is
+    unique, the pooled NMI sits at/near its observed-achievable maximum under
+    every labeling, and its absolute value is not report-grade (the D-015
+    saturation regime). Reported fields (all pure functions of ``signatures``,
+    deterministic, no RNG):
+
+    - ``sample_count``             — number of pooled signatures (rounds).
+    - ``distinct_signature_count`` — number of distinct signatures.
+    - ``unique_signature_rate``    — distinct-signature count / sample count
+      (``0.0`` for an empty sample).
+    - ``cardinality_sample_ratio`` — |distinct signatures| / sample_count.
+      NOTE: by the TRD's definitions this coincides with
+      ``unique_signature_rate``; both promised key names are reported so
+      downstream consumers (and docs/12_CLAIM_LADDER.md Section 5) can rely
+      on either.
+    - ``saturation_flag``          — ``True`` iff ``sample_count > 0`` and
+      ``unique_signature_rate >= SATURATION_UNIQUE_RATE_THRESHOLD``.
+    - ``saturationThreshold``      — the documented threshold constant, so
+      the block is self-describing.
+
+    INTERPRETATION CONVENTION: the flag is a DIAGNOSTIC that catches
+    measurement failure, never a claim. ``saturation_flag = True`` forbids any
+    headline leakage-proxy claim for that channel/report
+    (docs/12_CLAIM_LADDER.md Section 5, Track L re-enable condition 2 requires
+    ``saturation_flag = False``). An empty sample is NOT flagged saturated —
+    it is degenerate instead (nothing was measured); a tiny all-unique sample
+    IS flagged (fail closed: its NMI is equally uninformative).
+    """
+    sample_count = len(signatures)
+    distinct_signature_count = len(set(signatures))
+    if sample_count > 0:
+        unique_signature_rate = distinct_signature_count / sample_count
+    else:
+        unique_signature_rate = 0.0
+    saturation_flag = (
+        sample_count > 0
+        and unique_signature_rate >= SATURATION_UNIQUE_RATE_THRESHOLD
+    )
+    return {
+        "sample_count": int(sample_count),
+        "distinct_signature_count": int(distinct_signature_count),
+        "unique_signature_rate": float(unique_signature_rate),
+        "cardinality_sample_ratio": float(unique_signature_rate),
+        "saturation_flag": bool(saturation_flag),
+        "saturationThreshold": SATURATION_UNIQUE_RATE_THRESHOLD,
+    }
+
+
+def null_corrected_stats(
+    pairs: List[Tuple[str, str]],
+    n_permutations: int,
+    seed_metric: str,
+) -> Dict[str, Any]:
+    """Core observed-vs-permutation-null statistics over labeled pairs.
+
+    Shared machinery for :func:`null_corrected_separability` (D-015) and the
+    channel-separated variant in :mod:`echo_bench.metrics.separability`
+    (D-016): given pooled ``(label, signature)`` pairs, compute the observed
+    pooled NMI, a deterministic permutation null over the same signature
+    multiset, and the excess statistics. D-017: the returned dict additionally
+    carries a ``saturation`` sub-block (:func:`signature_saturation_stats`
+    over the pooled signature multiset) so every null-corrected report block
+    is saturation-self-diagnosing.
+
+    DETERMINISM: the permutation RNG is a ``random.Random`` seeded **only**
+    from ``seed_metric`` + the pooled pairs + ``n_permutations`` via
+    ``canonical_hash`` — no wall-clock, process entropy, or global RNG state.
+    Different ``seed_metric`` strings (e.g. per-channel names) intentionally
+    decorrelate the null samples of otherwise-identical pair sequences.
+
+    DEGENERACY (fail closed, no permutations executed): no pairs, fewer than
+    two distinct labels, or fewer than two distinct signatures — matching
+    :func:`_normalized_mutual_information`'s degeneracy rule (a single unique
+    signature always yields NMI 0 under every labeling, so the permutation
+    loop would be pointless).
+
+    D-016 SEMANTICS NOTE: the single-unique-signature condition
+    (``len(set(signatures)) < 2``) was ADDED in D-016 and intentionally widens
+    the legacy D-015 ``degenerate`` flag for single-unique-signature inputs
+    (previously only no-pairs / single-label inputs were flagged). The numeric
+    outputs are unchanged — such inputs already reported the exact zero dict —
+    only the flag now states the degeneracy explicitly.
+
+    Raises ``ValueError`` if ``n_permutations < 1``.
+    """
+    if n_permutations < 1:
+        raise ValueError(
+            f"{seed_metric}: n_permutations 는 1 이상이어야 "
+            f"합니다 (받은 값: {n_permutations!r})"
+        )
+
+    labels = [probe for probe, _sig in pairs]
+    signatures = [sig for _probe, sig in pairs]
+    observed = _normalized_mutual_information(pairs)
+    degenerate = (
+        len(pairs) == 0
+        or len(set(labels)) < 2
+        or len(set(signatures)) < 2
+    )
+
+    if degenerate:
+        # In every degenerate case ``observed`` is already 0.0 (the NMI is
+        # defined as 0 for a degenerate marginal) — the zero dict is exact.
+        null_mean = 0.0
+        null_std = 0.0
+        excess_nmi = 0.0
+        excess_z = 0.0
+    else:
+        # Deterministic, data-derived permutation seed: canonical hash of the
+        # pooled labeled-signature sequence (already name-sorted) plus the
+        # metric/channel name and permutation count. NO wall-clock / global RNG.
+        seed = int(
+            canonical_hash(
+                {
+                    "metric": seed_metric,
+                    "pairs": [[probe, sig] for probe, sig in pairs],
+                    "nPermutations": int(n_permutations),
+                }
+            ),
+            16,
+        )
+        rng = random.Random(seed)
+        permuted = list(labels)
+        null_values: List[float] = []
+        for _ in range(int(n_permutations)):
+            rng.shuffle(permuted)
+            null_values.append(
+                _normalized_mutual_information(list(zip(permuted, signatures)))
+            )
+        null_mean = sum(null_values) / len(null_values)
+        null_var = sum((v - null_mean) ** 2 for v in null_values) / len(
+            null_values
+        )
+        null_std = math.sqrt(null_var)
+        excess_nmi = observed - null_mean
+        if null_std < NULL_STD_EPS:
+            # Documented bounded convention: constant null -> zero excess z.
+            excess_z = 0.0
+        else:
+            excess_z = excess_nmi / null_std
+
+    return {
+        "observed_nmi": float(observed),
+        "null_mean": float(null_mean),
+        "null_std": float(null_std),
+        "excess_nmi": float(excess_nmi),
+        "excess_z": float(excess_z),
+        "n_permutations": int(n_permutations),
+        "degenerate": degenerate,
+        # D-017: saturation diagnostics over the same pooled signature
+        # multiset — a DIAGNOSTIC sub-block (never a claim). saturation_flag
+        # = True forbids a headline leakage claim for this block
+        # (docs/12_CLAIM_LADDER.md Section 5 condition 2).
+        "saturation": signature_saturation_stats(signatures),
+    }
+
+
 def leakage_proxy(traces_by_probe: Mapping[str, Any]) -> float:
     """Deterministic leakage **PROXY** in ``[0.0, 1.0]`` (see module docstring).
 
@@ -226,7 +565,7 @@ def leakage_proxy(traces_by_probe: Mapping[str, Any]) -> float:
         selection signature, in ``[0.0, 1.0]``. ``0.0`` when fewer than two
         probes (or no rounds) are supplied.
     """
-    pairs = _collect_labeled_signatures(traces_by_probe)
+    pairs = collect_labeled_signatures(traces_by_probe)
     value = _normalized_mutual_information(pairs)
     _logger.info(
         "누출 프록시(leakage_proxy)를 계산했습니다 (probes=%d, rounds=%d, "
@@ -238,9 +577,114 @@ def leakage_proxy(traces_by_probe: Mapping[str, Any]) -> float:
     return value
 
 
+def null_corrected_separability(
+    traces_by_probe: Mapping[str, Any],
+    n_permutations: int = DEFAULT_NULL_PERMUTATIONS,
+) -> Dict[str, Any]:
+    """Null-corrected probe-separability **PROXY** (Task D-015, TRD D-015).
+
+    MOTIVATION
+    ==========
+    The naive pooled NMI of :func:`leakage_proxy` operates in a **saturation
+    regime** under trace-conditioned branching: the selection-signature space
+    explodes, signatures become (near-)unique, and the pooled NMI sits near
+    ``1.0`` even when the probe labels carry no information — i.e. even under
+    the null. The absolute NMI value is therefore not report-grade on its own.
+
+    DEFINITION
+    ==========
+    Compare the observed pooled NMI against a **deterministic permutation
+    null**: permute the probe labels over the *same* signature multiset
+    ``n_permutations`` times, recompute the NMI per permutation, and report
+
+    - ``observed_nmi``  — :func:`leakage_proxy`'s pooled NMI (same statistic),
+    - ``null_mean`` / ``null_std`` — mean / population std (ddof=0) of the
+      permutation-null NMI values,
+    - ``excess_nmi`` = ``observed_nmi - null_mean``,
+    - ``excess_z``  = ``(observed_nmi - null_mean) / null_std``, with the
+      bounded convention ``excess_z = 0.0`` whenever
+      ``null_std < NULL_STD_EPS`` (a numerically constant null is treated, by
+      convention, as carrying no excess; ±inf and NaN are forbidden — see
+      :data:`NULL_STD_EPS`).
+
+    Chance adjustment for information-theoretic clustering comparison follows
+    the discussion in Vinh et al. (JMLR 2010).
+
+    INTERPRETATION CONVENTION
+    =========================
+    Never "the NMI is high" — only "the observed signatures carry / do not
+    carry information in excess of the permutation null". Every leakage-style
+    report block must carry observed/null/excess together; the absolute NMI
+    alone is not reportable.
+
+    DETERMINISM
+    ===========
+    The permutation RNG is seeded **only** from the input data: a
+    ``random.Random`` seeded with ``int(canonical_hash(...), 16)`` over the
+    pooled ``(probe, signature)`` sequence plus ``n_permutations``. No
+    wall-clock, process entropy, or global RNG state enters (the global
+    ``random`` module state is untouched). Identical inputs (regardless of
+    mapping insertion order) yield a bit-identical output dict, so results are
+    replayable on CPU.
+
+    FAIL-CLOSED CONVENTION
+    ======================
+    Degenerate inputs — fewer than two probes with rounds, no rounds at all,
+    or fewer than two distinct signatures (matching the NMI degeneracy rule: a
+    single unique signature yields NMI 0 under *every* labeling, so the
+    permutation loop would be pointless) — have nothing to separate: the
+    result is the defined zero dict
+    (``observed_nmi = null_mean = null_std = excess_nmi = excess_z = 0.0``)
+    with ``degenerate = True`` and no permutations executed.
+
+    This is a PROXY statistic over the controlled testbed (see
+    :data:`PROXY_DISCLAIMER`) — NOT a privacy guarantee, anonymity proof,
+    identifiability bound, or legal/compliance claim.
+
+    Raises ``ValueError`` if ``n_permutations < 1``.
+    """
+    pairs = collect_labeled_signatures(traces_by_probe)
+    stats = null_corrected_stats(
+        pairs, n_permutations, SEPARABILITY_METRIC_NAME
+    )
+
+    if stats["degenerate"]:
+        _logger.info(
+            "널 보정 분리도(null_corrected_separability): 입력이 퇴화 상태라 "
+            "fail-closed 0 값으로 보고합니다 (probes=%d, rounds=%d)",
+            len(traces_by_probe),
+            len(pairs),
+        )
+    else:
+        _logger.info(
+            "널 보정 분리도(null_corrected_separability)를 계산했습니다 "
+            "(probes=%d, rounds=%d, observed_nmi=%.6f, null_mean=%.6f, "
+            "null_std=%.6f, excess_nmi=%+.6f, excess_z=%+.4f, "
+            "n_permutations=%d) — 해석은 'null 초과 정보가 있다/없다'로만 "
+            "하며, 이는 PROXY 이고 프라이버시/법적 보증이 아닙니다",
+            len(traces_by_probe),
+            len(pairs),
+            stats["observed_nmi"],
+            stats["null_mean"],
+            stats["null_std"],
+            stats["excess_nmi"],
+            stats["excess_z"],
+            n_permutations,
+        )
+
+    return {
+        "metric": SEPARABILITY_METRIC_NAME,
+        **stats,
+        "nullStdEps": NULL_STD_EPS,
+        "isProxy": IS_PROXY,
+        "disclaimer": PROXY_DISCLAIMER,
+    }
+
+
 def leakage_proxy_with_metadata(
     traces_by_probe: Mapping[str, Any],
     probe_versions: Mapping[str, Any] | None = None,
+    n_permutations: int = DEFAULT_NULL_PERMUTATIONS,
 ) -> Dict[str, Any]:
     """Compute :func:`leakage_proxy` and return it with carried metadata.
 
@@ -252,12 +696,25 @@ def leakage_proxy_with_metadata(
 
         {
             "metric": "leakage_proxy",
+            "primaryMetric": "probe_separability_proxy",
+            "legacyAlias": "leakage_proxy",
             "value": float in [0, 1],
             "isProxy": True,
             "disclaimer": PROXY_DISCLAIMER,
             "traceHashes": {probeName: traceHash, ...},
             "probeVersions": {probeName: probeVersion|None, ...},
+            "nullCorrected": {observed_nmi, null_mean, null_std,
+                              excess_nmi, excess_z, n_permutations, ...},
         }
+
+    G-020: ``primaryMetric`` / ``legacyAlias`` are an ADDITIVE label layer
+    (D-012 precedent) — the existing machine keys (``metric``, ``value``, ...)
+    and their values are byte-identical to the pre-G-020 output.
+
+    D-015: ``nullCorrected`` is the :func:`null_corrected_separability` block
+    (``nullCorrected["observed_nmi"] == value`` — same pooled-NMI statistic).
+    Every leakage-style report path must surface observed/null/excess together;
+    the absolute ``value`` alone is not report-grade (saturation regime).
 
     Deterministic: identical inputs -> identical dict.
     """
@@ -273,11 +730,22 @@ def leakage_proxy_with_metadata(
         else:
             probe_version_map[name] = _probe_version(trace)
 
+    null_corrected = null_corrected_separability(
+        traces_by_probe, n_permutations=n_permutations
+    )
     return {
         "metric": METRIC_NAME,
-        "value": leakage_proxy(traces_by_probe),
+        # G-020 additive label layer (D-012 legacyAlias precedent): the primary
+        # terminology is probe_separability_proxy; "metric" above stays the
+        # legacy machine name byte-identically.
+        "primaryMetric": PRIMARY_METRIC_NAME,
+        "legacyAlias": METRIC_NAME,
+        # Same pooled-NMI statistic as null_corrected["observed_nmi"]; kept as
+        # "value" for backward compatibility with existing report consumers.
+        "value": null_corrected["observed_nmi"],
         "isProxy": IS_PROXY,
         "disclaimer": PROXY_DISCLAIMER,
         "traceHashes": trace_hashes,
         "probeVersions": probe_version_map,
+        "nullCorrected": null_corrected,
     }

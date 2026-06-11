@@ -223,6 +223,10 @@ def test_compute_all_with_oracle_keys_and_values():
         "artifact_diversity",
         "redundancy_rate",
         "round_coherence",
+        # D-010 (TRD alias D-009) coverage-distribution metrics (additive).
+        "coordinate_entropy",
+        "cell_visit_gini",
+        "time_to_saturation",
         "strategy_sensitivity",
         "regret_to_oracle",
     }

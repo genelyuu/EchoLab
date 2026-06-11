@@ -6,11 +6,13 @@ import json
 
 from echo_bench.experiments.s3_coordinate_scramble import (
     COORDINATE_POLICIES,
+    S3_METRIC_KEYS,
     _REPORTS_DIR,
     run_s3_coordinate_scramble,
     scramble_coordinates,
     scramble_permutation,
 )
+from echo_bench.metrics.utility import CORE_METRIC_KEYS
 
 # Small but valid parameters: n=4 seeds (so the round-0 divergence signal is
 # stable), short H, 16-card pool, k=4. H=4 is in the horizon allowed set.
@@ -158,6 +160,29 @@ def test_s3_real_run_writes_report_with_hashes():
     assert on_disk["reportHash"] == report["reportHash"]
 
 
+def test_s3_metric_keys_pinned_to_core_and_recorded_in_report():
+    """S3_METRIC_KEYS is pinned to CORE_METRIC_KEYS and recorded in the report.
+
+    D-010 review: the scramble_shift denominator must be the original four
+    utility keys (CORE_METRIC_KEYS), not the full seven after D-010 added the
+    distribution metrics. The report is self-describing: its 'metricKeys' field
+    records which keys were used.
+    """
+    # S3_METRIC_KEYS must equal CORE_METRIC_KEYS (not the full METRIC_KEYS).
+    assert S3_METRIC_KEYS == CORE_METRIC_KEYS, (
+        f"S3_METRIC_KEYS must be pinned to CORE_METRIC_KEYS={CORE_METRIC_KEYS!r}, "
+        f"got {S3_METRIC_KEYS!r}"
+    )
+    assert len(S3_METRIC_KEYS) == 4
+
+    report = run_s3_coordinate_scramble(dry_run=False, **_KW)
+    # The report records which keys were used (self-describing).
+    assert report["metricKeys"] == list(CORE_METRIC_KEYS), (
+        f"S3 report['metricKeys'] must be {list(CORE_METRIC_KEYS)!r}, "
+        f"got {report.get('metricKeys')!r}"
+    )
+
+
 def test_s3_coordinate_policies_shift_at_least_control():
     report = run_s3_coordinate_scramble(dry_run=False, **_KW)
 
@@ -188,6 +213,45 @@ def test_s3_replay_identical_report_hash():
     assert r1["traceHash"] == r2["traceHash"]
     assert r1["seedBatchId"] == r2["seedBatchId"]
     assert r1["scramblePermutationHash"] == r2["scramblePermutationHash"]
+
+
+def test_s3_sensitivity_naming_fields():
+    """D-012: S3 report carries sensitivity_score primary label + legacy alias.
+
+    The direction note must contain '0.0 = max robustness' and the per-row
+    label must be sensitivity_score with legacyAlias: scramble_shift.
+    """
+    report = run_s3_coordinate_scramble(dry_run=False, **_KW)
+
+    # Section-level: new sensitivity naming fields.
+    assert report["scrambleShiftMetric"] == "sensitivity_score", (
+        f"S3 report scrambleShiftMetric must be 'sensitivity_score', "
+        f"got {report.get('scrambleShiftMetric')!r}"
+    )
+    assert report["scrambleShiftLegacyAlias"] == "scramble_shift", (
+        f"S3 report scrambleShiftLegacyAlias must be 'scramble_shift', "
+        f"got {report.get('scrambleShiftLegacyAlias')!r}"
+    )
+    assert "0.0 = max robustness" in report["scrambleShiftDirection"], (
+        f"S3 scrambleShiftDirection must contain '0.0 = max robustness', "
+        f"got {report.get('scrambleShiftDirection')!r}"
+    )
+
+    # Per-row: primary label + legacy alias + equal values.
+    for row in report["table"]:
+        assert "sensitivity_score" in row, (
+            f"S3 row for policy={row.get('policy')} missing sensitivity_score"
+        )
+        assert "scramble_shift" in row, (
+            f"S3 row for policy={row.get('policy')} missing legacy scramble_shift"
+        )
+        assert row["sensitivity_score"] == row["scramble_shift"], (
+            f"S3 sensitivity_score != scramble_shift for policy={row.get('policy')}"
+        )
+        assert row["legacyAlias"] == "scramble_shift", (
+            f"S3 row legacyAlias must be 'scramble_shift', "
+            f"got {row.get('legacyAlias')!r} (policy={row.get('policy')})"
+        )
 
 
 def test_s3_no_forbidden_fields_in_report():

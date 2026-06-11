@@ -119,7 +119,7 @@ def test_s2_ablations_present_and_fresh_archives():
     }
     assert len(set(drop_hashes.values())) == len(drop_hashes)
 
-    # Each arm carries coverage/diversity + the four trace-only metrics, bounded.
+    # Each arm carries coverage/diversity + the trace-only metrics, bounded.
     for row in table:
         assert "cellOccupancy" in row and "perBasisCounts" in row
         # A drop-one arm must not contain the dropped basis in its archive.

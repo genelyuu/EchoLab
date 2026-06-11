@@ -37,6 +37,7 @@ from echo_bench.metrics.replay import replay_consistency
 
 __all__ = [
     "validate_replay",
+    "inline_replay_audit",
     "assert_replayable",
     "validate_report_file",
     "extract_chain",
@@ -150,6 +151,63 @@ def validate_replay(
         "replayable": replayable,
         "first_divergent": first_divergent,
         "chain": chain_a,
+        "seedBatchId": seed_batch_id,
+    }
+
+
+def inline_replay_audit(
+    report: Mapping[str, Any],
+    run_fn: Callable[..., Mapping[str, Any]],
+    run_kwargs: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Re-run once and compare to an already-produced report's hash chain.
+
+    For an experiment runner that validates its OWN determinism inline (E1/E2,
+    Task E-012). Unlike :func:`validate_replay` — which re-runs ``run_fn`` twice
+    and so would recurse infinitely if a runner called it on itself — this
+    re-runs ``run_fn`` exactly ONCE and compares that re-run's hash chain to the
+    chain of the ``report`` the runner just built. ``run_kwargs`` MUST disable
+    the runner's re-entrant validation (e.g. ``replay_validate=False``) so the
+    single re-run does not itself trigger another audit.
+
+    Returns a ``replayAudit`` dict::
+
+        {
+            "validator": "inline_replay_audit",
+            "runFn": "<module>.<name>",
+            "replayable": bool,
+            "first_divergent": key|None,
+            "seedBatchId": ...,
+        }
+
+    The caller attaches the returned dict to its report AFTER computing
+    ``reportHash`` (so the audit is not part of the hashed body, keeping the
+    self-comparison consistent).
+    """
+    rerun = run_fn(**run_kwargs)
+    result = replay_consistency(extract_chain(report), extract_chain(rerun))
+    seed_batch_id = report.get(_SEED_BATCH_ID_KEY)
+    replayable = bool(result["consistent"])
+    if replayable:
+        log_ko(
+            _logger,
+            "인라인 재현 검증 통과: 재실행 해시 체인이 보고서와 정확히 일치합니다 "
+            f"(runFn={getattr(run_fn, '__name__', run_fn)!r}, "
+            f"seedBatchId={seed_batch_id}).",
+        )
+    else:
+        log_ko(
+            _logger,
+            "인라인 재현 검증 실패(LOUD): 해시 체인이 '"
+            f"{result['first_divergent']}' 키에서 어긋났습니다 "
+            f"(runFn={getattr(run_fn, '__name__', run_fn)!r}). 재현 불가.",
+        )
+    return {
+        "validator": "inline_replay_audit",
+        "runFn": f"{getattr(run_fn, '__module__', '?')}."
+        f"{getattr(run_fn, '__name__', '?')}",
+        "replayable": replayable,
+        "first_divergent": result["first_divergent"],
         "seedBatchId": seed_batch_id,
     }
 
