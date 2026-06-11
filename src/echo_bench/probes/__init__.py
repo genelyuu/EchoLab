@@ -6,6 +6,7 @@ contract.
 """
 
 from echo_bench.probes.probe_overlap import (
+    PROBE_OVERLAP_EXCLUDE_THRESHOLD,
     PROBE_OVERLAP_THRESHOLD,
     probe_overlap_audit,
 )
@@ -19,6 +20,7 @@ from echo_bench.probes.strategy_probes import (
 __all__ = [
     "DEFAULT_PROBE_SET",
     "PROBES",
+    "PROBE_OVERLAP_EXCLUDE_THRESHOLD",
     "PROBE_OVERLAP_THRESHOLD",
     "StrategyProbe",
     "get_probe",

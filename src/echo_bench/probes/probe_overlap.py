@@ -33,9 +33,19 @@ Each probe is evaluated with the same shared ``seed`` on every context.
     silently dropped — satisfying the TRD acceptance criterion that excessive
     overlap pairs are explicitly surfaced in reports.
 
+``exclude_merge_candidates`` (Task B-009)
+    The stricter second tier: every pair whose overlap is
+    **>= :data:`PROBE_OVERLAP_EXCLUDE_THRESHOLD`** (or the caller-supplied
+    ``exclude_threshold``). A flagged pair (>= 0.9) is a diagnostic caveat;
+    an exclude-tier pair (>= 0.95) is additionally an exclude-or-merge
+    candidate for probe-set curation. Both tiers are diagnostics, never
+    claims, and by construction every exclude candidate is also flagged
+    (the exclude threshold is validated to be >= the flag threshold).
+
 The audit is a pure deterministic function of ``(contexts, probes, seed,
-threshold)``. All output keys are English machine-read identifiers; runtime
-log messages are Korean per the project logging convention.
+threshold, exclude_threshold)``. All output keys are English machine-read
+identifiers; runtime log messages are Korean per the project logging
+convention.
 """
 
 from __future__ import annotations
@@ -47,7 +57,11 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from echo_bench.logging import get_logger
 from echo_bench.probes.strategy_probes import PROBES, StrategyProbe
 
-__all__ = ["PROBE_OVERLAP_THRESHOLD", "probe_overlap_audit"]
+__all__ = [
+    "PROBE_OVERLAP_EXCLUDE_THRESHOLD",
+    "PROBE_OVERLAP_THRESHOLD",
+    "probe_overlap_audit",
+]
 
 _logger = get_logger(__name__)
 
@@ -55,6 +69,15 @@ _logger = get_logger(__name__)
 #: contexts is reported in ``high_overlap_pairs`` (과다 중복 쌍 별도 표기).
 #: The comparison is inclusive (``overlap >= threshold`` flags the pair).
 PROBE_OVERLAP_THRESHOLD = 0.9
+
+#: Documented exclude-or-merge threshold (Task B-009, second tier): a probe
+#: pair agreeing on >= this fraction of contexts is additionally reported in
+#: ``exclude_merge_candidates`` as an exclude-or-merge candidate for probe-set
+#: curation. The comparison is inclusive (``overlap >= exclude_threshold``),
+#: mirroring the flag tier, and the exclude threshold must always be >= the
+#: flag threshold so exclude candidates are a subset of flagged pairs. Both
+#: tiers are diagnostics, never claims.
+PROBE_OVERLAP_EXCLUDE_THRESHOLD = 0.95
 
 _ROUND = 12
 
@@ -88,6 +111,7 @@ def probe_overlap_audit(
     probes: Optional[Mapping[str, StrategyProbe]] = None,
     seed: int = 0,
     threshold: float = PROBE_OVERLAP_THRESHOLD,
+    exclude_threshold: float = PROBE_OVERLAP_EXCLUDE_THRESHOLD,
 ) -> Dict[str, Any]:
     """Audit pairwise selection overlap and selection entropy of a probe set.
 
@@ -102,6 +126,10 @@ def probe_overlap_audit(
         seed: shared deterministic seed forwarded to every ``probe.select``.
         threshold: inclusive flagging threshold for ``high_overlap_pairs``
             (defaults to :data:`PROBE_OVERLAP_THRESHOLD`).
+        exclude_threshold: inclusive exclude-or-merge threshold for
+            ``exclude_merge_candidates`` (defaults to
+            :data:`PROBE_OVERLAP_EXCLUDE_THRESHOLD`); must lie in ``[0, 1]``
+            and be >= ``threshold``.
 
     Returns:
         A dict with English keys:
@@ -119,16 +147,35 @@ def probe_overlap_audit(
         - ``high_overlap_pairs``: list of ``{"probe_a", "probe_b", "overlap"}``
           dicts for every pair with ``overlap >= threshold``, sorted by pair
           key — the automatic excessive-overlap report.
+        - ``exclude_threshold``: the exclude-or-merge threshold used (B-009).
+        - ``exclude_merge_candidates``: list of ``{"probe_a", "probe_b",
+          "overlap"}`` dicts for every pair with ``overlap >=
+          exclude_threshold``, sorted like ``high_overlap_pairs``; always a
+          subset of ``high_overlap_pairs``.
+        - ``policyNote``: English machine-readable note documenting the
+          two-tier policy (flag tier = diagnostic caveat, exclude tier =
+          exclude-or-merge candidate; diagnostics, never claims).
 
     Raises:
         ValueError: (Korean message) on empty ``contexts``, fewer than two
-            probes, or a threshold outside ``[0, 1]``.
+            probes, a threshold outside ``[0, 1]``, or an
+            ``exclude_threshold`` outside ``[0, 1]`` or below ``threshold``.
     """
     if not contexts:
         raise ValueError("프로브 overlap 진단에는 최소 1개의 컨텍스트가 필요합니다")
     if not (0.0 <= float(threshold) <= 1.0):
         raise ValueError(
             f"overlap 임계값은 [0, 1] 범위여야 합니다 (입력값: {threshold})"
+        )
+    if not (0.0 <= float(exclude_threshold) <= 1.0):
+        raise ValueError(
+            "overlap exclude 임계값은 [0, 1] 범위여야 합니다 "
+            f"(입력값: {exclude_threshold})"
+        )
+    if float(exclude_threshold) < float(threshold):
+        raise ValueError(
+            "overlap exclude 임계값은 flag 임계값 이상이어야 합니다 "
+            f"(flag={threshold}, exclude={exclude_threshold})"
         )
     probe_map = _resolve_probes(probes)
     names = sorted(probe_map)
@@ -142,9 +189,12 @@ def probe_overlap_audit(
             probe.select(slate, trace, seed) for slate, trace in contexts
         ]
 
-    # Pairwise identical-selection fraction.
+    # Pairwise identical-selection fraction. Both tiers use the same inclusive
+    # comparison; exclude_threshold >= threshold (validated above) guarantees
+    # exclude_merge_candidates is a subset of high_overlap_pairs.
     pairwise: Dict[str, float] = {}
     high_overlap_pairs: List[Dict[str, Any]] = []
+    exclude_merge_candidates: List[Dict[str, Any]] = []
     for i, name_a in enumerate(names):
         for name_b in names[i + 1:]:
             sel_a = selections_by_probe[name_a]
@@ -157,12 +207,25 @@ def probe_overlap_audit(
                 high_overlap_pairs.append(
                     {"probe_a": name_a, "probe_b": name_b, "overlap": overlap}
                 )
+            if overlap >= exclude_threshold:
+                exclude_merge_candidates.append(
+                    {"probe_a": name_a, "probe_b": name_b, "overlap": overlap}
+                )
 
     probe_entropy = {
         name: _selection_entropy_bits(selections_by_probe[name])
         for name in names
     }
 
+    if exclude_merge_candidates:
+        _logger.warning(
+            "프로브 overlap 제외/병합(exclude-or-merge) 후보 쌍 감지 "
+            "(exclude_threshold=%s): %s — 프로브 셋 큐레이션 검토 대상입니다 "
+            "(진단이며 클레임이 아닙니다)",
+            exclude_threshold,
+            [f"{p['probe_a']}|{p['probe_b']}={p['overlap']}"
+             for p in exclude_merge_candidates],
+        )
     if high_overlap_pairs:
         _logger.warning(
             "프로브 overlap 과다 쌍 감지 (threshold=%s): %s — 보고서에 별도 "
@@ -180,13 +243,26 @@ def probe_overlap_audit(
             n_contexts,
         )
 
+    policy_note = (
+        "Two-tier overlap policy (B-009): a pair with overlap >= "
+        f"{float(threshold)} is flagged in high_overlap_pairs as a diagnostic "
+        f"caveat; a pair with overlap >= {float(exclude_threshold)} is "
+        "additionally listed in exclude_merge_candidates as an "
+        "exclude-or-merge candidate for probe-set curation. Both tiers are "
+        "inclusive comparisons over instrumented input policies; flags are "
+        "diagnostics, never claims."
+    )
+
     return {
         "probes": names,
         "probe_versions": {n: probe_map[n].probe_version() for n in names},
         "n_contexts": n_contexts,
         "threshold": float(threshold),
+        "exclude_threshold": float(exclude_threshold),
         "selections_by_probe": selections_by_probe,
         "pairwise_probe_overlap": pairwise,
         "probe_entropy": probe_entropy,
         "high_overlap_pairs": high_overlap_pairs,
+        "exclude_merge_candidates": exclude_merge_candidates,
+        "policyNote": policy_note,
     }

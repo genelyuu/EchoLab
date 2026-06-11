@@ -31,10 +31,12 @@ from echo_bench.experiments.e_leakage_diagnostic import (
     EXPANDED_PROBE_SET,
     TRACK_L_MIN_FAMILIES,
     build_cross_family_excess_block,
+    build_overlap_caveat,
     evaluate_track_l_conditions,
     run_leakage_diagnostic,
 )
 from echo_bench.metrics.separability import CHANNEL_NAMES
+from echo_bench.probes.probe_overlap import PROBE_OVERLAP_EXCLUDE_THRESHOLD
 from echo_bench.probes.strategy_probes import DEFAULT_PROBE_SET, PROBES
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -248,6 +250,79 @@ def test_track_l_block_is_explicitly_diagnostic():
 
 
 # ---------------------------------------------------------------------------
+# Pure helper: build_overlap_caveat (B-009)
+# ---------------------------------------------------------------------------
+
+
+def _overlap_audit(flagged=(), exclude=()):
+    """Synthetic probeOverlap audit carrying just the keys the caveat reads."""
+    return {
+        "high_overlap_pairs": [
+            {"probe_a": a, "probe_b": b, "overlap": o} for a, b, o in flagged
+        ],
+        "exclude_merge_candidates": [
+            {"probe_a": a, "probe_b": b, "overlap": o} for a, b, o in exclude
+        ],
+    }
+
+
+def test_overlap_caveat_minority_flag_is_diagnostic_caveat():
+    # The E-019 production shape: 1 flagged pair in 1 of 5 families, nothing
+    # at the exclude tier -> a diagnostic caveat, NOT a blocking failure.
+    overlap_by_family = {
+        "42": _overlap_audit(
+            flagged=[("PREFER_LOW_COORD_MAGNITUDE", "PREFER_LOW_SALIENCE", 0.929)]
+        ),
+        "7": _overlap_audit(),
+        "101": _overlap_audit(),
+        "2025": _overlap_audit(),
+        "31337": _overlap_audit(),
+    }
+    caveat = build_overlap_caveat(overlap_by_family)
+    assert caveat["flaggedPairsByFamily"]["42"] == [
+        "PREFER_LOW_COORD_MAGNITUDE|PREFER_LOW_SALIENCE"
+    ]
+    assert caveat["flaggedPairsByFamily"]["7"] == []
+    assert caveat["excludeMergeCandidatesByFamily"]["42"] == []
+    assert caveat["familiesWithFlags"] == 1
+    assert caveat["totalFamilies"] == 5
+    note = caveat["caveatNote"]
+    assert "1 of 5 seed families" in note
+    assert "diagnostic caveat rather than a blocking failure" in note
+
+
+def test_overlap_caveat_exclude_tier_names_curation_candidates():
+    overlap_by_family = {
+        "42": _overlap_audit(
+            flagged=[("P_A", "P_B", 0.97)], exclude=[("P_A", "P_B", 0.97)]
+        ),
+        "7": _overlap_audit(),
+    }
+    caveat = build_overlap_caveat(overlap_by_family)
+    assert caveat["excludeMergeCandidatesByFamily"]["42"] == ["P_A|P_B"]
+    assert caveat["familiesWithFlags"] == 1
+    note = caveat["caveatNote"]
+    assert "exclude-or-merge candidate" in note
+    assert "curation" in note
+    assert "not a claim" in note
+
+
+def test_overlap_caveat_clean_case():
+    overlap_by_family = {"42": _overlap_audit(), "7": _overlap_audit()}
+    caveat = build_overlap_caveat(overlap_by_family)
+    assert caveat["familiesWithFlags"] == 0
+    assert caveat["totalFamilies"] == 2
+    assert all(v == [] for v in caveat["flaggedPairsByFamily"].values())
+    assert "exceeded the flag threshold" in caveat["caveatNote"]
+    assert "no" in caveat["caveatNote"].lower()
+
+
+def test_overlap_caveat_rejects_empty_input():
+    with pytest.raises(ValueError):
+        build_overlap_caveat({})
+
+
+# ---------------------------------------------------------------------------
 # Integration: small 2-family run
 # ---------------------------------------------------------------------------
 
@@ -312,6 +387,34 @@ def test_per_family_probe_overlap_audit():
         # Decision-time contexts: every probe episode contributes H rounds.
         assert overlap["n_contexts"] == n_probes * _KW["H"]
         assert isinstance(overlap["high_overlap_pairs"], list)
+        # B-009 two-tier keys travel with every family audit.
+        assert overlap["exclude_threshold"] == PROBE_OVERLAP_EXCLUDE_THRESHOLD
+        assert isinstance(overlap["exclude_merge_candidates"], list)
+        for candidate in overlap["exclude_merge_candidates"]:
+            assert candidate in overlap["high_overlap_pairs"]
+        assert "exclude-or-merge" in overlap["policyNote"]
+
+
+def test_overlap_caveat_block_in_report():
+    report = _report()
+    caveat = report["overlapCaveat"]
+    families = report["perFamily"]
+    assert sorted(caveat["flaggedPairsByFamily"]) == sorted(families)
+    assert sorted(caveat["excludeMergeCandidatesByFamily"]) == sorted(families)
+    assert caveat["totalFamilies"] == len(families)
+    # The caveat block must be CONSISTENT with the per-family audits.
+    expected_flagged = {
+        family: [
+            f"{p['probe_a']}|{p['probe_b']}"
+            for p in block["probeOverlap"]["high_overlap_pairs"]
+        ]
+        for family, block in families.items()
+    }
+    assert caveat["flaggedPairsByFamily"] == expected_flagged
+    assert caveat["familiesWithFlags"] == sum(
+        1 for pairs in expected_flagged.values() if pairs
+    )
+    assert isinstance(caveat["caveatNote"], str) and caveat["caveatNote"]
 
 
 def test_cross_family_excess_block_in_report():
@@ -357,6 +460,9 @@ def test_proxy_framing_carried():
     assert "NOT" in leakage_meta["disclaimer"]
     assert leakage_meta["deltaReference"] == E3_LEAKAGE_DELTA_REFERENCE
     assert leakage_meta["nullPermutations"] == _KW["n_permutations"]
+    assert (
+        leakage_meta["overlapExcludeThreshold"] == PROBE_OVERLAP_EXCLUDE_THRESHOLD
+    )
 
 
 def test_report_file_written_and_hashed():

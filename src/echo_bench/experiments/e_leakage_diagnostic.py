@@ -76,6 +76,7 @@ from echo_bench.metrics.separability import (
     separability_row_fields,
 )
 from echo_bench.probes.probe_overlap import (
+    PROBE_OVERLAP_EXCLUDE_THRESHOLD,
     PROBE_OVERLAP_THRESHOLD,
     probe_overlap_audit,
 )
@@ -88,6 +89,7 @@ __all__ = [
     "EXPANDED_PROBE_SET",
     "TRACK_L_MIN_FAMILIES",
     "build_cross_family_excess_block",
+    "build_overlap_caveat",
     "evaluate_track_l_conditions",
 ]
 
@@ -326,6 +328,101 @@ def evaluate_track_l_conditions(
         "ladderRef": TRACK_L_LADDER_REF,
         "note": _TRACK_L_NOTE,
         "perPolicy": per_policy_out,
+    }
+
+
+def _pair_keys(pairs: Any) -> List[str]:
+    """``"A|B"`` strings for a list of overlap pair dicts (audit order kept)."""
+    return [f"{p['probe_a']}|{p['probe_b']}" for p in pairs]
+
+
+def build_overlap_caveat(
+    overlap_by_family: Mapping[str, Mapping],
+) -> Dict[str, Any]:
+    """Build the cross-family probe-overlap caveat block (Task B-009, pure).
+
+    ``overlap_by_family`` maps family key to that family's B-007/B-009
+    ``probe_overlap_audit`` result (only ``high_overlap_pairs`` and
+    ``exclude_merge_candidates`` are read). The block summarises the
+    two-tier overlap policy outcome across families:
+
+    - ``flaggedPairsByFamily``: family -> ``"A|B"`` strings from that
+      family's ``high_overlap_pairs`` (>= flag threshold, diagnostic caveat),
+    - ``excludeMergeCandidatesByFamily``: same shape for the exclude tier
+      (>= exclude threshold, exclude-or-merge candidates),
+    - ``familiesWithFlags`` / ``totalFamilies``: flag prevalence counts,
+    - ``caveatNote``: an English note generated FROM the data. A flagged
+      pair in a strict minority of families (and nothing at the exclude
+      tier) is a diagnostic caveat, NOT a blocking failure — the E-019
+      production observation (1 pair in family 42 only, overlap 0.929) is
+      exactly this shape. Exclude-tier candidates are named as
+      exclude-or-merge candidates for probe-set curation. Every wording is
+      a diagnostic over instrumented input policies, never a claim.
+
+    Raises a Korean :class:`ValueError` on an empty mapping (fail closed).
+    """
+    if not overlap_by_family:
+        raise ValueError(
+            "E-019 overlap 캐비앳: overlap_by_family 가 비어 있습니다 "
+            "(패밀리가 최소 1개 필요)."
+        )
+
+    flagged_by_family: Dict[str, List[str]] = {}
+    exclude_by_family: Dict[str, List[str]] = {}
+    for family in overlap_by_family:
+        audit = overlap_by_family[family]
+        flagged_by_family[str(family)] = _pair_keys(
+            audit.get("high_overlap_pairs", [])
+        )
+        exclude_by_family[str(family)] = _pair_keys(
+            audit.get("exclude_merge_candidates", [])
+        )
+
+    total_families = len(flagged_by_family)
+    families_with_flags = sum(
+        1 for pairs in flagged_by_family.values() if pairs
+    )
+    families_with_exclude = sum(
+        1 for pairs in exclude_by_family.values() if pairs
+    )
+
+    if families_with_exclude > 0:
+        caveat_note = (
+            "Probe pair(s) at or above the exclude threshold were detected "
+            f"in {families_with_exclude} of {total_families} seed families; "
+            "these pairs are exclude-or-merge candidates for probe-set "
+            "curation. This remains a diagnostic over instrumented input "
+            "policies on a controlled testbed, not a claim."
+        )
+    elif families_with_flags == 0:
+        caveat_note = (
+            "No probe pair exceeded the flag threshold in any seed family; "
+            "no overlap caveat applies."
+        )
+    elif 2 * families_with_flags < total_families:
+        caveat_note = (
+            "High-overlap probe pair(s) were detected in "
+            f"{families_with_flags} of {total_families} seed families and "
+            "should be treated as a diagnostic caveat rather than a blocking "
+            "failure; no pair reached the exclude threshold. This is a "
+            "diagnostic, not a claim."
+        )
+    else:
+        caveat_note = (
+            "High-overlap probe pair(s) were detected in "
+            f"{families_with_flags} of {total_families} seed families (not a "
+            "strict minority); the flagged pairs warrant probe-set review "
+            "before interpreting probe-separability values, though no pair "
+            "reached the exclude threshold. This is a diagnostic, not a "
+            "claim."
+        )
+
+    return {
+        "flaggedPairsByFamily": flagged_by_family,
+        "excludeMergeCandidatesByFamily": exclude_by_family,
+        "familiesWithFlags": families_with_flags,
+        "totalFamilies": total_families,
+        "caveatNote": caveat_note,
     }
 
 
@@ -640,6 +737,7 @@ def run_leakage_diagnostic(
         "policies": sorted(E3_LEAKAGE_POLICIES),
         "deltaReference": E3_LEAKAGE_DELTA_REFERENCE,
         "overlapThreshold": PROBE_OVERLAP_THRESHOLD,
+        "overlapExcludeThreshold": PROBE_OVERLAP_EXCLUDE_THRESHOLD,
         "minFamilies": TRACK_L_MIN_FAMILIES,
         "configFreeze": {
             "policyName": freeze["policyName"],
@@ -709,6 +807,20 @@ def run_leakage_diagnostic(
         {family: block["table"] for family, block in family_blocks.items()}
     )
     track_l = evaluate_track_l_conditions(cross_block)
+    # B-009: cross-family two-tier overlap caveat (pure summary of the
+    # per-family probeOverlap audits; the full audits stay embedded per family).
+    overlap_caveat = build_overlap_caveat(
+        {family: block["probeOverlap"] for family, block in family_blocks.items()}
+    )
+    log_ko(
+        _logger,
+        "E-019 overlap 캐비앳 요약: "
+        f"flag 패밀리 {overlap_caveat['familiesWithFlags']}/"
+        f"{overlap_caveat['totalFamilies']}개, exclude 후보 패밀리 "
+        f"{sum(1 for v in overlap_caveat['excludeMergeCandidatesByFamily'].values() if v)}개 "
+        "(2단계 정책: >=0.9 flag 진단 캐비앳, >=0.95 제외/병합 후보 — "
+        "진단이며 클레임이 아닙니다).",
+    )
     log_ko(
         _logger,
         "E-019 교차 패밀리 집계 완료: "
@@ -781,6 +893,7 @@ def run_leakage_diagnostic(
         "nullPermutations": int(n_permutations),
         "saturationThreshold": SATURATION_UNIQUE_RATE_THRESHOLD,
         "overlapThreshold": PROBE_OVERLAP_THRESHOLD,
+        "overlapExcludeThreshold": PROBE_OVERLAP_EXCLUDE_THRESHOLD,
         "probeVersions": dict(probe_versions),
     }
 
@@ -823,6 +936,7 @@ def run_leakage_diagnostic(
         "config": run_params,
         "perFamily": per_family,
         "crossFamilyExcess": cross_block,
+        "overlapCaveat": overlap_caveat,
         "trackLConditions": track_l,
         "leakageMeta": leakage_meta,
         "replayAudit": replay_section,
@@ -840,7 +954,10 @@ def run_leakage_diagnostic(
             "multiple base-seed families. Reports null-corrected (D-015), "
             "channel-separated (D-016), saturation-diagnosed (D-017) excess "
             "NMI with a cross-family seeded-bootstrap CI (unit=seed_family), "
-            "plus the B-007 probe-overlap audit. The Track L conditions "
+            "plus the B-007 probe-overlap audit under the B-009 two-tier "
+            "overlap policy (>= 0.9 flagged as a diagnostic caveat; >= 0.95 "
+            "exclude-or-merge candidate; see overlapCaveat). The Track L "
+            "conditions "
             "block is a DIAGNOSTIC: unlocking the conditional rung is a "
             "documented ladder decision (G-009), never an automatic effect "
             "of this report. Every value is a PROXY — a system-level "
@@ -855,6 +972,7 @@ def run_leakage_diagnostic(
         "seedBatchId": seed_batch_id,
         "perFamily": per_family,
         "crossFamilyExcess": cross_block,
+        "overlapCaveat": overlap_caveat,
         "trackLConditions": track_l,
         "leakageMeta": leakage_meta,
         "replayAudit": replay_section,

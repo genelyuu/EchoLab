@@ -15,6 +15,7 @@ import pytest
 
 from echo_bench.env.trace_state import TraceState
 from echo_bench.probes.probe_overlap import (
+    PROBE_OVERLAP_EXCLUDE_THRESHOLD,
     PROBE_OVERLAP_THRESHOLD,
     probe_overlap_audit,
 )
@@ -165,6 +166,78 @@ def test_threshold_boundary_exact_overlap_is_flagged():
         _contexts_with_agreement(9, 1), probes, seed=1, threshold=0.95
     )
     assert result["high_overlap_pairs"] == []
+
+
+# --------------------------------------------------------------------------- #
+# Exclude tier (B-009): two-tier 0.9 flag / 0.95 exclude-merge policy
+# --------------------------------------------------------------------------- #
+def test_exclude_tier_boundary_exact_overlap_is_exclude_candidate():
+    probes = {
+        _MaxSalienceProbe.name: _MaxSalienceProbe(),
+        "PREFER_HIGH_EDGE_DENSITY": PROBES["PREFER_HIGH_EDGE_DENSITY"],
+    }
+    # 19/20 agreement = 0.95 = default exclude threshold -> exclude candidate
+    # (inclusive comparison, like the flag tier).
+    result = probe_overlap_audit(_contexts_with_agreement(19, 1), probes, seed=1)
+    assert result["exclude_threshold"] == PROBE_OVERLAP_EXCLUDE_THRESHOLD == 0.95
+    assert len(result["exclude_merge_candidates"]) == 1
+    assert result["exclude_merge_candidates"][0]["overlap"] == pytest.approx(0.95)
+    # 0.95 is also >= 0.9: the pair is flagged too.
+    assert len(result["high_overlap_pairs"]) == 1
+
+    # 18/20 = 0.9: flagged (>= flag threshold) but NOT an exclude candidate.
+    result = probe_overlap_audit(_contexts_with_agreement(18, 2), probes, seed=1)
+    assert len(result["high_overlap_pairs"]) == 1
+    assert result["exclude_merge_candidates"] == []
+
+
+def test_exclude_candidates_always_subset_of_high_overlap_pairs():
+    probes = {
+        _MaxSalienceProbe.name: _MaxSalienceProbe(),
+        _MaxSalienceCloneProbe.name: _MaxSalienceCloneProbe(),
+        _MinSalienceProbe.name: _MinSalienceProbe(),
+    }
+    result = probe_overlap_audit(_contexts_unique_argmax(), probes, seed=1)
+    # The identical clone pair overlaps at 1.0 -> both tiers.
+    assert len(result["exclude_merge_candidates"]) == 1
+    for candidate in result["exclude_merge_candidates"]:
+        assert candidate in result["high_overlap_pairs"]
+
+
+def test_bad_exclude_threshold_raises_korean_value_error():
+    probes = {
+        _MaxSalienceProbe.name: _MaxSalienceProbe(),
+        _MinSalienceProbe.name: _MinSalienceProbe(),
+    }
+    contexts = _contexts_unique_argmax(2)
+    # Outside [0, 1].
+    for bad in (-0.1, 1.1):
+        with pytest.raises(ValueError, match="임계값"):
+            probe_overlap_audit(contexts, probes, seed=1, exclude_threshold=bad)
+    # Below the flag threshold (flag <= exclude must hold).
+    with pytest.raises(ValueError, match="임계값"):
+        probe_overlap_audit(
+            contexts, probes, seed=1, threshold=0.9, exclude_threshold=0.8
+        )
+    # Equal thresholds are allowed (inclusive relationship).
+    result = probe_overlap_audit(
+        contexts, probes, seed=1, threshold=0.9, exclude_threshold=0.9
+    )
+    assert result["exclude_threshold"] == 0.9
+
+
+def test_policy_note_documents_two_tier_policy():
+    probes = {
+        _MaxSalienceProbe.name: _MaxSalienceProbe(),
+        _MinSalienceProbe.name: _MinSalienceProbe(),
+    }
+    result = probe_overlap_audit(_contexts_unique_argmax(2), probes, seed=1)
+    note = result["policyNote"]
+    assert isinstance(note, str)
+    assert "0.9" in note and "0.95" in note  # default two-tier thresholds
+    assert "exclude-or-merge" in note
+    assert "diagnostic" in note.lower()
+    assert "claim" in note.lower()
 
 
 # --------------------------------------------------------------------------- #
