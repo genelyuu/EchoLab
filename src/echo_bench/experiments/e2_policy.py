@@ -96,7 +96,7 @@ from echo_bench.policies.pseudo_user_model import PseudoUserModelPolicy
 from echo_bench.policies.random import RandomPolicy
 from echo_bench.policies.trace_greedy import TraceGreedyPolicy
 from echo_bench.policies.trace_lin_ucb import TraceLinUcbPolicy
-from echo_bench.probes.strategy_probes import PROBES
+from echo_bench.probes.strategy_probes import DEFAULT_PROBE_SET, PROBES
 from echo_bench.utils.hash import canonical_hash
 
 __all__ = [
@@ -246,7 +246,10 @@ def run_e2_policy(
     horizon_cfg = load_horizon(_HORIZON_CFG_PATH)
     H = default_h(horizon_cfg) if H is None else validate_h(int(H), horizon_cfg)
 
-    probe_names = sorted(PROBES)
+    # E2 runs the frozen B-004 probe trio (DEFAULT_PROBE_SET), NOT the full
+    # registry: the B-007 / TRD B-008 registry expansion must not change this
+    # run's probe list or report hashes. E-019 opts into the expanded set.
+    probe_names = sorted(DEFAULT_PROBE_SET)
 
     policy_cfgs: Dict[str, Dict[str, Any]] = {}
     for name, (_cls, cfg_file) in E2_POLICIES.items():

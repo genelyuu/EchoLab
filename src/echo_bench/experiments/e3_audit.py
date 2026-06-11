@@ -98,7 +98,11 @@ from echo_bench.policies.fixed_low_to_high import FixedLowToHighPolicy
 from echo_bench.policies.random import RandomPolicy
 from echo_bench.policies.trace_greedy import TraceGreedyPolicy
 from echo_bench.policies.trace_lin_ucb import TraceLinUcbPolicy
-from echo_bench.probes.strategy_probes import PROBES, get_probe
+from echo_bench.probes.strategy_probes import (
+    DEFAULT_PROBE_SET,
+    PROBES,
+    get_probe,
+)
 from echo_bench.utils.hash import canonical_hash
 
 __all__ = [
@@ -241,7 +245,10 @@ def run_e3_audit(
     horizon_cfg = load_horizon(_HORIZON_CFG_PATH)
     H = default_h(horizon_cfg) if H is None else validate_h(int(H), horizon_cfg)
 
-    probe_names = sorted(PROBES)
+    # E3 runs the frozen B-004 probe trio (DEFAULT_PROBE_SET), NOT the full
+    # registry: the B-007 / TRD B-008 registry expansion must not change this
+    # run's probe list or report hashes. E-019 opts into the expanded set.
+    probe_names = sorted(DEFAULT_PROBE_SET)
     fault_names = sorted(FAULTS)
 
     leakage_policy_cfgs: Dict[str, Dict[str, Any]] = {}
