@@ -15,20 +15,34 @@
   ],
   "scope": {
     "testbed": "ECHO-Bench controlled procedural k-slate testbed",
-    "policyFamilies": ["AXS UCB variants (new IDs; C-011 frozen set untouched)"],
-    "requiredScopeMarkers": ["within the tested policy families", "in this controlled testbed"]
+    "policyFamilies": [
+      "AXS UCB variants (new IDs; C-011 frozen set untouched)"
+    ],
+    "requiredScopeMarkers": [
+      "within the tested policy families",
+      "in this controlled testbed"
+    ]
   },
   "primaryEndpoint": {
     "metric": "slate_excess_nmi",
     "aggregation": "cross_family_paired_delta"
   },
-  "confirmatoryEndpoints": ["selection_excess_nmi", "combined_excess_nmi"],
+  "confirmatoryEndpoints": [
+    "selection_excess_nmi",
+    "combined_excess_nmi"
+  ],
   "utilityGuard": {
     "metric": "coordinate_coverage",
     "rule": "arm_mean >= RANDOM_mean"
   },
   "pairedUnit": "seed_family",
-  "evaluationFamilies": ["42", "7", "101", "2025", "31337"],
+  "evaluationFamilies": [
+    "42",
+    "7",
+    "101",
+    "2025",
+    "31337"
+  ],
   "signRule": {
     "minConsistentFamilies": 4,
     "totalFamilies": 5
@@ -47,19 +61,37 @@
     "scheduleArtifactPath": "configs/prereg/axs_004c_yoked_schedule_v1.json",
     "v3Note": "reused by AXS-NOISE-001; derived from held-out pilot family 999; evaluation families untouched by its derivation"
   },
-  "designContaminatedFamilies": ["123", "124", "777", "55555"],
+  "designContaminatedFamilies": [
+    "123",
+    "124",
+    "777",
+    "55555"
+  ],
   "pilotSummaryRef": {
     "path": "configs/prereg/axs_pilot_summary_v2.json",
     "summaryHash": "8eec34d221c59efa475014bb15f98945c0ac40fbbd2be74152491e5cd4041a89"
   },
   "experiments": {
     "AXS-IMP-001": {
-      "arms": ["freeze_at_1", "freeze_at_quarter", "freeze_at_half", "freeze_none"],
+      "arms": [
+        "freeze_at_1",
+        "freeze_at_quarter",
+        "freeze_at_half",
+        "freeze_none"
+      ],
       "armConfigs": {
-        "freeze_at_1": {"freeze_round": 1},
-        "freeze_at_quarter": {"freeze_round": "max(1, H//4)"},
-        "freeze_at_half": {"freeze_round": "max(1, H//2)"},
-        "freeze_none": {"freeze_round": null}
+        "freeze_at_1": {
+          "freeze_round": 1
+        },
+        "freeze_at_quarter": {
+          "freeze_round": "max(1, H//4)"
+        },
+        "freeze_at_half": {
+          "freeze_round": "max(1, H//2)"
+        },
+        "freeze_none": {
+          "freeze_round": null
+        }
       },
       "primaryContrast": {
         "name": "delta_imp",
@@ -88,11 +120,16 @@
       }
     },
     "AXS-NOISE-001": {
-      "arms": ["axs_ucb_default", "axs_yoked_bonus"],
+      "arms": [
+        "axs_ucb_default",
+        "axs_yoked_bonus"
+      ],
       "primaryContrast": {
         "name": "delta_noise",
         "definition": "per-family sep(axs_ucb_default) minus sep(axs_yoked_bonus)",
-        "acceptance": "sign positive in >=4/5 families AND cross_family_seeded_bootstrap ciLower > 0"
+        "acceptance": "sign positive in >=4/5 families AND cross_family_seeded_bootstrap ciLower > 0",
+        "gateComputes": true,
+        "reportDeltasIgnored": true
       },
       "secondaryContrast": {
         "yokedAbsence": "axs_yoked_bonus sep not >0 in >=4/5 families OR ciLower <= 0"
@@ -100,9 +137,16 @@
     },
     "AXS-TB-001": {
       "target": "delta_imp conclusion invariance over tie-break order",
-      "pair": ["freeze_at_1", "freeze_none"],
+      "pair": [
+        "freeze_at_1",
+        "freeze_none"
+      ],
       "baselineScheme": "canonical",
-      "variants": ["reverse", "hash_seeded", "feature_lexicographic"],
+      "variants": [
+        "reverse",
+        "hash_seeded",
+        "feature_lexicographic"
+      ],
       "decision": {
         "strict_pass": "sign unchanged AND within baseline 95% CI",
         "soft_pass": "sign+track unchanged, outside CI -> caveat",
@@ -110,7 +154,10 @@
       }
     },
     "AXS-ALPHA-EXP": {
-      "arms": ["axs_ucb_default", "axs_ucb_alpha0"],
+      "arms": [
+        "axs_ucb_default",
+        "axs_ucb_alpha0"
+      ],
       "exploratory": true,
       "noClaimLicense": true,
       "note": "Family-heterogeneous in critic pilot (reversed in 124); reported for the record, licenses no claim at any rung; ledger registration still required (no silent burial)."
@@ -151,8 +198,13 @@
   "branchCountFrozen": true,
   "claimTransitions": {
     "M2": {
-      "requiresPass": ["AXS-IMP-001", "AXS-NOISE-001"],
-      "requiredBranch": ["imprint_washout_supported"],
+      "requiresPass": [
+        "AXS-IMP-001",
+        "AXS-NOISE-001"
+      ],
+      "requiredBranch": [
+        "imprint_washout_supported"
+      ],
       "requiresInvariance": "AXS-TB-001 >= soft_pass",
       "softPassRequiresCaveatMarker": true,
       "scopeMarkersRequired": true,
@@ -184,12 +236,21 @@
       "H=16 spot check on one critic family preserves delta_imp and delta_noise signs",
       "branch reachability: extract coverage/degenerate flags from post-fix reports to confirm strong branch is reachable"
     ],
-    "criticFamilies": ["123", "124", "777", "55555"],
+    "criticFamilies": [
+      "123",
+      "124",
+      "777",
+      "55555"
+    ],
     "ledgerRegistration": false
   },
   "degenerateArmPolicy": {
     "mustReport": true,
-    "requiredFields": ["degenerate", "degenerateReason", "includedInMechanismClaim"],
+    "requiredFields": [
+      "degenerate",
+      "degenerateReason",
+      "includedInMechanismClaim"
+    ],
     "silentOmissionFails": true
   },
   "amendmentPolicy": {
