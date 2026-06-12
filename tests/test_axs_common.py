@@ -233,12 +233,19 @@ def smoke_policy():
     return RandomPolicy({"k": 4})
 
 
-def test_run_arm_family_smoke(smoke_bases, smoke_archive_cfg, smoke_policy):
+@pytest.fixture(scope="module")
+def smoke_policy_factory():
+    """정책 팩토리 픽스처 — run_arm_family(policy_factory=...) 용."""
+    from echo_bench.policies.random import RandomPolicy
+    return lambda: RandomPolicy({"k": 4})
+
+
+def test_run_arm_family_smoke(smoke_bases, smoke_archive_cfg, smoke_policy_factory):
     """H=2, pool=8, perm=3, seed=42: 필수 키 반환 + 타입 확인."""
     from echo_bench.experiments.axs_common import run_arm_family
 
     result = run_arm_family(
-        smoke_policy,
+        smoke_policy_factory,
         base_seed=42,
         H=2,
         k=4,
@@ -267,13 +274,13 @@ def test_run_arm_family_smoke(smoke_bases, smoke_archive_cfg, smoke_policy):
         assert type(v) is float
 
 
-def test_run_arm_family_coverage_values_length(smoke_bases, smoke_archive_cfg, smoke_policy):
+def test_run_arm_family_coverage_values_length(smoke_bases, smoke_archive_cfg, smoke_policy_factory):
     """coordinate_coverage_values 길이 == probe 수."""
     from echo_bench.experiments.axs_common import run_arm_family
     from echo_bench.experiments.e_leakage_diagnostic import EXPANDED_PROBE_SET
 
     result = run_arm_family(
-        smoke_policy,
+        smoke_policy_factory,
         base_seed=42,
         H=2,
         k=4,
@@ -285,7 +292,7 @@ def test_run_arm_family_coverage_values_length(smoke_bases, smoke_archive_cfg, s
     assert len(result["coordinate_coverage_values"]) == len(EXPANDED_PROBE_SET)
 
 
-def test_run_arm_family_deterministic(smoke_bases, smoke_archive_cfg, smoke_policy):
+def test_run_arm_family_deterministic(smoke_bases, smoke_archive_cfg, smoke_policy_factory):
     """동일 인수 → canonical_hash 동일 (결정론성)."""
     from echo_bench.experiments.axs_common import run_arm_family
     from echo_bench.utils.hash import canonical_hash
@@ -294,11 +301,11 @@ def test_run_arm_family_deterministic(smoke_bases, smoke_archive_cfg, smoke_poli
         return {k: v for k, v in r.items() if k != "roundsByProbe"}
 
     r1 = _reportable(run_arm_family(
-        smoke_policy, base_seed=42, H=2, k=4, pool_size=8,
+        smoke_policy_factory, base_seed=42, H=2, k=4, pool_size=8,
         n_permutations=3, bases=smoke_bases, archive_cfg=smoke_archive_cfg,
     ))
     r2 = _reportable(run_arm_family(
-        smoke_policy, base_seed=42, H=2, k=4, pool_size=8,
+        smoke_policy_factory, base_seed=42, H=2, k=4, pool_size=8,
         n_permutations=3, bases=smoke_bases, archive_cfg=smoke_archive_cfg,
     ))
     assert canonical_hash(r1) == canonical_hash(r2)
@@ -314,12 +321,12 @@ def _make_ledger(path: Path) -> Path:
     return p
 
 
-def _make_smoke_family_blocks(bases, archive_cfg, policy) -> dict:
+def _make_smoke_family_blocks(bases, archive_cfg, policy_factory) -> dict:
     """재현 가능한 소형 패밀리 블록 생성 (roundsByProbe 포함)."""
     from echo_bench.experiments.axs_common import run_arm_family, bootstrap_block, build_arm_entry
 
     raw = run_arm_family(
-        policy,
+        policy_factory,
         base_seed=42,
         H=2,
         k=4,
@@ -334,7 +341,7 @@ def _make_smoke_family_blocks(bases, archive_cfg, policy) -> dict:
 
 
 def test_build_axs_report_gate_required_keys(
-    tmp_path, smoke_bases, smoke_archive_cfg, smoke_policy
+    tmp_path, smoke_bases, smoke_archive_cfg, smoke_policy_factory
 ):
     """build_axs_report 출력에 게이트 필수 최상위 키 존재."""
     from echo_bench.experiments.axs_common import (
@@ -347,7 +354,7 @@ def test_build_axs_report_gate_required_keys(
     prereg_path = tmp_path / "prereg.json"
 
     raw = run_arm_family(
-        smoke_policy, base_seed=42, H=2, k=4, pool_size=8,
+        smoke_policy_factory, base_seed=42, H=2, k=4, pool_size=8,
         n_permutations=3, bases=smoke_bases, archive_cfg=smoke_archive_cfg,
     )
     family_block = {k: v for k, v in raw.items() if k != "roundsByProbe"}
@@ -366,7 +373,7 @@ def test_build_axs_report_gate_required_keys(
 
     def recompute_fn(family: str) -> dict:
         r = run_arm_family(
-            smoke_policy, base_seed=int(family), H=2, k=4, pool_size=8,
+            smoke_policy_factory, base_seed=int(family), H=2, k=4, pool_size=8,
             n_permutations=3, bases=smoke_bases, archive_cfg=smoke_archive_cfg,
         )
         return {k: v for k, v in r.items() if k != "roundsByProbe"}
@@ -397,7 +404,7 @@ def test_build_axs_report_gate_required_keys(
 
 
 def test_build_axs_report_hash_self_consistent(
-    tmp_path, smoke_bases, smoke_archive_cfg, smoke_policy
+    tmp_path, smoke_bases, smoke_archive_cfg, smoke_policy_factory
 ):
     """canonical_hash(report minus reportHash) == report['reportHash']."""
     from echo_bench.experiments.axs_common import (
@@ -409,14 +416,14 @@ def test_build_axs_report_hash_self_consistent(
     prereg_path = tmp_path / "prereg.json"
 
     raw = run_arm_family(
-        smoke_policy, base_seed=42, H=2, k=4, pool_size=8,
+        smoke_policy_factory, base_seed=42, H=2, k=4, pool_size=8,
         n_permutations=3, bases=smoke_bases, archive_cfg=smoke_archive_cfg,
     )
     family_block = {k: v for k, v in raw.items() if k != "roundsByProbe"}
 
     def recompute_fn(family: str) -> dict:
         r = run_arm_family(
-            smoke_policy, base_seed=int(family), H=2, k=4, pool_size=8,
+            smoke_policy_factory, base_seed=int(family), H=2, k=4, pool_size=8,
             n_permutations=3, bases=smoke_bases, archive_cfg=smoke_archive_cfg,
         )
         return {k: v for k, v in r.items() if k != "roundsByProbe"}
@@ -446,7 +453,7 @@ def test_build_axs_report_hash_self_consistent(
 
 
 def test_build_axs_report_no_numpy_bool_leakage(
-    tmp_path, smoke_bases, smoke_archive_cfg, smoke_policy
+    tmp_path, smoke_bases, smoke_archive_cfg, smoke_policy_factory
 ):
     """JSON 왕복 후 metric 위치에 numpy/bool 누수 없음."""
     from echo_bench.experiments.axs_common import (
@@ -457,14 +464,14 @@ def test_build_axs_report_no_numpy_bool_leakage(
     prereg_path = tmp_path / "prereg.json"
 
     raw = run_arm_family(
-        smoke_policy, base_seed=42, H=2, k=4, pool_size=8,
+        smoke_policy_factory, base_seed=42, H=2, k=4, pool_size=8,
         n_permutations=3, bases=smoke_bases, archive_cfg=smoke_archive_cfg,
     )
     family_block = {k: v for k, v in raw.items() if k != "roundsByProbe"}
 
     def recompute_fn(family: str) -> dict:
         r = run_arm_family(
-            smoke_policy, base_seed=int(family), H=2, k=4, pool_size=8,
+            smoke_policy_factory, base_seed=int(family), H=2, k=4, pool_size=8,
             n_permutations=3, bases=smoke_bases, archive_cfg=smoke_archive_cfg,
         )
         return {k: v for k, v in r.items() if k != "roundsByProbe"}
@@ -511,7 +518,7 @@ def test_build_axs_report_no_numpy_bool_leakage(
 
 
 def test_write_report_file_created(
-    tmp_path, smoke_bases, smoke_archive_cfg, smoke_policy
+    tmp_path, smoke_bases, smoke_archive_cfg, smoke_policy_factory
 ):
     """write_report: 예상 이름으로 파일 생성."""
     from echo_bench.experiments.axs_common import (
@@ -522,14 +529,14 @@ def test_write_report_file_created(
     prereg_path = tmp_path / "prereg.json"
 
     raw = run_arm_family(
-        smoke_policy, base_seed=42, H=2, k=4, pool_size=8,
+        smoke_policy_factory, base_seed=42, H=2, k=4, pool_size=8,
         n_permutations=3, bases=smoke_bases, archive_cfg=smoke_archive_cfg,
     )
     family_block = {k: v for k, v in raw.items() if k != "roundsByProbe"}
 
     def recompute_fn(family: str) -> dict:
         r = run_arm_family(
-            smoke_policy, base_seed=int(family), H=2, k=4, pool_size=8,
+            smoke_policy_factory, base_seed=int(family), H=2, k=4, pool_size=8,
             n_permutations=3, bases=smoke_bases, archive_cfg=smoke_archive_cfg,
         )
         return {k: v for k, v in r.items() if k != "roundsByProbe"}
@@ -570,7 +577,7 @@ def test_write_report_file_created(
 
 
 def test_build_axs_report_deterministic(
-    tmp_path, smoke_bases, smoke_archive_cfg, smoke_policy
+    tmp_path, smoke_bases, smoke_archive_cfg, smoke_policy_factory
 ):
     """동일 입력 → 동일 reportHash (결정론성)."""
     from echo_bench.experiments.axs_common import (
@@ -581,14 +588,14 @@ def test_build_axs_report_deterministic(
     prereg_path = tmp_path / "prereg.json"
 
     raw = run_arm_family(
-        smoke_policy, base_seed=42, H=2, k=4, pool_size=8,
+        smoke_policy_factory, base_seed=42, H=2, k=4, pool_size=8,
         n_permutations=3, bases=smoke_bases, archive_cfg=smoke_archive_cfg,
     )
     family_block = {k: v for k, v in raw.items() if k != "roundsByProbe"}
 
     def recompute_fn(family: str) -> dict:
         r = run_arm_family(
-            smoke_policy, base_seed=int(family), H=2, k=4, pool_size=8,
+            smoke_policy_factory, base_seed=int(family), H=2, k=4, pool_size=8,
             n_permutations=3, bases=smoke_bases, archive_cfg=smoke_archive_cfg,
         )
         return {k: v for k, v in r.items() if k != "roundsByProbe"}
@@ -621,13 +628,142 @@ def test_build_axs_report_deterministic(
     assert r1["reportHash"] == r2["reportHash"]
 
 
+def test_build_axs_report_hash_semantics_field(
+    tmp_path, smoke_bases, smoke_archive_cfg, smoke_policy_factory
+):
+    """hashSemantics 필드 존재 + pack.reportHash == pre-pack body hash."""
+    from echo_bench.experiments.axs_common import (
+        run_arm_family, build_arm_entry, build_axs_report,
+    )
+    from echo_bench.utils.hash import canonical_hash
+
+    shutil.copy(_REAL_PREREG, tmp_path / "prereg.json")
+    prereg_path = tmp_path / "prereg.json"
+
+    raw = run_arm_family(
+        smoke_policy_factory, base_seed=42, H=2, k=4, pool_size=8,
+        n_permutations=3, bases=smoke_bases, archive_cfg=smoke_archive_cfg,
+    )
+    family_block = {k: v for k, v in raw.items() if k != "roundsByProbe"}
+
+    def recompute_fn(family: str) -> dict:
+        r = run_arm_family(
+            smoke_policy_factory, base_seed=int(family), H=2, k=4, pool_size=8,
+            n_permutations=3, bases=smoke_bases, archive_cfg=smoke_archive_cfg,
+        )
+        return {k: v for k, v in r.items() if k != "roundsByProbe"}
+
+    report = build_axs_report(
+        "AXS-003",
+        body_extra={
+            "baselines": {"RANDOM": {"coordinate_coverage_mean": 0.90}},
+            "arms": {"t": build_arm_entry(
+                "slate_excess_nmi", {"42": float(raw["slate_excess_nmi"])},
+                coverage_mean=float(raw["coordinate_coverage_mean"]),
+                random_coverage_mean=0.90,
+                degenerate_reason_prefix="t",
+            )},
+        },
+        family_blocks={"42": family_block},
+        recompute_fn=recompute_fn,
+        run_params={"H": 2, "k": 4, "pool_size": 8, "n_permutations": 3},
+        prereg_path=prereg_path,
+        replay_mode="first_family",
+        replay_sample_size=1,
+        git_runner=_good_git_runner,
+    )
+
+    # hashSemantics 필드 존재 + 문자열 타입
+    assert "hashSemantics" in report, "hashSemantics 필드 누락"
+    assert isinstance(report["hashSemantics"], str)
+
+    # pack.reportHash == canonical_hash(report minus {reproducibilityPack, packHash, reportHash})
+    pre_pack_body = {
+        k: v for k, v in report.items()
+        if k not in {"reproducibilityPack", "packHash", "reportHash"}
+    }
+    expected_pack_report_hash = canonical_hash(pre_pack_body)
+    actual_pack_report_hash = report["reproducibilityPack"]["reportHash"]
+    assert actual_pack_report_hash == expected_pack_report_hash, (
+        f"pack.reportHash={actual_pack_report_hash[:12]} != "
+        f"pre-pack body hash={expected_pack_report_hash[:12]}"
+    )
+
+
+def test_build_axs_report_seed_batch_id_includes_probes(
+    tmp_path, smoke_bases, smoke_archive_cfg, smoke_policy_factory
+):
+    """seedBatchId 는 probe 목록을 포함해 계산됨: 해시 재구성으로 검증."""
+    from echo_bench.experiments.axs_common import (
+        run_arm_family, build_arm_entry, build_axs_report,
+    )
+    from echo_bench.experiments.e_leakage_diagnostic import EXPANDED_PROBE_SET
+    from echo_bench.utils.hash import canonical_hash
+
+    shutil.copy(_REAL_PREREG, tmp_path / "prereg.json")
+    prereg_path = tmp_path / "prereg.json"
+
+    raw = run_arm_family(
+        smoke_policy_factory, base_seed=42, H=2, k=4, pool_size=8,
+        n_permutations=3, bases=smoke_bases, archive_cfg=smoke_archive_cfg,
+    )
+    family_block = {k: v for k, v in raw.items() if k != "roundsByProbe"}
+
+    run_params = {"H": 2, "k": 4, "pool_size": 8, "n_permutations": 3}
+
+    def recompute_fn(family: str) -> dict:
+        r = run_arm_family(
+            smoke_policy_factory, base_seed=int(family), H=2, k=4, pool_size=8,
+            n_permutations=3, bases=smoke_bases, archive_cfg=smoke_archive_cfg,
+        )
+        return {k: v for k, v in r.items() if k != "roundsByProbe"}
+
+    report = build_axs_report(
+        "AXS-003",
+        body_extra={
+            "baselines": {"RANDOM": {"coordinate_coverage_mean": 0.90}},
+            "arms": {"t": build_arm_entry(
+                "slate_excess_nmi", {"42": float(raw["slate_excess_nmi"])},
+                coverage_mean=float(raw["coordinate_coverage_mean"]),
+                random_coverage_mean=0.90,
+                degenerate_reason_prefix="t",
+            )},
+        },
+        family_blocks={"42": family_block},
+        recompute_fn=recompute_fn,
+        run_params=run_params,
+        prereg_path=prereg_path,
+        replay_mode="first_family",
+        replay_sample_size=1,
+        git_runner=_good_git_runner,
+    )
+
+    # seedBatchId 재구성: probes 키 포함 여부 검증
+    stable = {k: run_params[k] for k in sorted(run_params) if k != "configFreeze"}
+    expected_with_probes = canonical_hash(
+        {"experiment": "AXS-003", "probes": list(EXPANDED_PROBE_SET), **stable}
+    )
+    expected_without_probes = canonical_hash(
+        {"experiment": "AXS-003", **stable}
+    )
+
+    actual = report["seedBatchId"]
+    assert actual == expected_with_probes, (
+        "seedBatchId 가 probe 목록을 포함하지 않음"
+    )
+    # probes 없이 계산한 해시와는 달라야 함
+    assert actual != expected_without_probes, (
+        "seedBatchId 가 probes 없는 해시와 동일 — probes 가 실제로 포함되지 않음"
+    )
+
+
 # ===========================================================================
 # register_report 테스트
 # ===========================================================================
 
 
 def test_register_report_ledger_entry(
-    tmp_path, smoke_bases, smoke_archive_cfg, smoke_policy
+    tmp_path, smoke_bases, smoke_archive_cfg, smoke_policy_factory
 ):
     """register_report: 8-키 원장 엔트리 추가됨."""
     from echo_bench.experiments.axs_common import (
@@ -641,14 +777,14 @@ def test_register_report_ledger_entry(
     ledger_path = _make_ledger(tmp_path)
 
     raw = run_arm_family(
-        smoke_policy, base_seed=42, H=2, k=4, pool_size=8,
+        smoke_policy_factory, base_seed=42, H=2, k=4, pool_size=8,
         n_permutations=3, bases=smoke_bases, archive_cfg=smoke_archive_cfg,
     )
     family_block = {k: v for k, v in raw.items() if k != "roundsByProbe"}
 
     def recompute_fn(family: str) -> dict:
         r = run_arm_family(
-            smoke_policy, base_seed=int(family), H=2, k=4, pool_size=8,
+            smoke_policy_factory, base_seed=int(family), H=2, k=4, pool_size=8,
             n_permutations=3, bases=smoke_bases, archive_cfg=smoke_archive_cfg,
         )
         return {k: v for k, v in r.items() if k != "roundsByProbe"}

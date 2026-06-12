@@ -35,6 +35,8 @@ from echo_bench.experiments.e_leakage_diagnostic import (
     _build_family_pool,
     build_replay_section,
 )
+from echo_bench.metrics.leakage import DEFAULT_NULL_PERMUTATIONS
+from echo_bench.policies.base import Policy
 from echo_bench.experiments.e_seed_families import (
     DEFAULT_BASE_SEEDS,
     verify_trace_greedy_freeze,
@@ -104,7 +106,7 @@ def _git_commit_hash(git_runner: Optional[Callable[[List[str]], str]] = None) ->
 
 
 def run_arm_family(
-    policy: Any,
+    policy_factory: Callable[[], Policy],
     base_seed: int,
     *,
     H: int,
@@ -117,8 +119,10 @@ def run_arm_family(
     """하나의 패밀리(base_seed)에 대해 전체 프로브 에피소드를 실행하고 블록 반환.
 
     e_leakage_diagnostic._run_family 패턴을 AXS 실험에 맞게 적용.
-    policy 는 고정된 하나의 arm (AXS 실험은 policy-per-arm 단일 실행).
+    policy_factory 는 프로브별 새 인스턴스를 생성하는 호출 가능 객체.
     EXPANDED_PROBE_SET 의 각 프로브별로 에피소드 1회씩 실행.
+
+    정책은 probe별 새 인스턴스 — 상태 누적 차단.
 
     반환:
         dict — slate_excess_nmi(float), coordinate_coverage_values(list[float]),
@@ -136,10 +140,10 @@ def run_arm_family(
 
     for probe_name in EXPANDED_PROBE_SET:
         probe = get_probe(probe_name)
-        # 프로브별 seed: e_leakage_diagnostic._run_family 와 동일 방식
+        # 프로브별 신규 정책 인스턴스: e_leakage_diagnostic._run_family 와 동일 방식
         probe_trace = run_episode(
             pool,
-            policy,
+            policy_factory(),
             int(base_seed),
             H,
             int(k),
@@ -159,7 +163,8 @@ def run_arm_family(
         traces_by_probe,
         n_permutations=n_permutations,
     )
-    slate_excess_nmi = float(round(channel_sep["slate_excess_nmi"], 12))
+    # 반올림 없이 raw float 반환 — e_leakage separability_row_fields 와의 바이트 호환성 유지
+    slate_excess_nmi = float(channel_sep["slate_excess_nmi"])
 
     # coordinate_coverage: name-sorted 프로브 순서
     coverage_values: List[float] = []
@@ -299,13 +304,19 @@ def build_axs_report(
     # 2. prereg 스탬프
     prereg_stamp = build_prereg_stamp(prereg_path, git_runner=git_runner)
 
-    # 3. seedBatchId — run_params 에서 안정적 키들만 사용
+    # 3. seedBatchId — run_params 에서 안정적 키들만 사용 + probe 목록 포함
     stable = {
         k: run_params[k]
         for k in sorted(run_params)
         if k not in ("configFreeze",)  # mutable 제외
     }
-    seed_batch_id = canonical_hash({"experiment": experiment_id, **stable})
+    seed_batch_id = canonical_hash(
+        {
+            "experiment": experiment_id,
+            "probes": list(EXPANDED_PROBE_SET),
+            **stable,
+        }
+    )
 
     # 4. 인라인 리플레이 감사
     replay_section = build_replay_section(
@@ -357,19 +368,31 @@ def build_axs_report(
     output_hash = canonical_hash(results_body)
     report["outputHash"] = output_hash
 
+    # hashSemantics: 두 reportHash 필드의 의미 명시 (e_leakage_diagnostic 패턴 준수).
+    # pack/packHash/reportHash 삽입 전에 추가 → pre-pack body hash 에 포함됨.
+    # 따라서 pack.reportHash == canonical_hash(report - {reproducibilityPack, packHash, reportHash})
+    report["hashSemantics"] = (
+        "top-level reportHash = canonical_hash of the complete report minus the "
+        "reportHash key (i.e. canonical_hash(report - {reportHash})); "
+        "reproducibilityPack.reportHash = hash of the report body before the "
+        "pack / packHash / reportHash fields were inserted (pre-pack body hash)."
+    )
+
     # ReproducibilityPack: 먼저 임시 reportHash 로 생성
     commit_hash = _git_commit_hash(git_runner)
-    # reportHash 를 먼저 계산하기 위한 임시 pack (reportHash 자리에 placeholder)
-    # 실제 흐름: report 에 pack/packHash 추가 후 reportHash 계산
-    # e_leakage_diagnostic 패턴: reportHash = canonical_hash(report-minus-reportHash),
-    # 그 후 pack 생성 (reportHash 포함).
-    # 따라서 순서: 1) report 조립(pack 제외) 2) reportHash 계산 3) pack 생성 4) pack 삽입
+    # 실제 흐름: hashSemantics 포함된 바디 기반 pre-pack body hash 계산 후
+    #           pack 생성(reportHash 에 저장) → pack/packHash 삽입 → 최종 reportHash 계산.
+    # 따라서: pack.reportHash == canonical_hash(report - {reproducibilityPack, packHash, reportHash})
 
-    # 임시로 reportHash 계산 (pack/packHash 없는 상태)
-    temp_report_no_hash = {k: v for k, v in report.items() if k != "reportHash"}
-    temp_report_hash = canonical_hash(temp_report_no_hash)
+    # pre-pack body hash: pack/packHash/reportHash 삽입 전 바디 해시
+    # → reproducibilityPack.reportHash 에 저장됨 (hashSemantics 참조)
+    pre_pack_body = {
+        k: v for k, v in report.items()
+        if k not in {"reproducibilityPack", "packHash", "reportHash"}
+    }
+    pre_pack_body_hash = canonical_hash(pre_pack_body)
 
-    # pack 생성 (올바른 reportHash 포함)
+    # pack 생성 (pre-pack body hash 포함)
     pack = ReproducibilityPack(
         configHash=canonical_hash(run_params),
         commitHash=commit_hash,
@@ -378,7 +401,7 @@ def build_axs_report(
         slateHash=slate_hash,
         traceHash=trace_hash,
         outputHash=output_hash,
-        reportHash=temp_report_hash,
+        reportHash=pre_pack_body_hash,
         seedBatchId=seed_batch_id,
     )
     report["reproducibilityPack"] = pack.to_dict()
@@ -493,8 +516,9 @@ def make_axs_arg_parser(description: str) -> argparse.ArgumentParser:
         help="후보 풀 크기",
     )
     parser.add_argument(
-        "--n-permutations", type=int, default=200, dest="n_permutations",
-        help="D-015 null 치환 수 (기본값: 200)",
+        "--n-permutations", type=int, default=DEFAULT_NULL_PERMUTATIONS,
+        dest="n_permutations",
+        help=f"D-015 null 치환 수 (기본값: {DEFAULT_NULL_PERMUTATIONS})",
     )
     parser.add_argument(
         "--base-seeds",
