@@ -1,0 +1,29 @@
+# ECHO-Bench AXS_UCB_DEFAULT policy configuration (Task AXS-P0 T1).
+#
+# AXS mechanism-experiment policy arm. Trace-only linear-UCB contextual bandit
+# with preregistered experimental seams (alpha, freeze_round, tie_break_order).
+# Every context feature is computed EXCLUSIVELY from observable trace fields
+# (accumulated coordinate centroid, complexity-band progress) and observable
+# card fields. There is NO latent user vector in this policy and it must NEVER
+# read latent / persona / emotion / preference / demographic / free-text signals.
+policy: AXS_UCB_DEFAULT
+k: 4
+# UCB exploration coefficient: score = mean + alpha * bonus.
+alpha: 1.0
+# Ridge regularizer seeding A = lambda_reg * I.
+lambda_reg: 1.0
+# Ordered active feature blocks (all observable / trace-only):
+#   coordinate_gap  -> per-dimension |card coord - trace centroid| (4 dims)
+#   band_progress   -> alignment with the next complexity band
+#   redundancy      -> closeness to the trace centroid (coverage duplication)
+#   bias            -> constant term
+features:
+  - coordinate_gap
+  - band_progress
+  - redundancy
+  - bias
+# freeze_round: null means no freeze (full trace used for bandit state).
+freeze_round: null
+# tie_break_order: canonical matches parent TraceLinUcbPolicy behaviour.
+# Allowed: canonical, reverse, hash_seeded, feature_lexicographic.
+tie_break_order: canonical
