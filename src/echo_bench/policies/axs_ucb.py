@@ -52,7 +52,17 @@ _logger = get_logger(__name__)
 
 # Allowed tie_break_order values (string identifiers — English).
 _ALLOWED_TIE_BREAK_ORDERS = frozenset(
-    {"canonical", "reverse", "hash_seeded", "feature_lexicographic"}
+    {
+        "canonical",
+        "reverse",
+        "hash_seeded",
+        "feature_lexicographic",
+        # v2 trace-free tie-break variants (AXS-ENTRY-001).
+        # Seed material: poolHash, seed, roundIndex, policyVersion, salt.
+        # No traceHash — the tiebreak carries zero history information.
+        "trace_free",
+        "trace_free_alt1",
+    }
 )
 
 # Repo root: src/echo_bench/policies/axs_ucb.py -> parents[3] = repo root
@@ -76,6 +86,28 @@ def _validate_freeze_round(freeze_round: Any, policy_label: str) -> None:
         raise ValueError(
             f"{policy_label}: freeze_round 값이 유효하지 않습니다 "
             f"({freeze_round!r}). None 또는 0 이상의 정수만 허용합니다."
+        )
+
+
+def _validate_ctx_freeze_round(ctx_freeze_round: Any, policy_label: str) -> None:
+    """Raise Korean ValueError if ctx_freeze_round is not None or a non-negative int.
+
+    Booleans are rejected (True/False are int subclasses but not valid rounds).
+    Float values such as 2.5 are rejected. Only None or a plain non-negative int
+    is allowed. This validator is analogous to _validate_freeze_round but applies
+    to the ctx_freeze_round seam (context-feature freeze) and emits a distinct
+    message naming the key.
+    """
+    if ctx_freeze_round is None:
+        return
+    if (
+        not isinstance(ctx_freeze_round, int)
+        or isinstance(ctx_freeze_round, bool)
+        or ctx_freeze_round < 0
+    ):
+        raise ValueError(
+            f"{policy_label}: ctx_freeze_round 값이 유효하지 않습니다 "
+            f"({ctx_freeze_round!r}). None 또는 0 이상의 정수만 허용합니다."
         )
 
 
@@ -132,10 +164,24 @@ class AxsUcbPolicy(TraceLinUcbPolicy):
         When set, the bandit state ``(A, b)`` is built from only the first
         ``freeze_round`` rounds; live context features and tiebreak seed
         material still use the full trace.
+    ctx_freeze_round : int or None, default None
+        When set to ``f``, the live-context computation (centroid and
+        ``max_band``, used to derive ``target_band_idx``) uses only the first
+        ``f`` rounds: ``TraceView(trace.rounds()[:f])`` is passed to
+        ``_trace_centroid_and_band`` instead of the live trace. All other
+        computations — bandit-state replay (governed by ``freeze_round``
+        independently) and canonical tie-break seed material (traceHash is
+        always taken from the LIVE trace) — remain unchanged. The two seams
+        are **orthogonal** and may be set independently. ``f=0`` produces a
+        probe-blind context: the empty-trace default centroid/band is used
+        every round.
     tie_break_order : str, default "canonical"
         Alters only the tie components (positions 3–4) of the rank-key tuple.
         Allowed: ``"canonical"``, ``"reverse"``, ``"hash_seeded"``,
-        ``"feature_lexicographic"``.
+        ``"feature_lexicographic"``, ``"trace_free"``, ``"trace_free_alt1"``.
+        The ``trace_free`` and ``trace_free_alt1`` variants seed the tiebreak
+        RNG from ``{poolHash, seed, roundIndex, policyVersion, salt}`` with no
+        ``traceHash``, so the tie-break carries zero history information.
     """
 
     def __init__(self, config: Dict[str, Any]) -> None:
@@ -159,10 +205,12 @@ class AxsUcbPolicy(TraceLinUcbPolicy):
         lambda_reg = float(effective.get("lambda_reg", DEFAULT_LAMBDA))
         active = tuple(effective.get("features") or DEFAULT_FEATURES)
         freeze_round: Optional[int] = effective.get("freeze_round", None)
+        ctx_freeze_round: Optional[int] = effective.get("ctx_freeze_round", None)
         tie_break_order: str = str(effective.get("tie_break_order", "canonical"))
 
-        # SEAM 2: freeze_round validation
+        # SEAM 2: freeze_round and ctx_freeze_round validation
         _validate_freeze_round(freeze_round, "AXS_UCB 정책")
+        _validate_ctx_freeze_round(ctx_freeze_round, "AXS_UCB 정책")
 
         if tie_break_order not in _ALLOWED_TIE_BREAK_ORDERS:
             raise ValueError(
@@ -186,18 +234,54 @@ class AxsUcbPolicy(TraceLinUcbPolicy):
         A_inv = np.linalg.inv(A)
         theta = A_inv @ b
 
-        # Live context (centroid/band) always uses the full trace.
-        centroid, max_band = self._trace_centroid_and_band(trace)
+        # Context features (centroid/band) — Seam: ctx_freeze_round.
+        # When ctx_freeze_round is set, the context view is frozen to the first
+        # ctx_freeze_round rounds; the bandit state (above) is governed
+        # independently by freeze_round. The two seams are orthogonal.
+        # IMPORTANT: canonical tie-break seed material always uses the LIVE
+        # traceHash regardless of ctx_freeze_round (the seams stay orthogonal).
+        if ctx_freeze_round is not None:
+            context_trace: Any = TraceView(trace.rounds()[:ctx_freeze_round])
+        else:
+            context_trace = trace
+        centroid, max_band = self._trace_centroid_and_band(context_trace)
         target_band_idx = (
             min(max_band + 1, len(BAND_ORDER) - 1) if max_band >= 0 else 0
         )
 
-        # Tiebreak RNG — seed material includes traceHash (live), poolHash, seed,
-        # and policyVersion. For hash_seeded mode, add a fixed salt.
-        # feature_lexicographic uses (feat_key, cid) instead, so RNG is not needed.
+        # Tiebreak RNG — seed material depends on tie_break_order mode:
+        # - canonical/reverse/hash_seeded: includes traceHash from LIVE trace.
+        # - trace_free/trace_free_alt1: no traceHash; uses roundIndex (=len of
+        #   LIVE trace.rounds()) so floats vary per round.
+        # - feature_lexicographic: no RNG needed (uses feat_key + cid).
+        # NOTE: traceHash for tie-break seed is ALWAYS from the live trace,
+        # even when ctx_freeze_round is set. ctx_freeze_round only affects
+        # context features, not the tie-break seed material.
         pool_hash = canonical_hash([c["cardId"] for c in pool])
         tiebreak: Dict[str, float] = {}
-        if tie_break_order != "feature_lexicographic":
+        if tie_break_order == "trace_free":
+            tf_seed_material: Dict[str, Any] = {
+                "poolHash": pool_hash,
+                "seed": seed,
+                "roundIndex": len(trace.rounds()),
+                "policyVersion": self.policy_version(),
+                "salt": "axs-v2-trace-free-tb-v1",
+            }
+            tf_seed_hex = canonical_hash(tf_seed_material)
+            rng = random.Random(int(tf_seed_hex, 16))
+            tiebreak = {c["cardId"]: rng.random() for c in pool}
+        elif tie_break_order == "trace_free_alt1":
+            tf_alt1_seed_material: Dict[str, Any] = {
+                "poolHash": pool_hash,
+                "seed": seed,
+                "roundIndex": len(trace.rounds()),
+                "policyVersion": self.policy_version(),
+                "salt": "axs-v2-trace-free-tb-alt1",
+            }
+            tf_alt1_seed_hex = canonical_hash(tf_alt1_seed_material)
+            rng = random.Random(int(tf_alt1_seed_hex, 16))
+            tiebreak = {c["cardId"]: rng.random() for c in pool}
+        elif tie_break_order != "feature_lexicographic":
             base_seed_material: Dict[str, Any] = {
                 "poolHash": pool_hash,
                 "traceHash": trace.trace_hash(),
@@ -260,6 +344,11 @@ class AxsUcbPolicy(TraceLinUcbPolicy):
                 x_card = feature_cache[cid]
                 feat_key = tuple(round(float(v), 12) for v in x_card)
                 return primary + (feat_key, cid)
+            elif tie_break_order in ("trace_free", "trace_free_alt1"):
+                # trace_free / trace_free_alt1: same rank-key structure as
+                # canonical (primary + float + cid) but tiebreak floats are
+                # seeded without traceHash (computed above).
+                return primary + (tiebreak[cid], cid)
             else:
                 # Should not reach here — checked above.
                 raise ValueError(
@@ -290,8 +379,8 @@ class AxsUcbPolicy(TraceLinUcbPolicy):
             _logger,
             f"AXS_UCB 슬레이트 확정: k={k}, alpha={alpha}, "
             f"tie_break_order={tie_break_order}, "
-            f"freeze_round={freeze_round}, traceLen={len(trace.rounds())}, "
-            f"poolHash={pool_hash}",
+            f"freeze_round={freeze_round}, ctx_freeze_round={ctx_freeze_round}, "
+            f"traceLen={len(trace.rounds())}, poolHash={pool_hash}",
         )
         return [c["cardId"] for c in slate]
 
@@ -388,7 +477,7 @@ class AxsUcbPolicy(TraceLinUcbPolicy):
         def fallback_key(c: Dict[str, Any]) -> tuple:
             cid = c["cardId"]
             ucb_neg = -comp_cache[cid]["ucb"]
-            if tie_break_order in ("canonical", "hash_seeded"):
+            if tie_break_order in ("canonical", "hash_seeded", "trace_free", "trace_free_alt1"):
                 return (ucb_neg, tiebreak[cid], cid)
             elif tie_break_order == "reverse":
                 neg_tb = -tiebreak[cid]
@@ -462,6 +551,13 @@ class AxsYokedBonusPolicy(AxsUcbPolicy):
             raise ValueError(
                 f"AXS_YOKED 정책: tie_break_order='{tbo}' 은 허용되지 않습니다. "
                 "사전등록된 yoked arm은 'canonical' 만 지원합니다."
+            )
+        # ctx_freeze_round is v2-only; AxsYokedBonusPolicy is a v1-only arm.
+        # Reject it at init to fail closed.
+        if "ctx_freeze_round" in config:
+            raise ValueError(
+                "AXS_YOKED 정책: ctx_freeze_round 는 v1 yoked arm에서 허용되지 않습니다. "
+                "v2 실험에는 AxsUcbPolicy 를 사용하십시오."
             )
 
     def policy_version(self) -> str:
@@ -603,6 +699,12 @@ class AxsYokedBonusPolicy(AxsUcbPolicy):
                     f"AXS_YOKED 정책: per-call config의 tie_break_order="
                     f"{per_call_tbo!r} 는 허용되지 않습니다. "
                     "yoked arm은 'canonical' 만 지원합니다."
+                )
+            if "ctx_freeze_round" in config:
+                raise ValueError(
+                    "AXS_YOKED 정책: per-call config 에 ctx_freeze_round 키가 "
+                    "포함되어 있습니다. v1 yoked arm은 ctx_freeze_round 를 "
+                    "지원하지 않습니다."
                 )
 
         k = int(effective["k"])

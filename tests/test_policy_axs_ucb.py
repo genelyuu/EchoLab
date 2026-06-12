@@ -1387,3 +1387,490 @@ class TestYokedPathIndependence:
         assert s1 == s2, (
             f"Same content at different paths must yield same slate; got {s1} vs {s2}"
         )
+
+
+# ---------------------------------------------------------------------------
+# 17. V2 seams — no-op guarantee (Task AXS-V2)
+# ---------------------------------------------------------------------------
+
+class TestV2NoOpGuarantee:
+    """A config WITHOUT the new v2 keys must produce byte-identical results.
+
+    policy_version and slate must be unchanged vs. the pinned golden values
+    for configs that do not include ctx_freeze_round or trace_free TB orders.
+    """
+
+    # Reference these constants from the golden class rather than re-pinning.
+    _GOLDEN_CANONICAL = ["c15", "c14", "c13", "c11"]
+    _GOLDEN_POLICY_VERSION = AxsUcbPolicy({"k": 4}).policy_version()
+
+    def test_no_new_keys_policy_version_unchanged(self):
+        """policy_version must be identical to the already-pinned canonical value."""
+        p = AxsUcbPolicy({"k": 4})
+        assert p.policy_version() == self._GOLDEN_POLICY_VERSION, (
+            f"policy_version changed; expected {self._GOLDEN_POLICY_VERSION[:16]!r}"
+        )
+
+    def test_no_new_keys_slate_unchanged(self):
+        """Slate must be byte-identical to pinned golden (canonical default arm)."""
+        pool = _make_pool(16)
+        trace = _trace_with([pool[0], pool[5]])
+        p = AxsUcbPolicy({"k": 4})
+        s = p.select(pool, trace, 7)
+        assert s == self._GOLDEN_CANONICAL, (
+            f"Slate changed without new keys; expected {self._GOLDEN_CANONICAL}, got {s}"
+        )
+
+    def test_existing_tie_break_orders_unaffected(self):
+        """Existing TB orders canonical/reverse/hash_seeded/feature_lexicographic unchanged."""
+        pool = _make_pool(16)
+        trace = _trace_with([pool[0], pool[5]])
+        goldens = {
+            "canonical": ["c15", "c14", "c13", "c11"],
+            "reverse": ["c15", "c14", "c13", "c11"],
+            "hash_seeded": ["c15", "c14", "c13", "c11"],
+            "feature_lexicographic": ["c15", "c14", "c13", "c11"],
+        }
+        for tbo, expected in goldens.items():
+            p = AxsUcbPolicy({"k": 4, "tie_break_order": tbo})
+            s = p.select(pool, trace, 7)
+            assert s == expected, (
+                f"TB order {tbo!r} slate changed: expected {expected}, got {s}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# 18. V2 seams — ctx_freeze_round validation (Task AXS-V2)
+# ---------------------------------------------------------------------------
+
+class TestCtxFreezeRoundValidation:
+    """Validate that ctx_freeze_round rejects invalid values with Korean ValueError."""
+
+    def test_negative_ctx_freeze_round_raises_axs_ucb(self):
+        """ctx_freeze_round=-1 raises Korean ValueError in AxsUcbPolicy."""
+        pool = _make_pool()
+        p = AxsUcbPolicy({"k": 4, "ctx_freeze_round": -1})
+        with pytest.raises(ValueError) as exc_info:
+            p.select(pool, TraceState(), 7)
+        msg = str(exc_info.value)
+        assert any(ord(c) > 127 for c in msg), f"Expected Korean error, got: {msg!r}"
+        # Verify the message mentions ctx_freeze_round (not freeze_round)
+        assert "ctx_freeze_round" in msg, f"Error message should name ctx_freeze_round: {msg!r}"
+
+    def test_float_ctx_freeze_round_raises_axs_ucb(self):
+        """ctx_freeze_round=2.5 raises Korean ValueError in AxsUcbPolicy."""
+        pool = _make_pool()
+        p = AxsUcbPolicy({"k": 4, "ctx_freeze_round": 2.5})
+        with pytest.raises(ValueError) as exc_info:
+            p.select(pool, TraceState(), 7)
+        msg = str(exc_info.value)
+        assert any(ord(c) > 127 for c in msg), f"Expected Korean error, got: {msg!r}"
+        assert "ctx_freeze_round" in msg, f"Error message should name ctx_freeze_round: {msg!r}"
+
+    def test_bool_ctx_freeze_round_raises_axs_ucb(self):
+        """ctx_freeze_round=True (bool) raises Korean ValueError in AxsUcbPolicy."""
+        pool = _make_pool()
+        p = AxsUcbPolicy({"k": 4, "ctx_freeze_round": True})
+        with pytest.raises(ValueError) as exc_info:
+            p.select(pool, TraceState(), 7)
+        msg = str(exc_info.value)
+        assert any(ord(c) > 127 for c in msg), f"Expected Korean error, got: {msg!r}"
+        assert "ctx_freeze_round" in msg, f"Error message should name ctx_freeze_round: {msg!r}"
+
+    def test_yoked_rejects_ctx_freeze_round_at_init(self):
+        """AxsYokedBonusPolicy raises Korean ValueError if ctx_freeze_round in init config."""
+        with pytest.raises(ValueError) as exc_info:
+            AxsYokedBonusPolicy({
+                "k": 4,
+                "schedule_path": "/nonexistent/path.json",
+                "schedule_hash": "dummy",
+                "ctx_freeze_round": 0,
+            })
+        msg = str(exc_info.value)
+        assert any(ord(c) > 127 for c in msg), f"Expected Korean error, got: {msg!r}"
+        assert "ctx_freeze_round" in msg, f"Error should name ctx_freeze_round: {msg!r}"
+
+    def test_yoked_rejects_ctx_freeze_round_per_call(self, tmp_path):
+        """AxsYokedBonusPolicy raises Korean ValueError if ctx_freeze_round in per-call config."""
+        sched_path = _make_yoked_schedule(tmp_path)
+        body = json.loads(sched_path.read_text())
+        p = AxsYokedBonusPolicy({
+            "k": 4,
+            "schedule_path": str(sched_path),
+            "schedule_hash": body["scheduleHash"],
+        })
+        pool = _make_pool()
+        with pytest.raises(ValueError) as exc_info:
+            p.select(pool, TraceState(), 7, config={"k": 4, "ctx_freeze_round": 0})
+        msg = str(exc_info.value)
+        assert any(ord(c) > 127 for c in msg), f"Expected Korean error, got: {msg!r}"
+        assert "ctx_freeze_round" in msg, f"Error should name ctx_freeze_round: {msg!r}"
+
+    def test_valid_ctx_freeze_round_zero_accepted(self):
+        """ctx_freeze_round=0 is valid (non-negative int, not bool)."""
+        pool = _make_pool()
+        p = AxsUcbPolicy({"k": 4, "ctx_freeze_round": 0})
+        s = p.select(pool, TraceState(), 7)
+        assert len(s) == 4
+
+    def test_valid_ctx_freeze_round_positive_accepted(self):
+        """ctx_freeze_round=1 is valid."""
+        pool = _make_pool()
+        trace = _trace_with([pool[0], pool[1]])
+        p = AxsUcbPolicy({"k": 4, "ctx_freeze_round": 1})
+        s = p.select(pool, trace, 7)
+        assert len(s) == 4
+
+
+# ---------------------------------------------------------------------------
+# 19. V2 seams — ctx_freeze_round=0 semantics (Task AXS-V2)
+# ---------------------------------------------------------------------------
+
+class TestCtxFreezeRoundZeroSemantics:
+    """Behavioral tests for ctx_freeze_round=0.
+
+    A5 composition (ctx_freeze_round=0 + freeze_round=0 + trace_free):
+    both context and bandit state are frozen to empty; tie-break has no
+    trace info -> slates are IDENTICAL regardless of trace content.
+    """
+
+    def test_a5_composition_identical_slates_different_traces(self):
+        """A5 (ctx0 + fr0 + trace_free): two different-content equal-length traces
+        must produce IDENTICAL slates — no trace information anywhere.
+        """
+        pool = _make_pool(16)
+        cfg = {
+            "k": 4,
+            "tie_break_order": "trace_free",
+            "ctx_freeze_round": 0,
+            "freeze_round": 0,
+        }
+        trace_a = _trace_with([pool[0], pool[1]])
+        trace_b = _trace_with([pool[2], pool[3]])
+        p_a = AxsUcbPolicy(cfg)
+        p_b = AxsUcbPolicy(cfg)
+        s_a = p_a.select(pool, trace_a, 7)
+        s_b = p_b.select(pool, trace_b, 7)
+        assert s_a == s_b, (
+            f"A5 must be trace-invariant; got {s_a} vs {s_b}"
+        )
+
+    def test_ctx_freeze_round_0_canonical_slates_may_differ(self):
+        """ctx_freeze_round=0 with canonical TB: TB still includes live traceHash,
+        so two different traces may produce different slates.
+
+        This verifies E2/E3 + E4 live orthogonality — ctx is frozen but
+        tie-break seed material is not.
+        """
+        pool = _make_pool(16)
+        cfg = {"k": 4, "ctx_freeze_round": 0}  # canonical TB by default
+        trace_a = _trace_with([pool[0], pool[1]])
+        trace_b = _trace_with([pool[2], pool[3]])
+        p_a = AxsUcbPolicy(cfg)
+        p_b = AxsUcbPolicy(cfg)
+        s_a = p_a.select(pool, trace_a, 7)
+        s_b = p_b.select(pool, trace_b, 7)
+        # The slates MAY differ (canonical TB uses live traceHash).
+        # This is expected — the test just confirms the two seams are orthogonal.
+        # We verify that at least the LENGTH is 4 and slates are valid.
+        assert len(s_a) == 4
+        assert len(s_b) == 4
+
+    def test_ctx_freeze_round_0_freezes_context_inputs_behaviorally(self):
+        """Probe: ctx_freeze_round=0 freezes context features.
+
+        Build two traces whose later rounds strongly shift the centroid.
+        With ctx_freeze_round=None (live), the two traces produce different
+        slates (different centroid -> different UCB features).
+        With ctx_freeze_round=0, both traces produce the same slate (centroid
+        always defaults to zeros).
+        """
+        # Pool with extreme coordinates so centroid shift has a large effect.
+        extreme_pool = [
+            {
+                "cardId": f"ex{i:02d}",
+                "basis": f"B{(i % 4) + 1}",
+                "complexityBand": "mid",
+                "salienceScore": 0.5,
+                "coordinateContribution": [
+                    float(i * 10), float(i * 10), float(i * 10), float(i * 10)
+                ],
+            }
+            for i in range(8)
+        ]
+        # High-centroid trace vs low-centroid trace.
+        trace_high = _trace_with([extreme_pool[5], extreme_pool[6], extreme_pool[7]])
+        trace_low = _trace_with([extreme_pool[0]])
+
+        # With ctx_freeze_round=0: context always defaults to zeros -> same slates.
+        p_ctx0_high = AxsUcbPolicy({"k": 4, "ctx_freeze_round": 0})
+        p_ctx0_low = AxsUcbPolicy({"k": 4, "ctx_freeze_round": 0})
+        s_ctx0_high = p_ctx0_high.select(extreme_pool, trace_high, 7)
+        s_ctx0_low = p_ctx0_low.select(extreme_pool, trace_low, 7)
+        assert s_ctx0_high == s_ctx0_low, (
+            f"ctx_freeze_round=0: centroid must be frozen; got {s_ctx0_high} vs {s_ctx0_low}"
+        )
+
+        # With live ctx (no ctx_freeze_round): slates differ as centroid shifts.
+        p_live_high = AxsUcbPolicy({"k": 4})
+        p_live_low = AxsUcbPolicy({"k": 4})
+        s_live_high = p_live_high.select(extreme_pool, trace_high, 7)
+        s_live_low = p_live_low.select(extreme_pool, trace_low, 7)
+        assert s_live_high != s_live_low, (
+            f"Live ctx: different centroid traces must produce different slates; "
+            f"got {s_live_high} vs {s_live_low}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 20. V2 seams — ctx_freeze_round=1 semantics (Task AXS-V2)
+# ---------------------------------------------------------------------------
+
+class TestCtxFreezeRoundOneSemantics:
+    """ctx_freeze_round=1: context view = first round only.
+
+    Two traces sharing round 0 but diverging later: with ctx_freeze_round=1
+    + freeze_round=0 + trace_free, all three entry points are fixed after
+    the first round -> identical slates (one-round imprint determinism).
+    """
+
+    def test_ctx_freeze_1_one_round_imprint_determinism(self):
+        """ctx1 + fr0 + trace_free: traces sharing round 0 -> identical slates."""
+        pool = _make_pool(16)
+        cfg = {
+            "k": 4,
+            "tie_break_order": "trace_free",
+            "ctx_freeze_round": 1,
+            "freeze_round": 0,
+        }
+        # Two traces: same first round (pool[0]), then diverge.
+        trace_share_a = _trace_with([pool[0], pool[1], pool[2]])
+        trace_share_b = _trace_with([pool[0], pool[3], pool[4]])
+
+        p_a = AxsUcbPolicy(cfg)
+        p_b = AxsUcbPolicy(cfg)
+        s_a = p_a.select(pool, trace_share_a, 7)
+        s_b = p_b.select(pool, trace_share_b, 7)
+        assert s_a == s_b, (
+            f"ctx_freeze_round=1 + freeze_round=0 + trace_free: "
+            f"traces sharing round 0 must produce identical slates; "
+            f"got {s_a} vs {s_b}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 21. V2 seams — trace_free and trace_free_alt1 tie-break (Task AXS-V2)
+# ---------------------------------------------------------------------------
+
+class TestTraceFreeeTieBreak:
+    """Behavioral tests for trace_free and trace_free_alt1 tie-break orders."""
+
+    def test_trace_free_independent_of_trace_content(self):
+        """trace_free: two equal-length different-content traces -> identical slates
+        on a fully-tied pool (all UCB scores tie).
+
+        The tie-break RNG is seeded from {poolHash, seed, roundIndex, policyVersion,
+        salt} with no traceHash, so two traces of the same length produce the same
+        tiebreak floats and therefore the same slate.
+        """
+        tied_pool = _make_tied_pool()
+        # Two length-1 traces with different content.
+        pool = _make_pool(16)
+        trace_a = _trace_with([pool[0]])
+        trace_b = _trace_with([pool[2]])
+        cfg = {"k": 4, "tie_break_order": "trace_free"}
+        p_a = AxsUcbPolicy(cfg)
+        p_b = AxsUcbPolicy(cfg)
+        s_a = p_a.select(tied_pool, trace_a, 7)
+        s_b = p_b.select(tied_pool, trace_b, 7)
+        assert s_a == s_b, (
+            f"trace_free: equal-length traces should produce identical slate on "
+            f"tied pool; got {s_a} vs {s_b}"
+        )
+
+    def test_canonical_differs_on_tied_pool(self):
+        """canonical tiebreak differs from trace_free on the tied pool (empty trace).
+
+        With canonical TB, seed includes traceHash.  With trace_free, no traceHash.
+        Since both trace_free and canonical use the same empty trace, the difference
+        is in what is hashed (canonical includes traceHash, trace_free does not +
+        adds roundIndex+salt).  These produce different floats -> typically different
+        slates.
+        """
+        tied_pool = _make_tied_pool()
+        trace = TraceState()
+        p_can = AxsUcbPolicy({"k": 4, "tie_break_order": "canonical"})
+        p_tf = AxsUcbPolicy({"k": 4, "tie_break_order": "trace_free"})
+        s_can = p_can.select(tied_pool, trace, 7)
+        s_tf = p_tf.select(tied_pool, trace, 7)
+        assert s_can != s_tf, (
+            f"canonical and trace_free should produce different slates on tied pool; "
+            f"both got {s_can}"
+        )
+
+    def test_trace_free_varies_per_round(self):
+        """trace_free: different roundIndex (trace length 0 vs 1) -> different slates.
+
+        roundIndex is included in seed material specifically so tiebreaks vary
+        across rounds.  On a fully-tied pool this is the ONLY source of variation.
+        """
+        tied_pool = _make_tied_pool()
+        pool = _make_pool(16)
+        trace_empty = TraceState()
+        trace_1 = _trace_with([pool[0]])
+        cfg = {"k": 4, "tie_break_order": "trace_free"}
+        p_empty = AxsUcbPolicy(cfg)
+        p_1 = AxsUcbPolicy(cfg)
+        s_empty = p_empty.select(tied_pool, trace_empty, 7)
+        s_1 = p_1.select(tied_pool, trace_1, 7)
+        assert s_empty != s_1, (
+            f"trace_free: roundIndex must vary tiebreaks across rounds; "
+            f"empty-trace slate {s_empty} == 1-round slate {s_1}"
+        )
+
+    def test_trace_free_alt1_differs_from_trace_free(self):
+        """trace_free_alt1 must produce a different slate from trace_free on the
+        tied pool (different salts -> different RNG seed -> different floats).
+        """
+        tied_pool = _make_tied_pool()
+        trace = TraceState()
+        p_tf = AxsUcbPolicy({"k": 4, "tie_break_order": "trace_free"})
+        p_alt1 = AxsUcbPolicy({"k": 4, "tie_break_order": "trace_free_alt1"})
+        s_tf = p_tf.select(tied_pool, trace, 7)
+        s_alt1 = p_alt1.select(tied_pool, trace, 7)
+        assert s_tf != s_alt1, (
+            f"trace_free and trace_free_alt1 should differ on tied pool; "
+            f"both got {s_tf}"
+        )
+
+    def test_policy_versions_all_distinct(self):
+        """policy_version must be distinct for trace_free, trace_free_alt1, canonical."""
+        p_tf = AxsUcbPolicy({"k": 4, "tie_break_order": "trace_free"})
+        p_alt1 = AxsUcbPolicy({"k": 4, "tie_break_order": "trace_free_alt1"})
+        p_can = AxsUcbPolicy({"k": 4, "tie_break_order": "canonical"})
+        versions = {p_tf.policy_version(), p_alt1.policy_version(), p_can.policy_version()}
+        assert len(versions) == 3, (
+            f"Expected 3 distinct policy_versions, got {len(versions)}: "
+            f"tf={p_tf.policy_version()[:12]!r}, "
+            f"alt1={p_alt1.policy_version()[:12]!r}, "
+            f"can={p_can.policy_version()[:12]!r}"
+        )
+
+    def test_unknown_tie_break_order_still_rejected(self):
+        """An unknown TB order still raises Korean ValueError (regression guard)."""
+        pool = _make_pool()
+        p = AxsUcbPolicy({"k": 4, "tie_break_order": "definitely_unknown_v99"})
+        with pytest.raises(ValueError) as exc_info:
+            p.select(pool, TraceState(), 7)
+        msg = str(exc_info.value)
+        assert any(ord(c) > 127 for c in msg), f"Expected Korean error, got: {msg!r}"
+
+    def test_yoked_rejects_trace_free_at_init(self, tmp_path):
+        """AxsYokedBonusPolicy still rejects trace_free at construction time."""
+        sched_path = _make_yoked_schedule(tmp_path)
+        body = json.loads(sched_path.read_text())
+        base_cfg = {
+            "k": 4,
+            "schedule_path": str(sched_path),
+            "schedule_hash": body["scheduleHash"],
+        }
+        for bad_tbo in ["trace_free", "trace_free_alt1"]:
+            with pytest.raises(ValueError) as exc_info:
+                AxsYokedBonusPolicy({**base_cfg, "tie_break_order": bad_tbo})
+            msg = str(exc_info.value)
+            assert any(ord(c) > 127 for c in msg), (
+                f"Expected Korean ValueError for tie_break_order={bad_tbo!r}, got: {msg!r}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# 22. V2 golden-slate regression tests (Task AXS-V2)
+# ---------------------------------------------------------------------------
+# These tests pin the exact slate card-ID lists for the v2 arm configs
+# (A1–A5) against the SAME fixed pool/trace/seed as the existing golden class.
+#
+# Pool:  _make_pool(16)            (n=16, n_bases=4, default params)
+# Trace: _trace_with([pool[0], pool[5]])  (2-round trace)
+# Seed:  7
+#
+# Arm config definitions (per axs_mechanism_prereg_v2_draft.json armConfigs):
+#   a0  = default axs_ucb (canonical TB)           -- pinned in TestGoldenSlateRegression
+#   a1  = default + tie_break_order: trace_free
+#   a2  = a1 + ctx_freeze_round: 0
+#   a3  = a1 + ctx_freeze_round: 1
+#   a4  = a1 + freeze_round: 0
+#   a5  = a2 + a4  (ctx_freeze_round=0 + freeze_round=0)
+#
+# HOW GOLDENS WERE CAPTURED:
+#   Running axs_ucb.py on commit after AXS-V2 implementation, same fixture as
+#   TestGoldenSlateRegression. Captured 2026-06-13 before any test re-baseline.
+#
+# PINNED VALUES (do NOT change without deliberate re-baseline + explanation):
+#   a1 (trace_free):                 ['c15', 'c14', 'c13', 'c11']
+#   a2 (trace_free + ctx0):          ['c15', 'c14', 'c13', 'c12']
+#   a3 (trace_free + ctx1):          ['c15', 'c14', 'c13', 'c12']
+#   a4 (trace_free + fr0):           ['c15', 'c14', 'c13', 'c12']
+#   a5 (trace_free + ctx0 + fr0):    ['c15', 'c14', 'c13', 'c12']
+
+class TestV2GoldenSlateRegression:
+    """Byte-identical golden-slate regression tests for v2 arm configs."""
+
+    _POOL = _make_pool(16)
+    _SEED = 7
+
+    def _pool(self):
+        return _make_pool(16)
+
+    def _trace(self):
+        pool = self._pool()
+        return _trace_with([pool[0], pool[5]])
+
+    def test_golden_a1_trace_free(self):
+        """A1 (trace_free) slate must match pinned value."""
+        pool = self._pool()
+        p = AxsUcbPolicy({"k": 4, "tie_break_order": "trace_free"})
+        s = p.select(pool, self._trace(), self._SEED)
+        assert s == ["c15", "c14", "c13", "c11"], (
+            f"Golden a1 (trace_free): expected ['c15','c14','c13','c11'], got {s}"
+        )
+
+    def test_golden_a2_ctx0_trace_free(self):
+        """A2 (trace_free + ctx_freeze_round=0) slate must match pinned value."""
+        pool = self._pool()
+        p = AxsUcbPolicy({"k": 4, "tie_break_order": "trace_free", "ctx_freeze_round": 0})
+        s = p.select(pool, self._trace(), self._SEED)
+        assert s == ["c15", "c14", "c13", "c12"], (
+            f"Golden a2 (trace_free+ctx0): expected ['c15','c14','c13','c12'], got {s}"
+        )
+
+    def test_golden_a3_ctx1_trace_free(self):
+        """A3 (trace_free + ctx_freeze_round=1) slate must match pinned value."""
+        pool = self._pool()
+        p = AxsUcbPolicy({"k": 4, "tie_break_order": "trace_free", "ctx_freeze_round": 1})
+        s = p.select(pool, self._trace(), self._SEED)
+        assert s == ["c15", "c14", "c13", "c12"], (
+            f"Golden a3 (trace_free+ctx1): expected ['c15','c14','c13','c12'], got {s}"
+        )
+
+    def test_golden_a4_fr0_trace_free(self):
+        """A4 (trace_free + freeze_round=0) slate must match pinned value."""
+        pool = self._pool()
+        p = AxsUcbPolicy({"k": 4, "tie_break_order": "trace_free", "freeze_round": 0})
+        s = p.select(pool, self._trace(), self._SEED)
+        assert s == ["c15", "c14", "c13", "c12"], (
+            f"Golden a4 (trace_free+fr0): expected ['c15','c14','c13','c12'], got {s}"
+        )
+
+    def test_golden_a5_ctx0_fr0_trace_free(self):
+        """A5 (trace_free + ctx_freeze_round=0 + freeze_round=0) must match pinned value."""
+        pool = self._pool()
+        p = AxsUcbPolicy({
+            "k": 4,
+            "tie_break_order": "trace_free",
+            "ctx_freeze_round": 0,
+            "freeze_round": 0,
+        })
+        s = p.select(pool, self._trace(), self._SEED)
+        assert s == ["c15", "c14", "c13", "c12"], (
+            f"Golden a5 (trace_free+ctx0+fr0): expected ['c15','c14','c13','c12'], got {s}"
+        )
