@@ -1,0 +1,190 @@
+{
+  "preregId": "axs-mechanism",
+  "version": 2,
+  "title": "AXS mechanism preregistration v2 draft — entry-point ablation",
+  "status": "design-draft",
+  "bindingNote": "DESIGN DRAFT — not a registered preregistration. The evidence gate must refuse any prereg whose status is not 'registered'. Committed only to hash-pin the design and liveness criteria.",
+  "supersedes": "axs-mechanism v1 (axs_mechanism_prereg_v1.json)",
+  "changeJustification": [
+    "v1 terminated at design stage with zero evaluation-family evidence.",
+    "Pilot on non-evaluation families: of 63 variant episodes (alpha 0/5, freeze_at_1 across 3 families x 7 probes), 60 were trace-identical to the alpha=1 default; the 3 discordant episodes share a single probe slot in family 777 — the preregistered exploration-pressure contrast is behaviorally degenerate.",
+    "Because freeze_at_1 also freezes post-round-1 theta/A updates while preserving live context features, post-round-1 learned-weight updates were also behaviorally inert UNDER LIVE-CONTEXT PILOT CONDITIONS and may re-emerge when E1/E4 are cut.",
+    "v2 reframes the program as entry-point ablation over E1 (context-to-feature), E2/E3 (A/b accumulation), E4 (tie-break seed); evaluation families remain untouched."
+  ],
+  "scope": {
+    "testbed": "ECHO-Bench controlled procedural k-slate testbed",
+    "policyFamilies": "AXS UCB entry-ablation variants (new IDs; C-011 frozen set untouched)",
+    "requiredScopeMarkers": ["within the tested policy families", "in this controlled testbed"]
+  },
+  "primaryEndpoint": {
+    "metric": "slate_excess_nmi",
+    "aggregation": "cross_family_paired_delta"
+  },
+  "confirmatoryEndpoints": ["selection_excess_nmi", "combined_excess_nmi"],
+  "utilityGuard": {
+    "metric": "coordinate_coverage",
+    "rule": "arm_mean >= RANDOM_mean"
+  },
+  "pairedUnit": "seed_family",
+  "evaluationFamilies": ["42", "7", "101", "2025", "31337"],
+  "signRule": {
+    "minConsistentFamilies": 4,
+    "totalFamilies": 5
+  },
+  "ciRule": {
+    "method": "cross_family_seeded_bootstrap",
+    "lowerBoundMustExceed": 0.0
+  },
+  "noPValues": true,
+  "minSufficientFamilies": 3,
+  "tieBreakCaveatMarker": "subject to a tie-breaking sensitivity caveat (AXS-010 soft_pass)",
+  "yokedSchedule": {
+    "pilotFamily": "999",
+    "referenceArm": "axs_ucb_default",
+    "derivation": "deterministic from pilot config + seed",
+    "scheduleArtifactPath": "configs/prereg/axs_004c_yoked_schedule_v1.json",
+    "v2Note": "not used by v2 experiments; retained for schema continuity"
+  },
+  "designContaminatedFamilies": ["123", "124", "777", "55555"],
+  "pilotSummaryRef": {
+    "path": "configs/prereg/axs_p0_pilot_summary_v1.json",
+    "summaryHash": "b3ce4318e6dcbbd9d2ff9285ab6ca70ff6ffc3754f12b2f7bf7c946421e686dd"
+  },
+  "traceFreeTieBreakSpec": {
+    "seedMaterial": ["poolHash", "seed", "roundIndex", "policyVersion", "salt"],
+    "salt": "axs-v2-trace-free-tb-v1",
+    "forbidden": ["traceHash", "probeId", "selectionHistory", "contextState"],
+    "roundIndexRequiredNote": "without roundIndex the tie-break repeats across rounds and collapses utility",
+    "featureLexicographicNote": "feature_lexicographic is NOT trace-free while context is live (E4-via-E1)"
+  },
+  "experiments": {
+    "AXS-ENTRY-001": {
+      "arms": [
+        "a0_baseline_canonical",
+        "a1_baseline_tracefree",
+        "a2_ctx0_tracefree",
+        "a3_ctx1_tracefree",
+        "a4_neverlearn_tracefree",
+        "a5_all_entry_cut"
+      ],
+      "armConfigs": {
+        "a0": "default axs_ucb config",
+        "a1": "default axs_ucb config + tie_break trace_free",
+        "a2": "a1 + ctx_freeze_round 0",
+        "a3": "a1 + ctx_freeze_round 1",
+        "a4": "a1 + freeze_round 0",
+        "a4_alphaNonFunctionalNote": "in never_learn the bonus reduces to a positive scalar multiple of ||x|| under A=lambda*I, so alpha is not an exploration manipulation",
+        "a5": "a2 + a4 composition"
+      },
+      "primaryContrast": {
+        "name": "delta_e1",
+        "definition": "per-family sep(a1_baseline_tracefree) minus sep(a2_ctx0_tracefree)",
+        "acceptance": "sign positive in >=4/5 families AND cross_family_seeded_bootstrap ciLower > 0",
+        "gateComputes": true,
+        "reportDeltasIgnored": true
+      },
+      "e4Equivalence": {
+        "name": "delta_e4",
+        "definition": "per-family sep(a0) minus sep(a1)",
+        "rule": "bootstrap CI of delta_e4 contained in (-delta, +delta)",
+        "marginDerivation": "delta = max(2*SD_critic(delta_e4 per-family), 0.25*abs(mean_critic(delta_e1))); fixed numerically in the registered v2 after the critic liveness pilot"
+      },
+      "sanity": {
+        "arm": "a5_all_entry_cut",
+        "rule": "per-family excess <= epsilon OR all-probe identical-signature flag",
+        "epsilonDerivation": "epsilon = max(2*SD_critic(a5 per-family excess), 0.005)",
+        "utilityGuardExempt": true
+      },
+      "imprint": {
+        "arm": "a3_ctx1_tracefree",
+        "directionalPrediction": "separability maintained or increased relative to a2 (one-round context imprint)"
+      },
+      "branches": [
+        {
+          "name": "strong_e1",
+          "condition": "delta_e1 pass AND delta_e4 null AND a2 utility >= RANDOM",
+          "licensedClaim": "E1 (context-to-feature) mediates AXS UCB separability within the tested policy families in this controlled testbed"
+        },
+        {
+          "name": "weak_joint_utility",
+          "condition": "delta_e1 pass AND delta_e4 null AND a2 degenerate",
+          "licensedClaim": "E1 mediates separability but ctx-free arm utility is degenerate; E1 separability effect is conditional on non-degenerate utility within the tested policy families in this controlled testbed"
+        },
+        {
+          "name": "e1_e4_joint",
+          "condition": "delta_e1 pass AND delta_e4 not null",
+          "licensedClaim": "E1/E4 jointly mediate separability within the tested policy families in this controlled testbed; E1-only attribution is forbidden"
+        },
+        {
+          "name": "e2e3_reemergence",
+          "condition": "delta_e1 fail with residual a2 separability AND a5 sanity pass",
+          "licensedClaim": "M1-level re-emergence report: E2/E3 accumulation may re-emerge when context is cut; no mechanism claim above M1"
+        },
+        {
+          "name": "no_claim_m1_only",
+          "condition": "cross-family inconsistency (positive sign in <=3/5 families) or other unmet",
+          "licensedClaim": "no claim at any rung above M1 within the tested policy families in this controlled testbed"
+        },
+        {
+          "name": "sanity_fail",
+          "condition": "a5 violation",
+          "licensedClaim": "gate fail — all claims blocked; all-entry-cut arm exceeds epsilon, indicating a confound in the ablation design"
+        }
+      ],
+      "branchCountFrozen": true,
+      "a3MisuseNote": "citing a3 (imprint) as the kill arm fails the gate"
+    },
+    "AXS-ENTRY-010": {
+      "target": "delta_e1 conclusion invariance over tie-break scheme",
+      "pair": ["a1_baseline_tracefree", "a2_ctx0_tracefree"],
+      "baselineScheme": "trace_free_v1",
+      "variants": [
+        "trace_free_alt_salt:axs-v2-trace-free-tb-alt1",
+        "feature_lexicographic",
+        "reverse"
+      ],
+      "decision": {
+        "strict_pass": "sign and trackDecision unchanged AND variant estimates within baseline 95% CI",
+        "soft_pass": "sign+track unchanged, outside CI -> caveat",
+        "fail": "sign flip or track change"
+      }
+    }
+  },
+  "claimTransitions": {
+    "M2": {
+      "requiresPass": ["AXS-ENTRY-001", "AXS-ENTRY-010"],
+      "requiredBranch": ["strong_e1", "weak_joint_utility"],
+      "requiresInvariance": "AXS-ENTRY-010 >= soft_pass",
+      "softPassRequiresCaveatMarker": true,
+      "scopeMarkersRequired": true
+    },
+    "M3": {
+      "requires": "M2 + AXS-001 full alpha sweep + anchor validation"
+    }
+  },
+  "livenessCriteria": {
+    "pairs": [
+      {"arms": ["a1", "a0"], "rule": ">=50% of probe episodes distinct traceHash on >=3/4 critic families"},
+      {"arms": ["a2", "a1"], "rule": ">=50% of probe episodes distinct traceHash on >=3/4 critic families"},
+      {"arms": ["a4", "a1"], "rule": ">=50% of probe episodes distinct traceHash on >=3/4 critic families"},
+      {"arms": ["a3", "a2"], "rule": ">=50% of probe episodes distinct traceHash on >=3/4 critic families"}
+    ],
+    "a5Rule": "interpretability: identical-signature flag or abs(excess) <= provisional epsilon; AND distinct from a1",
+    "a0Calibration": {
+      "family": "123",
+      "mustReproduce": 0.03449752763878505
+    },
+    "criticFamilies": ["123", "124", "777", "55555"],
+    "ledgerRegistration": false
+  },
+  "degenerateArmPolicy": {
+    "mustReport": true,
+    "requiredFields": ["degenerate", "degenerateReason", "includedInMechanismClaim"],
+    "silentOmissionFails": true
+  },
+  "amendmentPolicy": {
+    "supersedesRequired": true,
+    "changeJustificationRequired": true,
+    "retroactiveApplication": false
+  }
+}

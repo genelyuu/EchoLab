@@ -1,0 +1,72 @@
+{
+  "summaryId": "axs-p0-pilot-summary-v1",
+  "runCommit": "60b3e56ca313f6c71701953f9ded3b8a2457e0cb",
+  "pilotFamilies": ["123", "124", "777", "55555"],
+  "evaluationFamiliesTouched": false,
+  "designContaminatedFamilies": ["123", "124", "777", "55555"],
+  "heldoutPilotFamily": "999",
+  "alphaFreezeTraceParity": {
+    "families": ["124", "777", "55555"],
+    "variants": ["alpha0", "alpha5", "freeze_at_1"],
+    "probesPerFamily": 7,
+    "variantEpisodes": 63,
+    "concordantWithDefault": 60,
+    "discordantEpisodes": 3,
+    "discordantNote": "single probe slot in family 777 where the three variants agree with each other but differ from the alpha=1 default"
+  },
+  "runnerLevelPilot": {
+    "family": "123",
+    "H": 8,
+    "k": 4,
+    "pool": 64,
+    "perm": 200
+  },
+  "pilotReportHashes": {
+    "AXS-010": "7ca5c32ffecc6bf7905b90b75c67fce454f92289f9b4662d33c3090994985a5e",
+    "AXS-003": "97776af36aca55e224d7abd81798c4c14a05bc5e53ff9d1876949f7c657cd276",
+    "AXS-009": "366c31814ed3fac692a7492500350339fba3eaf9455accd040530f7de44a0e4e",
+    "AXS-004c": "f93e5bfe5c4eb84ac0f403be701db2f6ec5770f26000a3db3e441a7c65e95a31"
+  },
+  "headlineNumbers": {
+    "AXS-003": {
+      "axs_ucb_default_bootstrap_slate_excess_nmi_mean": 0.03449752763878505,
+      "axs_ucb_alpha0_bootstrap_slate_excess_nmi_mean": 0.03449752763878505
+    },
+    "AXS-004c": {
+      "axs_ucb_default_bootstrap_slate_excess_nmi_mean": 0.03449752763878505,
+      "axs_yoked_bonus_bootstrap_slate_excess_nmi_mean": -0.08011227889140626
+    },
+    "AXS-009": {
+      "freeze_at_1_slate_excess_nmi_mean": 0.03449752763878505,
+      "freeze_at_quarter_slate_excess_nmi_mean": 0.03449752763878505,
+      "freeze_at_half_slate_excess_nmi_mean": 0.03449752763878505,
+      "freeze_none_slate_excess_nmi_mean": 0.03449752763878505,
+      "freeze_at_1_post_freeze_incremental_divergence_mean": 0.03449752763878505,
+      "freeze_at_quarter_post_freeze_incremental_divergence_mean": 0.07795784328132344,
+      "freeze_at_half_post_freeze_incremental_divergence_mean": 0.09446318490472455,
+      "freeze_none_post_freeze_incremental_divergence_mean": 0.0
+    },
+    "AXS-010": {
+      "baseline_estimate": 0.03449752763878505,
+      "canonical_estimate": 0.03449752763878505,
+      "reverse_estimate": 0.03449752763878505,
+      "feature_lexicographic_estimate": 0.03449752763878505
+    }
+  },
+  "calibrationAnchor": {
+    "family": "123",
+    "arm": "axs_ucb_default",
+    "metric": "slate_excess_nmi",
+    "value": 0.03449752763878505
+  },
+  "scheduleHash": "cc7f8348870739c1831be997c36b2b5eedd3317c900ab5309f2c2a2fafd34cf1",
+  "reproduction": {
+    "note": "Replay each experiment by passing its base seed and reports directory; replay-mode none skips inline recompute for diagnostic runs.",
+    "commands": [
+      "python -m echo_bench.experiments.axs_003_alpha_kill --base-seeds 123 --replay-mode none --reports-dir <dir>",
+      "python -m echo_bench.experiments.axs_004c_yoked --base-seeds 123 --replay-mode none --reports-dir <dir>",
+      "python -m echo_bench.experiments.axs_009_freeze_sweep --base-seeds 123 --replay-mode none --reports-dir <dir>",
+      "python -m echo_bench.experiments.axs_010_tiebreak --base-seeds 123 --replay-mode none --reports-dir <dir>"
+    ]
+  }
+}
