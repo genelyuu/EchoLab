@@ -207,6 +207,7 @@ def smoke_axs003(tmp_path_factory, _prereg_path, _smoke_configs):
     """AXS-003 스모크 실행 결과 캐시."""
     from echo_bench.experiments.axs_003_alpha_kill import run_axs_003
     bases, archive_cfg = _smoke_configs
+    tmp = tmp_path_factory.mktemp("reports_003")
     report = run_axs_003(
         SMOKE_BASE_SEEDS,
         H=SMOKE_H,
@@ -215,6 +216,7 @@ def smoke_axs003(tmp_path_factory, _prereg_path, _smoke_configs):
         n_permutations=SMOKE_N_PERM,
         prereg_path=_prereg_path,
         git_runner=_good_git_runner,
+        reports_dir=tmp,
     )
     return report
 
@@ -223,6 +225,7 @@ def smoke_axs003(tmp_path_factory, _prereg_path, _smoke_configs):
 def smoke_axs009(tmp_path_factory, _prereg_path, _smoke_configs):
     """AXS-009 스모크 실행 결과 캐시."""
     from echo_bench.experiments.axs_009_freeze import run_axs_009
+    tmp = tmp_path_factory.mktemp("reports_009")
     report = run_axs_009(
         SMOKE_BASE_SEEDS,
         H=SMOKE_H,
@@ -231,6 +234,7 @@ def smoke_axs009(tmp_path_factory, _prereg_path, _smoke_configs):
         n_permutations=SMOKE_N_PERM,
         prereg_path=_prereg_path,
         git_runner=_good_git_runner,
+        reports_dir=tmp,
     )
     return report
 
@@ -258,6 +262,7 @@ def smoke_axs004c(tmp_path_factory, _prereg_path, _smoke_configs):
     )
     write_schedule(schedule, sched_path)
 
+    tmp_r = tmp_path_factory.mktemp("reports_004c")
     report = run_axs_004c(
         SMOKE_BASE_SEEDS,
         H=SMOKE_H,
@@ -267,6 +272,7 @@ def smoke_axs004c(tmp_path_factory, _prereg_path, _smoke_configs):
         schedule_path=str(sched_path),
         prereg_path=_prereg_path,
         git_runner=_good_git_runner,
+        reports_dir=tmp_r,
     )
     return report
 
@@ -275,6 +281,7 @@ def smoke_axs004c(tmp_path_factory, _prereg_path, _smoke_configs):
 def smoke_axs010(tmp_path_factory, _prereg_path, _smoke_configs):
     """AXS-010 스모크 실행 결과 캐시."""
     from echo_bench.experiments.axs_010_tiebreak import run_axs_010
+    tmp = tmp_path_factory.mktemp("reports_010")
     report = run_axs_010(
         SMOKE_BASE_SEEDS,
         H=SMOKE_H,
@@ -283,6 +290,7 @@ def smoke_axs010(tmp_path_factory, _prereg_path, _smoke_configs):
         n_permutations=SMOKE_N_PERM,
         prereg_path=_prereg_path,
         git_runner=_good_git_runner,
+        reports_dir=tmp,
     )
     return report
 
@@ -458,12 +466,13 @@ def test_axs010_write_report(tmp_path, smoke_axs010):
 # ===========================================================================
 
 
-def test_axs003_deterministic(_prereg_path):
+def test_axs003_deterministic(tmp_path, _prereg_path):
     """AXS-003: 동일 인수 → 동일 reportHash."""
     from echo_bench.experiments.axs_003_alpha_kill import run_axs_003
     kw = dict(
         H=SMOKE_H, k=4, pool_size=SMOKE_POOL_SIZE, n_permutations=SMOKE_N_PERM,
         prereg_path=_prereg_path, git_runner=_good_git_runner,
+        reports_dir=tmp_path / "det003",
     )
     r1 = run_axs_003(SMOKE_BASE_SEEDS, **kw)
     r2 = run_axs_003(SMOKE_BASE_SEEDS, **kw)
@@ -472,12 +481,13 @@ def test_axs003_deterministic(_prereg_path):
     )
 
 
-def test_axs010_deterministic(_prereg_path):
+def test_axs010_deterministic(tmp_path, _prereg_path):
     """AXS-010: 동일 인수 → 동일 reportHash."""
     from echo_bench.experiments.axs_010_tiebreak import run_axs_010
     kw = dict(
         H=SMOKE_H, k=4, pool_size=SMOKE_POOL_SIZE, n_permutations=SMOKE_N_PERM,
         prereg_path=_prereg_path, git_runner=_good_git_runner,
+        reports_dir=tmp_path / "det010",
     )
     r1 = run_axs_010(SMOKE_BASE_SEEDS, **kw)
     r2 = run_axs_010(SMOKE_BASE_SEEDS, **kw)
@@ -551,11 +561,9 @@ def test_axs003_gate_contract(tmp_path, smoke_axs003, smoke_axs009, smoke_axs004
     assert checks_by_name["ledger_registered"]["ok"], checks_by_name["ledger_registered"]["detail"]
     # arms_complete: AXS-003 must have its two arms
     arms_check = checks_by_name["arms_complete"]
-    if not arms_check["ok"]:
-        # Only fail if the detail references AXS-003 arm issues
-        assert "AXS-003" not in arms_check["detail"] or "arm" not in arms_check["detail"].lower(), (
-            f"arms_complete 실패: {arms_check['detail']}"
-        )
+    assert arms_check["ok"] is True, (
+        f"arms_complete 실패 (prereg 기반 실제 체크): {arms_check['detail']}"
+    )
     # pilot_disjoint (AXS-004c present)
     assert checks_by_name["pilot_disjoint"]["ok"], checks_by_name["pilot_disjoint"]["detail"]
 
@@ -803,3 +811,86 @@ def test_axs009_baselines_random_present(smoke_axs009):
     rand = baselines.get("RANDOM", {})
     assert "coordinate_coverage_mean" in rand
     assert isinstance(rand["coordinate_coverage_mean"], float)
+
+
+# ===========================================================================
+# (h) Tamper-detection regression tests — single-source binding
+# ===========================================================================
+
+def test_axs003_family_blocks_contain_all_arm_coverage(smoke_axs003):
+    """family_blocks single-source: all arm coverage_mean values derivable from report."""
+    arms = smoke_axs003.get("arms", {})
+    baselines = smoke_axs003.get("baselines", {})
+
+    for arm_id in ["axs_ucb_default", "axs_ucb_alpha0"]:
+        cov = arms.get(arm_id, {}).get("utility", {}).get("coordinate_coverage_mean")
+        assert cov is not None and isinstance(cov, float), (
+            f"arms[{arm_id!r}].utility.coordinate_coverage_mean 누락 또는 비float"
+        )
+
+    rand_cov = baselines.get("RANDOM", {}).get("coordinate_coverage_mean")
+    assert rand_cov is not None and isinstance(rand_cov, float), (
+        "baselines.RANDOM.coordinate_coverage_mean 누락"
+    )
+
+
+def test_axs009_family_blocks_contain_all_arm_coverage(smoke_axs009):
+    """family_blocks single-source: AXS-009 all arm coverage present."""
+    arms = smoke_axs009.get("arms", {})
+    baselines = smoke_axs009.get("baselines", {})
+
+    for arm_id in ["freeze_at_1", "freeze_at_quarter", "freeze_at_half", "freeze_none"]:
+        cov = arms.get(arm_id, {}).get("utility", {}).get("coordinate_coverage_mean")
+        assert cov is not None and isinstance(cov, float), (
+            f"AXS-009 arms[{arm_id!r}].utility.coordinate_coverage_mean 누락"
+        )
+
+    rand_cov = baselines.get("RANDOM", {}).get("coordinate_coverage_mean")
+    assert rand_cov is not None and isinstance(rand_cov, float), (
+        "AXS-009 baselines.RANDOM.coordinate_coverage_mean 누락"
+    )
+
+
+def test_axs004c_family_blocks_contain_all_arm_coverage(smoke_axs004c):
+    """family_blocks single-source: AXS-004c all arm coverage present."""
+    arms = smoke_axs004c.get("arms", {})
+    baselines = smoke_axs004c.get("baselines", {})
+
+    for arm_id in ["axs_ucb_default", "axs_yoked_bonus"]:
+        cov = arms.get(arm_id, {}).get("utility", {}).get("coordinate_coverage_mean")
+        assert cov is not None and isinstance(cov, float), (
+            f"AXS-004c arms[{arm_id!r}].utility.coordinate_coverage_mean 누락"
+        )
+
+    rand_cov = baselines.get("RANDOM", {}).get("coordinate_coverage_mean")
+    assert rand_cov is not None and isinstance(rand_cov, float), (
+        "AXS-004c baselines.RANDOM.coordinate_coverage_mean 누락"
+    )
+
+
+def test_axs003_recompute_fn_covers_random_baseline(smoke_axs003, _prereg_path):
+    """recompute_fn covers RANDOM baseline: smoke report's random_coverage_mean
+    must be derivable from family_blocks (single-source assertion).
+    """
+    from echo_bench.experiments.axs_003_alpha_kill import run_axs_003
+
+    baselines = smoke_axs003.get("baselines", {})
+    rand_cov = baselines.get("RANDOM", {}).get("coordinate_coverage_mean")
+    assert rand_cov is not None, "baselines.RANDOM.coordinate_coverage_mean 누락"
+
+    from pathlib import Path
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        r2 = run_axs_003(
+            SMOKE_BASE_SEEDS,
+            H=SMOKE_H, k=4, pool_size=SMOKE_POOL_SIZE, n_permutations=SMOKE_N_PERM,
+            prereg_path=_prereg_path, git_runner=_good_git_runner,
+            reports_dir=Path(tmp),
+        )
+    rand_cov2 = r2.get("baselines", {}).get("RANDOM", {}).get("coordinate_coverage_mean")
+    assert rand_cov == rand_cov2, (
+        f"RANDOM baseline coverage not deterministic: {rand_cov} != {rand_cov2}"
+    )
+    assert smoke_axs003["reportHash"] == r2["reportHash"], (
+        "Determinism check: report hashes must match"
+    )

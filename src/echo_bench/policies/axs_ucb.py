@@ -464,6 +464,25 @@ class AxsYokedBonusPolicy(AxsUcbPolicy):
                 "사전등록된 yoked arm은 'canonical' 만 지원합니다."
             )
 
+    def policy_version(self) -> str:
+        """Override: hash config with schedule_path REPLACED by schedule_hash.
+
+        Path-independence fix: identity is content (schedule_hash), not location.
+        Same schedule content at two different paths yields identical policy_version
+        and identical slate (AXS-P0 T4 리뷰 반영).
+        """
+        config_for_version = dict(self.config)
+        # Replace schedule_path with schedule_hash in the version hash material.
+        # This ensures the version is location-independent: same content -> same version.
+        config_for_version.pop("schedule_path", None)
+        # schedule_hash already in config (required) — it pins content identity
+        return canonical_hash(
+            {
+                "policy": self.__class__.__name__,
+                "config": config_for_version,
+            }
+        )
+
     def _load_and_verify_schedule(self) -> dict:
         """Load, verify, and cache the yoked schedule JSON.
 

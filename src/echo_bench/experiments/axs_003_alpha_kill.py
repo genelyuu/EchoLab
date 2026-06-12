@@ -14,8 +14,6 @@ are Korean per the project logging convention.
 
 from __future__ import annotations
 
-import json
-import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
@@ -23,7 +21,6 @@ import yaml
 
 from echo_bench.env.horizon import default_h, load_horizon
 from echo_bench.experiments.axs_common import (
-    REPLAY_MODES,
     bootstrap_block,
     build_arm_entry,
     build_axs_report,
@@ -36,7 +33,6 @@ from echo_bench.experiments.axs_common import (
     run_arm_family,
     write_report,
 )
-from echo_bench.experiments.e_seed_families import DEFAULT_BASE_SEEDS
 from echo_bench.logging import get_logger, log_ko
 from echo_bench.metrics.leakage import DEFAULT_NULL_PERMUTATIONS
 from echo_bench.policies.axs_ucb import AxsUcbPolicy
@@ -148,7 +144,7 @@ def run_axs_003(
 
     default_raw_by_family: Dict[str, Dict[str, Any]] = {}
     alpha0_raw_by_family: Dict[str, Dict[str, Any]] = {}
-    random_coverage_by_family: Dict[str, float] = {}
+    random_raw_by_family: Dict[str, Dict[str, Any]] = {}
 
     for seed in base_seeds:
         fam = str(seed)
@@ -166,31 +162,47 @@ def run_axs_003(
             H=H_eff, k=k, pool_size=pool_size, n_permutations=n_permutations,
             bases=bases, archive_cfg=archive_cfg,
         )
-        # RANDOM baseline coverage
-        random_raw = run_arm_family(
+        # RANDOM baseline — stored per family for single-source binding
+        random_raw_by_family[fam] = run_arm_family(
             lambda: RandomPolicy({"k": k}),
             seed,
             H=H_eff, k=k, pool_size=pool_size, n_permutations=n_permutations,
             bases=bases, archive_cfg=archive_cfg,
         )
-        random_coverage_by_family[fam] = float(random_raw["coordinate_coverage_mean"])
 
-    # RANDOM baseline: mean over families
-    random_coverage_mean = float(
-        sum(random_coverage_by_family.values()) / len(random_coverage_by_family)
-    )
+    # ---- family_blocks: single authoritative source for all values ----
+    families = [str(s) for s in base_seeds]
+    family_blocks: Dict[str, Dict[str, Any]] = {}
+    for fam in families:
+        d_raw = default_raw_by_family[fam]
+        a_raw = alpha0_raw_by_family[fam]
+        random_raw = random_raw_by_family[fam]
+        family_blocks[fam] = {
+            **reportable_block(d_raw),
+            "axs_ucb_alpha0_slate_excess_nmi": float(a_raw["slate_excess_nmi"]),
+            "axs_ucb_alpha0_coordinate_coverage_mean": float(a_raw["coordinate_coverage_mean"]),
+            "axs_ucb_alpha0_archiveHash": a_raw["archiveHash"],
+            "axs_ucb_alpha0_poolHash": a_raw["poolHash"],
+            # RANDOM baseline
+            "random_coordinate_coverage_mean": float(random_raw["coordinate_coverage_mean"]),
+            "random_archiveHash": random_raw["archiveHash"],
+            "random_poolHash": random_raw["poolHash"],
+            "random_traceHashes": random_raw["traceHashes"],
+        }
 
-    # ---- build arm entries ----
-    default_nmi = {fam: float(raw["slate_excess_nmi"]) for fam, raw in default_raw_by_family.items()}
-    alpha0_nmi = {fam: float(raw["slate_excess_nmi"]) for fam, raw in alpha0_raw_by_family.items()}
+    # ---- derive all report values exclusively from family_blocks ----
+    default_nmi = {fam: float(family_blocks[fam]["slate_excess_nmi"]) for fam in families}
+    alpha0_nmi = {fam: float(family_blocks[fam]["axs_ucb_alpha0_slate_excess_nmi"]) for fam in families}
 
     default_cov_mean = float(
-        sum(raw["coordinate_coverage_mean"] for raw in default_raw_by_family.values())
-        / len(default_raw_by_family)
+        sum(family_blocks[fam]["coordinate_coverage_mean"] for fam in families) / len(families)
     )
     alpha0_cov_mean = float(
-        sum(raw["coordinate_coverage_mean"] for raw in alpha0_raw_by_family.values())
-        / len(alpha0_raw_by_family)
+        sum(family_blocks[fam]["axs_ucb_alpha0_coordinate_coverage_mean"] for fam in families)
+        / len(families)
+    )
+    random_coverage_mean = float(
+        sum(family_blocks[fam]["random_coordinate_coverage_mean"] for fam in families) / len(families)
     )
 
     default_entry = build_arm_entry(
@@ -201,20 +213,6 @@ def run_axs_003(
         metric, alpha0_nmi, alpha0_cov_mean, random_coverage_mean,
         degenerate_reason_prefix="axs_ucb_alpha0",
     )
-
-    # ---- family_blocks for replay ----
-    # Each family block: reportable of the default arm (primary); all arm hashes included
-    family_blocks: Dict[str, Dict[str, Any]] = {}
-    for fam in [str(s) for s in base_seeds]:
-        d_raw = default_raw_by_family[fam]
-        a_raw = alpha0_raw_by_family[fam]
-        combined = {
-            **reportable_block(d_raw),
-            "axs_ucb_alpha0_slate_excess_nmi": float(a_raw["slate_excess_nmi"]),
-            "axs_ucb_alpha0_archiveHash": a_raw["archiveHash"],
-            "axs_ucb_alpha0_poolHash": a_raw["poolHash"],
-        }
-        family_blocks[fam] = combined
 
     def recompute_fn(family: str) -> Dict[str, Any]:
         seed = int(family)
@@ -228,13 +226,22 @@ def run_axs_003(
             seed, H=H_eff, k=k, pool_size=pool_size, n_permutations=n_permutations,
             bases=bases, archive_cfg=archive_cfg,
         )
-        result = {
+        r = run_arm_family(
+            lambda: RandomPolicy({"k": k}),
+            seed, H=H_eff, k=k, pool_size=pool_size, n_permutations=n_permutations,
+            bases=bases, archive_cfg=archive_cfg,
+        )
+        return {
             **reportable_block(d),
             "axs_ucb_alpha0_slate_excess_nmi": float(a["slate_excess_nmi"]),
+            "axs_ucb_alpha0_coordinate_coverage_mean": float(a["coordinate_coverage_mean"]),
             "axs_ucb_alpha0_archiveHash": a["archiveHash"],
             "axs_ucb_alpha0_poolHash": a["poolHash"],
+            "random_coordinate_coverage_mean": float(r["coordinate_coverage_mean"]),
+            "random_archiveHash": r["archiveHash"],
+            "random_poolHash": r["poolHash"],
+            "random_traceHashes": r["traceHashes"],
         }
-        return result
 
     body_extra = {
         "arms": {

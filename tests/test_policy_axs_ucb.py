@@ -1143,6 +1143,12 @@ class TestYokedPerCallConfigConsistency:
 #   hash_seeded         : ['c15', 'c14', 'c13', 'c11']
 #   feature_lexicographic: ['c15', 'c14', 'c13', 'c11']
 #   yoked               : ['c15', 'c14', 'c13', 'c12']
+#
+# NOTE (AXS-P0 T4 리뷰 반영): AxsYokedBonusPolicy.policy_version() now excludes
+#   schedule_path from the hash material (path-independence fix). The yoked golden
+#   value is unchanged because the slate tiebreak happens to be unaffected at this
+#   particular (pool, trace, seed) — but the policy_version hash itself is now
+#   path-independent (same content at different paths → identical policy_version).
 
 class TestGoldenSlateRegression:
     """Byte-identical slate regression tests. Changing these requires a deliberate
@@ -1320,3 +1326,64 @@ class TestSchedulePathValidation:
             p.select(_make_pool(), TraceState(), 7)
         msg = str(exc_info.value)
         assert any(ord(c) > 127 for c in msg), f"Expected Korean error, got: {msg!r}"
+
+
+# ---------------------------------------------------------------------------
+# 16. Path independence tests (AXS-P0 T4 리뷰 반영)
+# ---------------------------------------------------------------------------
+
+class TestYokedPathIndependence:
+    def test_same_schedule_content_different_paths_identical_policy_version(self, tmp_path):
+        """Same schedule content at two paths -> identical policy_version (AXS-P0 T4 fix)."""
+        d1 = tmp_path / "loc1"
+        d2 = tmp_path / "loc2"
+        d1.mkdir()
+        d2.mkdir()
+        from shutil import copy
+        sched_path1 = _make_yoked_schedule(d1)
+        sched_path2 = d2 / "other_name.json"
+        copy(sched_path1, sched_path2)
+        body = json.loads(sched_path1.read_text())
+        p1 = AxsYokedBonusPolicy({
+            "k": 4,
+            "schedule_path": str(sched_path1),
+            "schedule_hash": body["scheduleHash"],
+        })
+        p2 = AxsYokedBonusPolicy({
+            "k": 4,
+            "schedule_path": str(sched_path2),
+            "schedule_hash": body["scheduleHash"],
+        })
+        assert p1.policy_version() == p2.policy_version(), (
+            f"Same content at different paths must yield same policy_version; "
+            f"got {p1.policy_version()[:12]} != {p2.policy_version()[:12]}"
+        )
+
+    def test_same_schedule_content_different_paths_identical_slate(self, tmp_path):
+        """Same schedule content at two paths -> identical slate selection."""
+        d1 = tmp_path / "loc1"
+        d2 = tmp_path / "loc2"
+        d1.mkdir()
+        d2.mkdir()
+        from shutil import copy
+        sched_path1 = _make_yoked_schedule(d1)
+        sched_path2 = d2 / "other_name.json"
+        copy(sched_path1, sched_path2)
+        body = json.loads(sched_path1.read_text())
+        pool = _make_pool(16)
+        trace = _trace_with([pool[0], pool[5]])
+        p1 = AxsYokedBonusPolicy({
+            "k": 4,
+            "schedule_path": str(sched_path1),
+            "schedule_hash": body["scheduleHash"],
+        })
+        p2 = AxsYokedBonusPolicy({
+            "k": 4,
+            "schedule_path": str(sched_path2),
+            "schedule_hash": body["scheduleHash"],
+        })
+        s1 = p1.select(pool, trace, 7)
+        s2 = p2.select(pool, trace, 7)
+        assert s1 == s2, (
+            f"Same content at different paths must yield same slate; got {s1} vs {s2}"
+        )

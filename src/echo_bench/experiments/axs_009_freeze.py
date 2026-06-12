@@ -16,7 +16,6 @@ are Korean per the project logging convention.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
@@ -24,7 +23,6 @@ import yaml
 
 from echo_bench.env.horizon import default_h, load_horizon
 from echo_bench.experiments.axs_common import (
-    REPLAY_MODES,
     bootstrap_block,
     build_arm_entry,
     build_axs_report,
@@ -37,15 +35,11 @@ from echo_bench.experiments.axs_common import (
     run_arm_family,
     write_report,
 )
-from echo_bench.experiments.e_leakage_diagnostic import EXPANDED_PROBE_SET
-from echo_bench.experiments.e_seed_families import DEFAULT_BASE_SEEDS
 from echo_bench.logging import get_logger, log_ko
 from echo_bench.metrics.leakage import DEFAULT_NULL_PERMUTATIONS
 from echo_bench.metrics.separability import channel_separated_separability
 from echo_bench.policies.axs_ucb import AxsUcbPolicy, TraceView
 from echo_bench.policies.random import RandomPolicy
-from echo_bench.probes.strategy_probes import get_probe
-from echo_bench.utils.hash import canonical_hash
 
 __all__ = ["run_axs_009", "main"]
 
@@ -165,7 +159,7 @@ def run_axs_009(
     # ---- per-arm, per-family runs ----
     # arm_id -> family -> raw block (includes roundsByProbe)
     arm_raw: Dict[str, Dict[str, Dict[str, Any]]] = {arm_id: {} for arm_id in ARM_IDS}
-    random_coverage_by_family: Dict[str, float] = {}
+    random_raw_by_family: Dict[str, Dict[str, Any]] = {}
 
     for seed in base_seeds:
         fam = str(seed)
@@ -185,26 +179,22 @@ def run_axs_009(
             )
             arm_raw[arm_id][fam] = raw
 
-        # RANDOM baseline
-        random_raw = run_arm_family(
+        # RANDOM baseline — stored per family for single-source binding
+        random_raw_by_family[fam] = run_arm_family(
             lambda: RandomPolicy({"k": k}),
             seed,
             H=H_eff, k=k, pool_size=pool_size, n_permutations=n_permutations,
             bases=bases, archive_cfg=archive_cfg,
         )
-        random_coverage_by_family[fam] = float(random_raw["coordinate_coverage_mean"])
-
-    random_coverage_mean = float(
-        sum(random_coverage_by_family.values()) / len(random_coverage_by_family)
-    )
 
     # ---- compute post_freeze_incremental_divergence ----
     # divergence[arm_id][fam] = nmi_full - nmi_prefix
+    families = [str(s) for s in base_seeds]
     divergence: Dict[str, Dict[str, float]] = {}
     for arm_id in ARM_IDS:
         divergence[arm_id] = {}
         fr = freeze_rounds[arm_id]
-        for fam in [str(s) for s in base_seeds]:
+        for fam in families:
             raw = arm_raw[arm_id][fam]
             nmi_full = float(raw["slate_excess_nmi"])
             if fr is None:
@@ -221,20 +211,50 @@ def run_axs_009(
                 f"nmi_full={nmi_full:+.6f}, div={div:+.6f}",
             )
 
+    # ---- family_blocks: single authoritative source for all values ----
+    family_blocks: Dict[str, Dict[str, Any]] = {}
+    for fam in families:
+        random_raw = random_raw_by_family[fam]
+        block = {
+            **reportable_block(arm_raw["freeze_none"][fam]),
+            # RANDOM baseline
+            "random_coordinate_coverage_mean": float(random_raw["coordinate_coverage_mean"]),
+            "random_archiveHash": random_raw["archiveHash"],
+            "random_poolHash": random_raw["poolHash"],
+            "random_traceHashes": random_raw["traceHashes"],
+        }
+        # Include all arms' key metrics
+        for arm_id in ARM_IDS:
+            block[f"{arm_id}_slate_excess_nmi"] = float(
+                arm_raw[arm_id][fam]["slate_excess_nmi"]
+            )
+            block[f"{arm_id}_post_freeze_incremental_divergence"] = float(
+                divergence[arm_id][fam]
+            )
+            block[f"{arm_id}_coordinate_coverage_mean"] = float(
+                arm_raw[arm_id][fam]["coordinate_coverage_mean"]
+            )
+        family_blocks[fam] = block
+
+    # ---- derive all report values exclusively from family_blocks ----
+    random_coverage_mean = float(
+        sum(family_blocks[fam]["random_coordinate_coverage_mean"] for fam in families)
+        / len(families)
+    )
+
     # ---- build arm entries ----
     metric_nmi = "slate_excess_nmi"
     metric_div = "post_freeze_incremental_divergence"
 
     arms_report: Dict[str, Any] = {}
     for arm_id in ARM_IDS:
-        nmi_by_fam = {fam: float(arm_raw[arm_id][fam]["slate_excess_nmi"])
-                      for fam in [str(s) for s in base_seeds]}
-        div_by_fam = divergence[arm_id]
-
+        nmi_by_fam = {fam: float(family_blocks[fam][f"{arm_id}_slate_excess_nmi"])
+                      for fam in families}
+        div_by_fam = {fam: float(family_blocks[fam][f"{arm_id}_post_freeze_incremental_divergence"])
+                      for fam in families}
         cov_mean = float(
-            sum(arm_raw[arm_id][fam]["coordinate_coverage_mean"]
-                for fam in [str(s) for s in base_seeds])
-            / len(base_seeds)
+            sum(family_blocks[fam][f"{arm_id}_coordinate_coverage_mean"] for fam in families)
+            / len(families)
         )
 
         # Build base entry via build_arm_entry (handles degenerate logic)
@@ -256,24 +276,9 @@ def run_axs_009(
 
         arms_report[arm_id] = entry
 
-    # ---- family_blocks for replay ----
-    family_blocks: Dict[str, Dict[str, Any]] = {}
-    for fam in [str(s) for s in base_seeds]:
-        primary = reportable_block(arm_raw["freeze_none"][fam])
-        # Include all arms' key metrics
-        for arm_id in ARM_IDS:
-            prefix = arm_id.replace("_", "") + "_"
-            primary[f"{arm_id}_slate_excess_nmi"] = float(
-                arm_raw[arm_id][fam]["slate_excess_nmi"]
-            )
-            primary[f"{arm_id}_post_freeze_incremental_divergence"] = float(
-                divergence[arm_id][fam]
-            )
-        family_blocks[fam] = primary
-
     def recompute_fn(family: str) -> Dict[str, Any]:
         seed = int(family)
-        result = {}
+        result: Dict[str, Any] = {}
         primary_raw = None
         for arm_id in ARM_IDS:
             fr = freeze_rounds[arm_id]
@@ -295,6 +300,16 @@ def run_axs_009(
                 div = float(nmi_full - nmi_prefix)
             result[f"{arm_id}_slate_excess_nmi"] = nmi_full
             result[f"{arm_id}_post_freeze_incremental_divergence"] = div
+            result[f"{arm_id}_coordinate_coverage_mean"] = float(raw["coordinate_coverage_mean"])
+        r = run_arm_family(
+            lambda: RandomPolicy({"k": k}),
+            seed, H=H_eff, k=k, pool_size=pool_size, n_permutations=n_permutations,
+            bases=bases, archive_cfg=archive_cfg,
+        )
+        result["random_coordinate_coverage_mean"] = float(r["coordinate_coverage_mean"])
+        result["random_archiveHash"] = r["archiveHash"]
+        result["random_poolHash"] = r["poolHash"]
+        result["random_traceHashes"] = r["traceHashes"]
         assert primary_raw is not None
         return {**reportable_block(primary_raw), **result}
 

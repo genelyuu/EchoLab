@@ -11,11 +11,17 @@ Guardrails
 
 All identifiers, config keys, and paths stay English; runtime log messages
 are Korean per the project logging convention.
+
+yokedScheduleNote: The yoked schedule content is committed in git and pinned by
+yokedScheduleHash (schedule_hash in config). To recover the schedule, run:
+    git show <runCommit>:configs/prereg/axs_004c_yoked_schedule_v1.json
+The schedule file path is NOT part of the policy_version hash — only the
+schedule content hash (yokedScheduleHash) is. This ensures path-independence:
+the same schedule content at any filesystem location yields identical results.
 """
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
@@ -23,7 +29,6 @@ import yaml
 
 from echo_bench.env.horizon import default_h, load_horizon
 from echo_bench.experiments.axs_common import (
-    REPLAY_MODES,
     bootstrap_block,
     build_arm_entry,
     build_axs_report,
@@ -36,7 +41,6 @@ from echo_bench.experiments.axs_common import (
     run_arm_family,
     write_report,
 )
-from echo_bench.experiments.e_seed_families import DEFAULT_BASE_SEEDS
 from echo_bench.logging import get_logger, log_ko
 from echo_bench.metrics.leakage import DEFAULT_NULL_PERMUTATIONS
 from echo_bench.policies.axs_ucb import AxsUcbPolicy, AxsYokedBonusPolicy
@@ -180,7 +184,7 @@ def run_axs_004c(
 
     default_raw_by_family: Dict[str, Dict[str, Any]] = {}
     yoked_raw_by_family: Dict[str, Dict[str, Any]] = {}
-    random_coverage_by_family: Dict[str, float] = {}
+    random_raw_by_family: Dict[str, Dict[str, Any]] = {}
 
     for seed in base_seeds:
         fam = str(seed)
@@ -198,29 +202,47 @@ def run_axs_004c(
             H=H_eff, k=k, pool_size=pool_size, n_permutations=n_permutations,
             bases=bases, archive_cfg=archive_cfg,
         )
-        random_raw = run_arm_family(
+        # RANDOM baseline — stored per family for single-source binding
+        random_raw_by_family[fam] = run_arm_family(
             lambda: RandomPolicy({"k": k}),
             seed,
             H=H_eff, k=k, pool_size=pool_size, n_permutations=n_permutations,
             bases=bases, archive_cfg=archive_cfg,
         )
-        random_coverage_by_family[fam] = float(random_raw["coordinate_coverage_mean"])
 
-    random_coverage_mean = float(
-        sum(random_coverage_by_family.values()) / len(random_coverage_by_family)
-    )
+    # ---- family_blocks: single authoritative source for all values ----
+    families = [str(s) for s in base_seeds]
+    family_blocks: Dict[str, Dict[str, Any]] = {}
+    for fam in families:
+        d_raw = default_raw_by_family[fam]
+        y_raw = yoked_raw_by_family[fam]
+        random_raw = random_raw_by_family[fam]
+        family_blocks[fam] = {
+            **reportable_block(d_raw),
+            "axs_yoked_bonus_slate_excess_nmi": float(y_raw["slate_excess_nmi"]),
+            "axs_yoked_bonus_coordinate_coverage_mean": float(y_raw["coordinate_coverage_mean"]),
+            "axs_yoked_bonus_archiveHash": y_raw["archiveHash"],
+            "axs_yoked_bonus_poolHash": y_raw["poolHash"],
+            # RANDOM baseline
+            "random_coordinate_coverage_mean": float(random_raw["coordinate_coverage_mean"]),
+            "random_archiveHash": random_raw["archiveHash"],
+            "random_poolHash": random_raw["poolHash"],
+            "random_traceHashes": random_raw["traceHashes"],
+        }
 
-    # ---- build arm entries ----
-    default_nmi = {fam: float(raw["slate_excess_nmi"]) for fam, raw in default_raw_by_family.items()}
-    yoked_nmi = {fam: float(raw["slate_excess_nmi"]) for fam, raw in yoked_raw_by_family.items()}
+    # ---- derive all report values exclusively from family_blocks ----
+    default_nmi = {fam: float(family_blocks[fam]["slate_excess_nmi"]) for fam in families}
+    yoked_nmi = {fam: float(family_blocks[fam]["axs_yoked_bonus_slate_excess_nmi"]) for fam in families}
 
     default_cov_mean = float(
-        sum(raw["coordinate_coverage_mean"] for raw in default_raw_by_family.values())
-        / len(default_raw_by_family)
+        sum(family_blocks[fam]["coordinate_coverage_mean"] for fam in families) / len(families)
     )
     yoked_cov_mean = float(
-        sum(raw["coordinate_coverage_mean"] for raw in yoked_raw_by_family.values())
-        / len(yoked_raw_by_family)
+        sum(family_blocks[fam]["axs_yoked_bonus_coordinate_coverage_mean"] for fam in families)
+        / len(families)
+    )
+    random_coverage_mean = float(
+        sum(family_blocks[fam]["random_coordinate_coverage_mean"] for fam in families) / len(families)
     )
 
     default_entry = build_arm_entry(
@@ -231,19 +253,6 @@ def run_axs_004c(
         metric, yoked_nmi, yoked_cov_mean, random_coverage_mean,
         degenerate_reason_prefix="axs_yoked_bonus",
     )
-
-    # ---- family_blocks for replay ----
-    family_blocks: Dict[str, Dict[str, Any]] = {}
-    for fam in [str(s) for s in base_seeds]:
-        d_raw = default_raw_by_family[fam]
-        y_raw = yoked_raw_by_family[fam]
-        combined = {
-            **reportable_block(d_raw),
-            "axs_yoked_bonus_slate_excess_nmi": float(y_raw["slate_excess_nmi"]),
-            "axs_yoked_bonus_archiveHash": y_raw["archiveHash"],
-            "axs_yoked_bonus_poolHash": y_raw["poolHash"],
-        }
-        family_blocks[fam] = combined
 
     eff_sched_path_capture = eff_schedule_path
     schedule_hash_capture = schedule_hash
@@ -264,11 +273,21 @@ def run_axs_004c(
             seed, H=H_eff, k=k, pool_size=pool_size, n_permutations=n_permutations,
             bases=bases, archive_cfg=archive_cfg,
         )
+        r = run_arm_family(
+            lambda: RandomPolicy({"k": k}),
+            seed, H=H_eff, k=k, pool_size=pool_size, n_permutations=n_permutations,
+            bases=bases, archive_cfg=archive_cfg,
+        )
         return {
             **reportable_block(d),
             "axs_yoked_bonus_slate_excess_nmi": float(y["slate_excess_nmi"]),
+            "axs_yoked_bonus_coordinate_coverage_mean": float(y["coordinate_coverage_mean"]),
             "axs_yoked_bonus_archiveHash": y["archiveHash"],
             "axs_yoked_bonus_poolHash": y["poolHash"],
+            "random_coordinate_coverage_mean": float(r["coordinate_coverage_mean"]),
+            "random_archiveHash": r["archiveHash"],
+            "random_poolHash": r["poolHash"],
+            "random_traceHashes": r["traceHashes"],
         }
 
     body_extra = {
@@ -280,6 +299,11 @@ def run_axs_004c(
             "RANDOM": {"coordinate_coverage_mean": random_coverage_mean},
         },
         "yokedScheduleHash": schedule_hash,
+        "yokedScheduleNote": (
+            "The yoked schedule content is committed in git (recover via "
+            "git show runCommit:configs/prereg/axs_004c_yoked_schedule_v1.json) "
+            "and pinned here by yokedScheduleHash."
+        ),
     }
 
     report = build_axs_report(

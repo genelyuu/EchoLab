@@ -18,7 +18,6 @@ are Korean per the project logging convention.
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
@@ -26,7 +25,6 @@ import yaml
 
 from echo_bench.env.horizon import default_h, load_horizon
 from echo_bench.experiments.axs_common import (
-    REPLAY_MODES,
     bootstrap_block,
     build_axs_report,
     dry_run_plan,
@@ -38,7 +36,6 @@ from echo_bench.experiments.axs_common import (
     run_arm_family,
     write_report,
 )
-from echo_bench.experiments.e_seed_families import DEFAULT_BASE_SEEDS
 from echo_bench.logging import get_logger, log_ko
 from echo_bench.metrics.leakage import DEFAULT_NULL_PERMUTATIONS
 from echo_bench.policies.axs_ucb import AxsUcbPolicy
