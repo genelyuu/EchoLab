@@ -1,0 +1,74 @@
+{
+  "calibrationFamilies": [
+    "123",
+    "124",
+    "777",
+    "55555"
+  ],
+  "calibrationId": "axs-dead-calibration-v1",
+  "deadArm": {
+    "deadReportHashes": {
+      "123": "c5e61828af60eb0994e057b8a71bf6b4a74c9b12e10a676147464563874405bb",
+      "124": "c1380d6b96efe281f60a58964f2d241c8b518dfa0cbf5a1f55900bb4edd4c5aa",
+      "55555": "4cfda8cecfbe4dd2730f5afa1beb7c2652b515c0a1525bd651b8e26bb05c5f5c",
+      "777": "7f56e3b50dfe6cebef3e2221e3f3919f3af648d3ef2a3b736af489dc2fe2bec6"
+    },
+    "perFamily": {
+      "123": {
+        "coordinate_coverage_mean": 0.16071428571428573,
+        "slate_excess_nmi_mean": 0.0
+      },
+      "124": {
+        "coordinate_coverage_mean": 0.14285714285714285,
+        "slate_excess_nmi_mean": 0.0
+      },
+      "55555": {
+        "coordinate_coverage_mean": 0.14285714285714285,
+        "slate_excess_nmi_mean": 0.0
+      },
+      "777": {
+        "coordinate_coverage_mean": 0.16071428571428573,
+        "slate_excess_nmi_mean": 0.0
+      }
+    },
+    "policyDescription": "DeadConstantPolicy: deterministic, trace-blind, probe-blind constant admissible slate \u2014 pool sorted canonically by cardId, greedy distinct-basis fill to 4 bases then canonical-order fill; identical slate every round regardless of trace content.",
+    "policyVersion": "efc74e26261b82b9ecb4ca3814defa2ce897d483d225c0624e26c96b86f3c920"
+  },
+  "floorDerivation": {
+    "absoluteFloor": 0.16964285714285715,
+    "formula": "midpoint(max(coverage_dead), min(live key-arm coverage))",
+    "maxCoverageDead": 0.16071428571428573,
+    "minLiveKeyArmCoverage": 0.17857142857142858
+  },
+  "liveKeyArmSource": {
+    "arm": "freeze_at_1",
+    "experiment": "AXS-009 (pilot_v3)",
+    "perFamilyCoverage": {
+      "123": 0.17857142857142858,
+      "124": 0.32142857142857145,
+      "55555": 0.23214285714285715,
+      "777": 0.30357142857142855
+    },
+    "reportHashes": {
+      "123": "48dfd3ec2fd4a1306172a19d032fef34681e9a623bcc6cf95d92bdfa8f53956b",
+      "124": "4a8f97951d6aff19fd810e235dc77f6a87c7d8180e36fed1255fef8843a31b1e",
+      "55555": "43b0660ebf3bd2cb094d5a7028f37733ea16bcabe02e6caf6121c3b75353a662",
+      "777": "3f173dd3ca395ab33330f5b7fea90fd97ff0a064a34f212a2c2ff65007dd7e37"
+    }
+  },
+  "purpose": "Absolute coordinate-coverage floor calibration for the v3 role-specific utility guard on key manipulation arms, fixed between measured dead-arm coverage and measured minimum live key-arm coverage.",
+  "runCommit": "03bb4c83585fd0b05f1160fccc85554db87e2d95",
+  "runParams": {
+    "H": 8,
+    "base_seeds": [
+      123,
+      124,
+      777,
+      55555
+    ],
+    "k": 4,
+    "n_permutations": 200,
+    "pool_size": 64
+  },
+  "summaryHash": "12b4875cefe0fafd9d0e383c000d04b733091c41f7a5ff5cc651ca4c8fd6818e"
+}
