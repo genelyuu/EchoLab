@@ -1424,3 +1424,883 @@ def test_cli_non_dict_report_exit1(tmp_path):
 
     assert ret == 1, "비-dict JSON 리포트는 exit 1 을 반환해야 함"
     assert "Traceback" not in stderr_output, "트레이스백이 노출되어서는 안 됨"
+
+
+# ===========================================================================
+# v3 prereg 픽스처 빌더 (G-022b-v3 / G-022d-v3)
+# ===========================================================================
+
+_REAL_PREREG_V3 = _REPO_ROOT / "configs" / "prereg" / "axs_mechanism_prereg_v3_draft.json"
+
+# v3 평가 패밀리 (v1 과 동일)
+EVAL_FAMILIES_V3 = ["42", "7", "101", "2025", "31337"]
+
+# v3 등록 완료 prereg — 원본 draft 를 복사한 뒤 status 를 "registered" 로 변경한 버전
+# (모든 정상-통과 픽스처는 이 사본을 사용)
+
+
+def _make_v3_prereg_registered(tmp_path: Path) -> tuple[Path, Dict[str, Any]]:
+    """v3 draft 를 tmp_path 로 복사 + status → 'registered' 로 변경 후 저장."""
+    import copy as _copy
+
+    v3_src = _REAL_PREREG_V3
+    with open(v3_src, "r", encoding="utf-8") as fh:
+        v3_data = json.load(fh)
+    v3_reg = _copy.deepcopy(v3_data)
+    v3_reg["status"] = "registered"
+
+    prereg_path = tmp_path / "prereg_v3_registered.json"
+    prereg_path.write_text(
+        json.dumps(v3_reg, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return prereg_path, v3_reg
+
+
+def _v3_per_family(metric: str, value: float = 0.08) -> Dict[str, Any]:
+    """v3 perFamily — 모든 5개 패밀리 양수값."""
+    return {fam: {metric: value} for fam in EVAL_FAMILIES_V3}
+
+
+def _v3_per_family_custom(metric: str, vals: Dict[str, float]) -> Dict[str, Any]:
+    """v3 perFamily — 패밀리별 지정 값."""
+    return {fam: {metric: vals[fam]} for fam in EVAL_FAMILIES_V3}
+
+
+def _v3_bootstrap(metric: str, ci_low: float = 0.05) -> Dict[str, Any]:
+    return {metric: {"mean": 0.08, "ciLower": ci_low, "ciUpper": 0.11}}
+
+
+def _v3_build_stamp(
+    prereg: Dict[str, Any],
+    p_hash: str,
+    prereg_path_str: str,
+    *,
+    prereg_commit: str = GOOD_PREREG_COMMIT,
+    run_commit: str = GOOD_RUN_COMMIT,
+) -> Dict[str, Any]:
+    return {
+        "preregId": prereg["preregId"],
+        "preregVersion": prereg["version"],
+        "preregPath": prereg_path_str,
+        "preregHash": p_hash,
+        "preregCommit": prereg_commit,
+        "runCommit": run_commit,
+    }
+
+
+def _v3_build_imp_report(
+    prereg: Dict[str, Any],
+    p_hash: str,
+    prereg_path_str: str,
+    *,
+    freeze1_vals: Optional[Dict[str, float]] = None,
+    freeze_none_vals: Optional[Dict[str, float]] = None,
+    freeze1_degenerate: bool = False,
+    random_cov: float = 0.50,
+    arm_cov_freeze1: float = 0.60,
+    arm_cov_quarter: float = 0.62,
+    arm_cov_half: float = 0.64,
+    arm_cov_none: float = 0.65,
+) -> Dict[str, Any]:
+    """AXS-IMP-001 리포트 빌더.
+
+    freeze1_vals / freeze_none_vals: None 이면 기본 양수값(0.12/0.04).
+    freeze1_degenerate=True: freeze_at_1 arm 을 RANDOM 미달로 표시.
+    """
+    metric = "slate_excess_nmi"
+    if freeze1_vals is None:
+        freeze1_vals = {fam: 0.12 for fam in EVAL_FAMILIES_V3}
+    if freeze_none_vals is None:
+        freeze_none_vals = {fam: 0.04 for fam in EVAL_FAMILIES_V3}
+
+    # freeze_at_1 arm
+    arm_freeze1: Dict[str, Any] = {
+        "perFamily": _v3_per_family_custom(metric, freeze1_vals),
+        "bootstrap": _v3_bootstrap(metric),
+        "utility": {"coordinate_coverage_mean": arm_cov_freeze1 if not freeze1_degenerate else random_cov - 0.10},
+    }
+    if freeze1_degenerate:
+        arm_freeze1["degenerate"] = True
+        arm_freeze1["degenerateReason"] = "RANDOM 기준 미달"
+        arm_freeze1["includedInMechanismClaim"] = False
+
+    r = {
+        "reportId": "rep-axs-imp-001-v1",
+        "experimentId": "AXS-IMP-001",
+        "preregStamp": _v3_build_stamp(prereg, p_hash, prereg_path_str),
+        "replayAudit": {"replayable": True},
+        "baselines": {"RANDOM": {"coordinate_coverage_mean": random_cov}},
+        "arms": {
+            "freeze_at_1": arm_freeze1,
+            "freeze_at_quarter": {
+                "perFamily": _v3_per_family(metric, 0.09),
+                "bootstrap": _v3_bootstrap(metric),
+                "utility": {"coordinate_coverage_mean": arm_cov_quarter},
+            },
+            "freeze_at_half": {
+                "perFamily": _v3_per_family(metric, 0.07),
+                "bootstrap": _v3_bootstrap(metric),
+                "utility": {"coordinate_coverage_mean": arm_cov_half},
+            },
+            "freeze_none": {
+                "perFamily": _v3_per_family_custom(metric, freeze_none_vals),
+                "bootstrap": _v3_bootstrap(metric, ci_low=-0.01),
+                "utility": {"coordinate_coverage_mean": arm_cov_none},
+            },
+        },
+    }
+    return _finalize_report(r)
+
+
+def _v3_build_noise_report(
+    prereg: Dict[str, Any],
+    p_hash: str,
+    prereg_path_str: str,
+    *,
+    default_vals: Optional[Dict[str, float]] = None,
+    yoked_vals: Optional[Dict[str, float]] = None,
+    default_degenerate: bool = False,
+    random_cov: float = 0.50,
+    arm_cov_default: float = 0.60,
+    arm_cov_yoked: float = 0.55,
+) -> Dict[str, Any]:
+    """AXS-NOISE-001 리포트 빌더."""
+    metric = "slate_excess_nmi"
+    if default_vals is None:
+        default_vals = {fam: 0.10 for fam in EVAL_FAMILIES_V3}
+    if yoked_vals is None:
+        yoked_vals = {fam: 0.02 for fam in EVAL_FAMILIES_V3}
+
+    arm_default: Dict[str, Any] = {
+        "perFamily": _v3_per_family_custom(metric, default_vals),
+        "bootstrap": _v3_bootstrap(metric),
+        "utility": {"coordinate_coverage_mean": arm_cov_default if not default_degenerate else random_cov - 0.10},
+    }
+    if default_degenerate:
+        arm_default["degenerate"] = True
+        arm_default["degenerateReason"] = "RANDOM 기준 미달"
+        arm_default["includedInMechanismClaim"] = False
+
+    r = {
+        "reportId": "rep-axs-noise-001-v1",
+        "experimentId": "AXS-NOISE-001",
+        "preregStamp": _v3_build_stamp(prereg, p_hash, prereg_path_str),
+        "replayAudit": {"replayable": True},
+        "baselines": {"RANDOM": {"coordinate_coverage_mean": random_cov}},
+        "arms": {
+            "axs_ucb_default": arm_default,
+            "axs_yoked_bonus": {
+                "perFamily": _v3_per_family_custom(metric, yoked_vals),
+                "bootstrap": _v3_bootstrap(metric, ci_low=-0.03),
+                "utility": {"coordinate_coverage_mean": arm_cov_yoked},
+            },
+        },
+    }
+    return _finalize_report(r)
+
+
+def _v3_build_tb001_report(
+    prereg: Dict[str, Any],
+    p_hash: str,
+    prereg_path_str: str,
+    *,
+    strict: bool = True,
+) -> Dict[str, Any]:
+    """AXS-TB-001 리포트 빌더 (strict_pass 또는 soft_pass)."""
+    estimate_outside = 0.03 if not strict else 0.079
+    r = {
+        "reportId": "rep-axs-tb-001-v1",
+        "experimentId": "AXS-TB-001",
+        "preregStamp": _v3_build_stamp(prereg, p_hash, prereg_path_str),
+        "replayAudit": {"replayable": True},
+        "tieBreak": {
+            "baseline": {
+                "sign": "+",
+                "estimate": 0.08,
+                "ciLower": 0.05,
+                "ciUpper": 0.11,
+                "trackDecision": "S",
+            },
+            "variants": {
+                "reverse": {"sign": "+", "estimate": estimate_outside, "trackDecision": "S"},
+                "hash_seeded": {"sign": "+", "estimate": 0.081, "trackDecision": "S"},
+                "feature_lexicographic": {"sign": "+", "estimate": 0.078, "trackDecision": "S"},
+            },
+        },
+    }
+    return _finalize_report(r)
+
+
+def _v3_build_alpha_report(
+    prereg: Dict[str, Any],
+    p_hash: str,
+    prereg_path_str: str,
+) -> Dict[str, Any]:
+    """AXS-ALPHA-EXP 리포트 빌더 (구조만)."""
+    metric = "slate_excess_nmi"
+    r = {
+        "reportId": "rep-axs-alpha-exp-v1",
+        "experimentId": "AXS-ALPHA-EXP",
+        "preregStamp": _v3_build_stamp(prereg, p_hash, prereg_path_str),
+        "replayAudit": {"replayable": True},
+        "arms": {
+            "axs_ucb_default": {
+                "perFamily": _v3_per_family(metric, 0.10),
+                "utility": {"coordinate_coverage_mean": 0.60},
+            },
+            "axs_ucb_alpha0": {
+                "perFamily": _v3_per_family(metric, 0.07),
+                "utility": {"coordinate_coverage_mean": 0.58},
+            },
+        },
+    }
+    return _finalize_report(r)
+
+
+def _build_v3_full_set(
+    tmp_path: Path,
+    *,
+    tb001_strict: bool = True,
+    freeze1_degenerate: bool = False,
+    noise_default_degenerate: bool = False,
+    include_alpha: bool = True,
+    imp_report_override: Optional[Dict[str, Any]] = None,
+    noise_report_override: Optional[Dict[str, Any]] = None,
+    prereg_override: Optional[Dict[str, Any]] = None,
+):
+    """v3 전체 리포트 세트 + 원장 + prereg 복사본 생성.
+
+    Returns: (prereg_path, report_paths, ledger_path, prereg_dict, p_hash)
+    """
+    if prereg_override is not None:
+        prereg_path = tmp_path / "prereg_v3.json"
+        prereg_path.write_text(
+            json.dumps(prereg_override, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        prereg = prereg_override
+    else:
+        prereg_path, prereg = _make_v3_prereg_registered(tmp_path)
+
+    p_hash = prereg_hash(prereg)
+    ps = str(prereg_path)
+
+    # IMP 리포트
+    if imp_report_override is not None:
+        imp_report = imp_report_override
+    else:
+        imp_report = _v3_build_imp_report(
+            prereg, p_hash, ps, freeze1_degenerate=freeze1_degenerate
+        )
+
+    # NOISE 리포트
+    if noise_report_override is not None:
+        noise_report = noise_report_override
+    else:
+        noise_report = _v3_build_noise_report(
+            prereg, p_hash, ps, default_degenerate=noise_default_degenerate
+        )
+
+    tb_report = _v3_build_tb001_report(prereg, p_hash, ps, strict=tb001_strict)
+    reports_data = [imp_report, noise_report, tb_report]
+    if include_alpha:
+        alpha_report = _v3_build_alpha_report(prereg, p_hash, ps)
+        reports_data.append(alpha_report)
+
+    ledger_path = _make_ledger(tmp_path)
+    report_paths = []
+    for r in reports_data:
+        rp = tmp_path / f"{r['reportId']}.json"
+        rp.write_text(json.dumps(r, indent=2, ensure_ascii=False), encoding="utf-8")
+        _register_report(ledger_path, r, prereg, p_hash, rp)
+        report_paths.append(rp)
+
+    return prereg_path, report_paths, ledger_path, prereg, p_hash
+
+
+# ===========================================================================
+# v3 정상 경로 테스트 — 6개 브랜치
+# ===========================================================================
+
+
+def test_v3_branch_imprint_washout_supported_strict(tmp_path):
+    """v3 정상 경로: branch=imprint_washout_supported, M2=True, caveatRequired=False (strict_pass)."""
+    prereg_path, report_paths, ledger_path, _, _ = _build_v3_full_set(
+        tmp_path, tb001_strict=True
+    )
+    result = evaluate_mechanism_license(
+        prereg_path,
+        report_paths,
+        ledger_path=ledger_path,
+        git_runner=_good_git_runner,
+    )
+    assert result.get("branch") == "imprint_washout_supported", (
+        f"branch 오류: {result.get('branch')!r}"
+    )
+    assert result["rungs"]["M2"] is True, "M2 는 True 여야 함"
+    assert result["caveatRequired"] is False
+    assert all(c["ok"] for c in result["checks"]), [
+        c for c in result["checks"] if not c["ok"]
+    ]
+
+
+def test_v3_branch_imprint_washout_supported_soft(tmp_path):
+    """v3 정상 경로: branch=imprint_washout_supported, M2=True, caveatRequired=True (soft_pass)."""
+    prereg_path, report_paths, ledger_path, _, _ = _build_v3_full_set(
+        tmp_path, tb001_strict=False
+    )
+    result = evaluate_mechanism_license(
+        prereg_path,
+        report_paths,
+        ledger_path=ledger_path,
+        git_runner=_good_git_runner,
+    )
+    assert result.get("branch") == "imprint_washout_supported"
+    assert result["rungs"]["M2"] is True
+    assert result["caveatRequired"] is True
+
+
+def test_v3_branch_degenerate_qualified(tmp_path):
+    """v3: freeze_at_1 degenerate + 통과 delta → branch=degenerate_qualified, M2=False."""
+    prereg_path, report_paths, ledger_path, _, _ = _build_v3_full_set(
+        tmp_path, freeze1_degenerate=True
+    )
+    result = evaluate_mechanism_license(
+        prereg_path,
+        report_paths,
+        ledger_path=ledger_path,
+        git_runner=_good_git_runner,
+    )
+    assert result.get("branch") == "degenerate_qualified", (
+        f"branch 오류: {result.get('branch')!r}"
+    )
+    assert result["rungs"]["M2"] is False, "degenerate_qualified 에서 M2 는 False 여야 함"
+
+
+def test_v3_branch_sign_inconsistency_no_claim(tmp_path):
+    """v3: delta_imp AND delta_noise 모두 부호 일관성 3/5 → branch=no_claim_m1_only."""
+    # 두 delta 모두 실패해야 no_claim_m1_only (한쪽만 실패 시 imprint_only 또는 noise_only)
+    three_pos_imp = {fam: (0.05 if fam in ["42", "7", "101"] else -0.02) for fam in EVAL_FAMILIES_V3}
+    baseline_vals = {fam: 0.0 for fam in EVAL_FAMILIES_V3}
+    three_pos_noise = {fam: (0.05 if fam in ["42", "7", "101"] else -0.02) for fam in EVAL_FAMILIES_V3}
+    yoked_baseline = {fam: 0.0 for fam in EVAL_FAMILIES_V3}
+
+    prereg_path, prereg = _make_v3_prereg_registered(tmp_path)
+    p_hash = prereg_hash(prereg)
+    ps = str(prereg_path)
+
+    # delta_imp: freeze_at_1 = three_pos_imp, freeze_none = 0 → 3/5 양수 (fail)
+    imp_report = _v3_build_imp_report(
+        prereg, p_hash, ps,
+        freeze1_vals=three_pos_imp,
+        freeze_none_vals=baseline_vals,
+    )
+    # delta_noise: default = three_pos_noise, yoked = 0 → 3/5 양수 (fail)
+    noise_report = _v3_build_noise_report(
+        prereg, p_hash, ps,
+        default_vals=three_pos_noise,
+        yoked_vals=yoked_baseline,
+    )
+    tb_report = _v3_build_tb001_report(prereg, p_hash, ps)
+    alpha_report = _v3_build_alpha_report(prereg, p_hash, ps)
+
+    ledger_path = _make_ledger(tmp_path)
+    report_paths = []
+    for r in [imp_report, noise_report, tb_report, alpha_report]:
+        rp = tmp_path / f"{r['reportId']}.json"
+        rp.write_text(json.dumps(r, indent=2, ensure_ascii=False), encoding="utf-8")
+        _register_report(ledger_path, r, prereg, p_hash, rp)
+        report_paths.append(rp)
+
+    result = evaluate_mechanism_license(
+        prereg_path, report_paths, ledger_path=ledger_path, git_runner=_good_git_runner
+    )
+    assert result.get("branch") == "no_claim_m1_only", (
+        f"두 delta 모두 3/5 일관성 실패 시 branch 오류: {result.get('branch')!r}"
+    )
+    assert result["rungs"]["M2"] is False
+
+
+def test_v3_branch_imprint_only(tmp_path):
+    """v3: delta_imp pass, delta_noise fail → branch=imprint_only."""
+    # delta_noise fail: default_vals 와 yoked_vals 를 동일하게 → delta = 0 → 양수 아님
+    zero_vals = {fam: 0.05 for fam in EVAL_FAMILIES_V3}
+
+    prereg_path, prereg = _make_v3_prereg_registered(tmp_path)
+    p_hash = prereg_hash(prereg)
+    ps = str(prereg_path)
+
+    imp_report = _v3_build_imp_report(prereg, p_hash, ps)
+    noise_report = _v3_build_noise_report(
+        prereg, p_hash, ps,
+        default_vals=zero_vals,
+        yoked_vals=zero_vals,  # delta = 0 → sign fail
+    )
+    tb_report = _v3_build_tb001_report(prereg, p_hash, ps)
+    alpha_report = _v3_build_alpha_report(prereg, p_hash, ps)
+
+    ledger_path = _make_ledger(tmp_path)
+    report_paths = []
+    for r in [imp_report, noise_report, tb_report, alpha_report]:
+        rp = tmp_path / f"{r['reportId']}.json"
+        rp.write_text(json.dumps(r, indent=2, ensure_ascii=False), encoding="utf-8")
+        _register_report(ledger_path, r, prereg, p_hash, rp)
+        report_paths.append(rp)
+
+    result = evaluate_mechanism_license(
+        prereg_path, report_paths, ledger_path=ledger_path, git_runner=_good_git_runner
+    )
+    assert result.get("branch") == "imprint_only", (
+        f"delta_noise fail 에서 branch 오류: {result.get('branch')!r}"
+    )
+    assert result["rungs"]["M2"] is False
+
+
+def test_v3_branch_noise_only(tmp_path):
+    """v3: delta_imp fail, delta_noise pass → branch=noise_only."""
+    # delta_imp fail: freeze_at_1 와 freeze_none 동일 → delta = 0
+    zero_vals = {fam: 0.05 for fam in EVAL_FAMILIES_V3}
+
+    prereg_path, prereg = _make_v3_prereg_registered(tmp_path)
+    p_hash = prereg_hash(prereg)
+    ps = str(prereg_path)
+
+    imp_report = _v3_build_imp_report(
+        prereg, p_hash, ps,
+        freeze1_vals=zero_vals,
+        freeze_none_vals=zero_vals,  # delta = 0 → sign fail
+    )
+    noise_report = _v3_build_noise_report(prereg, p_hash, ps)
+    tb_report = _v3_build_tb001_report(prereg, p_hash, ps)
+    alpha_report = _v3_build_alpha_report(prereg, p_hash, ps)
+
+    ledger_path = _make_ledger(tmp_path)
+    report_paths = []
+    for r in [imp_report, noise_report, tb_report, alpha_report]:
+        rp = tmp_path / f"{r['reportId']}.json"
+        rp.write_text(json.dumps(r, indent=2, ensure_ascii=False), encoding="utf-8")
+        _register_report(ledger_path, r, prereg, p_hash, rp)
+        report_paths.append(rp)
+
+    result = evaluate_mechanism_license(
+        prereg_path, report_paths, ledger_path=ledger_path, git_runner=_good_git_runner
+    )
+    assert result.get("branch") == "noise_only", (
+        f"delta_imp fail 에서 branch 오류: {result.get('branch')!r}"
+    )
+    assert result["rungs"]["M2"] is False
+
+
+# ===========================================================================
+# v3 red-team 픽스처
+# ===========================================================================
+
+
+def test_v3_redteam_draft_status_prereg_fails(tmp_path):
+    """red-team: status='design-draft' prereg + 완벽한 리포트 → prereg_status 실패."""
+    # v3 draft 원본 (status='design-draft') 그대로 사용
+    import copy as _copy
+    with open(_REAL_PREREG_V3, "r", encoding="utf-8") as fh:
+        v3_draft = json.load(fh)
+
+    # draft 그대로 저장 (status 변경 없음)
+    prereg_path = tmp_path / "prereg_v3_draft.json"
+    prereg_path.write_text(
+        json.dumps(v3_draft, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    prereg = v3_draft
+    p_hash = prereg_hash(prereg)
+    ps = str(prereg_path)
+
+    imp_report = _v3_build_imp_report(prereg, p_hash, ps)
+    noise_report = _v3_build_noise_report(prereg, p_hash, ps)
+    tb_report = _v3_build_tb001_report(prereg, p_hash, ps)
+    alpha_report = _v3_build_alpha_report(prereg, p_hash, ps)
+
+    ledger_path = _make_ledger(tmp_path)
+    report_paths = []
+    for r in [imp_report, noise_report, tb_report, alpha_report]:
+        rp = tmp_path / f"{r['reportId']}.json"
+        rp.write_text(json.dumps(r, indent=2, ensure_ascii=False), encoding="utf-8")
+        _register_report(ledger_path, r, prereg, p_hash, rp)
+        report_paths.append(rp)
+
+    result = evaluate_mechanism_license(
+        prereg_path, report_paths, ledger_path=ledger_path, git_runner=_good_git_runner
+    )
+    failed = [c for c in result["checks"] if not c["ok"]]
+    assert any(c["check"] == "prereg_status" for c in failed), (
+        "design-draft prereg 는 prereg_status 실패를 유발해야 함"
+    )
+    assert result["rungs"]["M2"] is False
+    # branch 가 integrity_fail 이어야 함
+    assert result.get("branch") == "integrity_fail"
+
+
+def test_v3_redteam_version2_no_status_fails(tmp_path):
+    """red-team: version=2 + status 키 없음 → prereg_status 실패."""
+    import copy as _copy
+    with open(_REAL_PREREG_V3, "r", encoding="utf-8") as fh:
+        v3_data = json.load(fh)
+    v2_no_status = _copy.deepcopy(v3_data)
+    v2_no_status["version"] = 2
+    v2_no_status.pop("status", None)  # status 제거
+
+    prereg_path = tmp_path / "prereg_v2_nostatus.json"
+    prereg_path.write_text(
+        json.dumps(v2_no_status, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    p_hash = prereg_hash(v2_no_status)
+    ps = str(prereg_path)
+
+    imp_report = _v3_build_imp_report(v2_no_status, p_hash, ps)
+    noise_report = _v3_build_noise_report(v2_no_status, p_hash, ps)
+    tb_report = _v3_build_tb001_report(v2_no_status, p_hash, ps)
+
+    ledger_path = _make_ledger(tmp_path)
+    report_paths = []
+    for r in [imp_report, noise_report, tb_report]:
+        rp = tmp_path / f"{r['reportId']}.json"
+        rp.write_text(json.dumps(r, indent=2, ensure_ascii=False), encoding="utf-8")
+        _register_report(ledger_path, r, v2_no_status, p_hash, rp)
+        report_paths.append(rp)
+
+    result = evaluate_mechanism_license(
+        prereg_path, report_paths, ledger_path=ledger_path, git_runner=_good_git_runner
+    )
+    failed = [c for c in result["checks"] if not c["ok"]]
+    assert any(c["check"] == "prereg_status" for c in failed), (
+        "version>=2 에서 status 없으면 prereg_status 실패해야 함"
+    )
+    assert result["rungs"]["M2"] is False
+
+
+def test_v3_redteam_version1_no_status_passes(tmp_path):
+    """v1 prereg 에 status 키 없어도 prereg_status 는 통과 (하위 호환)."""
+    # 기존 v1 테스트 세트 실행 — 이미 통과하지만, status 검사 확인
+    prereg_path, report_paths, ledger_path, _, _ = _build_full_set(tmp_path)
+    result = evaluate_mechanism_license(
+        prereg_path,
+        report_paths,
+        ledger_path=ledger_path,
+        git_runner=_good_git_runner,
+    )
+    status_check = next(
+        (c for c in result["checks"] if c["check"] == "prereg_status"), None
+    )
+    assert status_check is not None, "prereg_status 검사가 결과에 없음"
+    assert status_check["ok"] is True, (
+        f"v1 prereg 의 prereg_status 가 실패해서는 안 됨: {status_check['detail']}"
+    )
+    # v1 에서는 branch 없음
+    assert "branch" not in result, "v1 결과에 branch 가 있어서는 안 됨"
+
+
+def test_v3_redteam_arm_missing_from_imp(tmp_path):
+    """red-team: AXS-IMP-001 에서 arm 누락 → arms_complete 실패."""
+    prereg_path, prereg = _make_v3_prereg_registered(tmp_path)
+    p_hash = prereg_hash(prereg)
+    ps = str(prereg_path)
+
+    # freeze_at_quarter arm 제거
+    imp_report = _v3_build_imp_report(prereg, p_hash, ps)
+    del imp_report["arms"]["freeze_at_quarter"]
+    # reportHash 재계산
+    body = {k: v for k, v in imp_report.items() if k != "reportHash"}
+    imp_report["reportHash"] = canonical_hash(body)
+
+    noise_report = _v3_build_noise_report(prereg, p_hash, ps)
+    tb_report = _v3_build_tb001_report(prereg, p_hash, ps)
+
+    ledger_path = _make_ledger(tmp_path)
+    report_paths = []
+    for r in [imp_report, noise_report, tb_report]:
+        rp = tmp_path / f"{r['reportId']}.json"
+        rp.write_text(json.dumps(r, indent=2, ensure_ascii=False), encoding="utf-8")
+        _register_report(ledger_path, r, prereg, p_hash, rp)
+        report_paths.append(rp)
+
+    result = evaluate_mechanism_license(
+        prereg_path, report_paths, ledger_path=ledger_path, git_runner=_good_git_runner
+    )
+    failed = [c for c in result["checks"] if not c["ok"]]
+    assert any(c["check"] == "arms_complete" for c in failed), (
+        "AXS-IMP-001 arm 누락 시 arms_complete 실패해야 함"
+    )
+
+
+def test_v3_redteam_family_set_mismatch(tmp_path):
+    """red-team: freeze_at_1 에 5개 패밀리, freeze_none 에 4개 패밀리 → delta_imp 계산 실패."""
+    prereg_path, prereg = _make_v3_prereg_registered(tmp_path)
+    p_hash = prereg_hash(prereg)
+    ps = str(prereg_path)
+
+    metric = "slate_excess_nmi"
+
+    # 정상 빌드 후 freeze_none arm 의 perFamily 를 4개로 직접 교체
+    imp_report = _v3_build_imp_report(prereg, p_hash, ps)
+    imp_report["arms"]["freeze_none"]["perFamily"] = {
+        fam: {metric: 0.04} for fam in EVAL_FAMILIES_V3 if fam != "31337"
+    }
+    body = {k: v for k, v in imp_report.items() if k != "reportHash"}
+    imp_report["reportHash"] = canonical_hash(body)
+
+    noise_report = _v3_build_noise_report(prereg, p_hash, ps)
+    tb_report = _v3_build_tb001_report(prereg, p_hash, ps)
+
+    ledger_path = _make_ledger(tmp_path)
+    report_paths = []
+    for r in [imp_report, noise_report, tb_report]:
+        rp = tmp_path / f"{r['reportId']}.json"
+        rp.write_text(json.dumps(r, indent=2, ensure_ascii=False), encoding="utf-8")
+        _register_report(ledger_path, r, prereg, p_hash, rp)
+        report_paths.append(rp)
+
+    result = evaluate_mechanism_license(
+        prereg_path, report_paths, ledger_path=ledger_path, git_runner=_good_git_runner
+    )
+    # 패밀리 집합 불일치 → acceptance_recomputed 실패 (delta 계산 오류)
+    failed = [c for c in result["checks"] if not c["ok"]]
+    assert any(c["check"] == "acceptance_recomputed" for c in failed), (
+        f"패밀리 집합 불일치 시 acceptance_recomputed 실패 해야 함. 실패 검사: {[c['check'] for c in failed]}"
+    )
+    assert result["rungs"]["M2"] is False
+
+
+def test_v3_redteam_tampered_embedded_delta_immune(tmp_path):
+    """red-team: 리포트에 내장된 delta_imp bootstrap 블록을 변조해도 게이트 결과가 동일해야 함."""
+    prereg_path, report_paths, ledger_path, prereg, p_hash = _build_v3_full_set(tmp_path)
+
+    # 정상 결과 먼저 계산
+    result_clean = evaluate_mechanism_license(
+        prereg_path, report_paths, ledger_path=ledger_path, git_runner=_good_git_runner
+    )
+
+    # IMP 리포트에 absurd 내장 delta 블록 삽입
+    imp_path = next(rp for rp in report_paths if "imp" in rp.name)
+    r = json.loads(imp_path.read_text())
+    r["delta_imp"] = {
+        "bootstrap": {"mean": 999.0, "ciLower": 999.0, "ciUpper": 999.0},
+        "sign_count": 0,  # 의도적으로 잘못된 값
+    }
+    body = {k: v for k, v in r.items() if k != "reportHash"}
+    r["reportHash"] = canonical_hash(body)
+    imp_path.write_text(json.dumps(r, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    # 원장 업데이트: 기존 엔트리 제거 후 새 해시로 재등록
+    ledger = load_ledger(ledger_path)
+    new_entries = [e for e in ledger["entries"] if e.get("reportId") != r["reportId"]]
+    ledger["entries"] = new_entries
+    ledger_path.write_text(json.dumps(ledger, indent=2, ensure_ascii=False), encoding="utf-8")
+    _register_report(ledger_path, r, prereg, p_hash, imp_path)
+
+    result_tampered = evaluate_mechanism_license(
+        prereg_path, report_paths, ledger_path=ledger_path, git_runner=_good_git_runner
+    )
+
+    # branch 와 M2 결과가 동일해야 함 (내장 delta 무시)
+    assert result_tampered.get("branch") == result_clean.get("branch"), (
+        f"내장 delta 변조 시 branch 변경됨: "
+        f"정상={result_clean.get('branch')!r}, 변조={result_tampered.get('branch')!r}"
+    )
+    assert result_tampered["rungs"]["M2"] == result_clean["rungs"]["M2"], (
+        "내장 delta 변조 시 M2 변경됨 — 재계산 면역성 위반"
+    )
+
+
+def test_v3_redteam_alpha_only_tb001_no_m2(tmp_path):
+    """red-team: ALPHA-EXP + TB-001 만 제출 → M2 False, requiresPass IMP/NOISE 누락 명시."""
+    prereg_path, prereg = _make_v3_prereg_registered(tmp_path)
+    p_hash = prereg_hash(prereg)
+    ps = str(prereg_path)
+
+    alpha_report = _v3_build_alpha_report(prereg, p_hash, ps)
+    tb_report = _v3_build_tb001_report(prereg, p_hash, ps)
+
+    ledger_path = _make_ledger(tmp_path)
+    report_paths = []
+    for r in [alpha_report, tb_report]:
+        rp = tmp_path / f"{r['reportId']}.json"
+        rp.write_text(json.dumps(r, indent=2, ensure_ascii=False), encoding="utf-8")
+        _register_report(ledger_path, r, prereg, p_hash, rp)
+        report_paths.append(rp)
+
+    result = evaluate_mechanism_license(
+        prereg_path, report_paths, ledger_path=ledger_path, git_runner=_good_git_runner
+    )
+    assert result["rungs"]["M2"] is False
+    failed = [c for c in result["checks"] if not c["ok"]]
+    acc_fail = next((c for c in failed if c["check"] == "acceptance_recomputed"), None)
+    assert acc_fail is not None, "acceptance_recomputed 실패 없음"
+    detail = acc_fail["detail"]
+    # requiresPass 에 IMP/NOISE 가 명시되어야 함
+    assert "AXS-IMP-001" in detail or "AXS-NOISE-001" in detail, (
+        f"requiresPass 누락 detail 에 IMP/NOISE 없음: {detail!r}"
+    )
+
+
+def test_v3_redteam_degenerate_freeze1_branch_degenerate_qualified(tmp_path):
+    """red-team: freeze_at_1 degenerate (정상 triple 포함) + delta 통과 → degenerate_qualified."""
+    prereg_path, report_paths, ledger_path, _, _ = _build_v3_full_set(
+        tmp_path, freeze1_degenerate=True
+    )
+    result = evaluate_mechanism_license(
+        prereg_path, report_paths, ledger_path=ledger_path, git_runner=_good_git_runner
+    )
+    assert result.get("branch") == "degenerate_qualified", (
+        f"branch 오류: {result.get('branch')!r}"
+    )
+    assert result["rungs"]["M2"] is False
+
+
+def test_v3_redteam_boolean_per_family_fails(tmp_path):
+    """red-team: v3 perFamily 값이 boolean (True) → acceptance_recomputed 실패."""
+    prereg_path, prereg = _make_v3_prereg_registered(tmp_path)
+    p_hash = prereg_hash(prereg)
+    ps = str(prereg_path)
+
+    imp_report = _v3_build_imp_report(prereg, p_hash, ps)
+    # freeze_at_1 의 두 패밀리 perFamily 값을 boolean 으로 변조
+    imp_report["arms"]["freeze_at_1"]["perFamily"]["42"]["slate_excess_nmi"] = True
+    imp_report["arms"]["freeze_at_1"]["perFamily"]["7"]["slate_excess_nmi"] = True
+    body = {k: v for k, v in imp_report.items() if k != "reportHash"}
+    imp_report["reportHash"] = canonical_hash(body)
+
+    noise_report = _v3_build_noise_report(prereg, p_hash, ps)
+    tb_report = _v3_build_tb001_report(prereg, p_hash, ps)
+
+    ledger_path = _make_ledger(tmp_path)
+    report_paths = []
+    for r in [imp_report, noise_report, tb_report]:
+        rp = tmp_path / f"{r['reportId']}.json"
+        rp.write_text(json.dumps(r, indent=2, ensure_ascii=False), encoding="utf-8")
+        _register_report(ledger_path, r, prereg, p_hash, rp)
+        report_paths.append(rp)
+
+    result = evaluate_mechanism_license(
+        prereg_path, report_paths, ledger_path=ledger_path, git_runner=_good_git_runner
+    )
+    failed = [c for c in result["checks"] if not c["ok"]]
+    assert any(c["check"] == "acceptance_recomputed" for c in failed), (
+        "boolean perFamily 값은 acceptance_recomputed 실패를 유발해야 함"
+    )
+    assert result["rungs"]["M2"] is False
+
+
+def test_v3_redteam_sign_inconsistency_3of5(tmp_path):
+    """red-team: delta_imp AND delta_noise 모두 부호 일관성 3/5 → no_claim_m1_only."""
+    # 두 delta 가 모두 실패해야 no_claim_m1_only
+    three_pos_imp = {fam: (0.05 if fam in ["42", "7", "101"] else -0.02) for fam in EVAL_FAMILIES_V3}
+    baseline_vals = {fam: 0.0 for fam in EVAL_FAMILIES_V3}
+    three_pos_noise = {fam: (0.05 if fam in ["42", "7", "101"] else -0.02) for fam in EVAL_FAMILIES_V3}
+
+    prereg_path, prereg = _make_v3_prereg_registered(tmp_path)
+    p_hash = prereg_hash(prereg)
+    ps = str(prereg_path)
+
+    imp_report = _v3_build_imp_report(
+        prereg, p_hash, ps,
+        freeze1_vals=three_pos_imp,
+        freeze_none_vals=baseline_vals,
+    )
+    noise_report = _v3_build_noise_report(
+        prereg, p_hash, ps,
+        default_vals=three_pos_noise,
+        yoked_vals=baseline_vals,
+    )
+    tb_report = _v3_build_tb001_report(prereg, p_hash, ps)
+
+    ledger_path = _make_ledger(tmp_path)
+    report_paths = []
+    for r in [imp_report, noise_report, tb_report]:
+        rp = tmp_path / f"{r['reportId']}.json"
+        rp.write_text(json.dumps(r, indent=2, ensure_ascii=False), encoding="utf-8")
+        _register_report(ledger_path, r, prereg, p_hash, rp)
+        report_paths.append(rp)
+
+    result = evaluate_mechanism_license(
+        prereg_path, report_paths, ledger_path=ledger_path, git_runner=_good_git_runner
+    )
+    assert result.get("branch") == "no_claim_m1_only"
+    assert result["rungs"]["M2"] is False
+
+
+def test_v3_cli_branch_in_output(tmp_path):
+    """v3 CLI: licenses.json 출력에 branch 포함되어야 함."""
+    if _REAL_PREREG_COMMIT is None or _REAL_RUN_COMMIT is None:
+        pytest.skip("git SHA 동적 해석 실패 — git checkout 이 아닌 환경에서는 건너뜀")
+
+    prereg_path, prereg = _make_v3_prereg_registered(tmp_path)
+    p_hash = prereg_hash(prereg)
+    ps = str(prereg_path)
+
+    # 실제 커밋 SHA 를 stamp 에 주입
+    def _v3_stamper():
+        return {
+            "preregId": prereg["preregId"],
+            "preregVersion": prereg["version"],
+            "preregPath": ps,
+            "preregHash": p_hash,
+            "preregCommit": _REAL_PREREG_COMMIT,
+            "runCommit": _REAL_RUN_COMMIT,
+        }
+
+    imp_report = _v3_build_imp_report(prereg, p_hash, ps)
+    imp_report["preregStamp"] = _v3_stamper()
+    body = {k: v for k, v in imp_report.items() if k != "reportHash"}
+    imp_report["reportHash"] = canonical_hash(body)
+
+    noise_report = _v3_build_noise_report(prereg, p_hash, ps)
+    noise_report["preregStamp"] = _v3_stamper()
+    body = {k: v for k, v in noise_report.items() if k != "reportHash"}
+    noise_report["reportHash"] = canonical_hash(body)
+
+    tb_report = _v3_build_tb001_report(prereg, p_hash, ps)
+    tb_report["preregStamp"] = _v3_stamper()
+    body = {k: v for k, v in tb_report.items() if k != "reportHash"}
+    tb_report["reportHash"] = canonical_hash(body)
+
+    ledger_path = _make_ledger(tmp_path)
+    report_paths = []
+    for r in [imp_report, noise_report, tb_report]:
+        rp = tmp_path / f"{r['reportId']}.json"
+        rp.write_text(json.dumps(r, indent=2, ensure_ascii=False), encoding="utf-8")
+        _register_report(ledger_path, r, prereg, p_hash, rp)
+        report_paths.append(rp)
+
+    licenses_out = tmp_path / "v3_licenses.json"
+    ret = main([
+        "--prereg", str(prereg_path),
+        "--reports", *[str(rp) for rp in report_paths],
+        "--ledger", str(ledger_path),
+        "--licenses-out", str(licenses_out),
+    ])
+    written = json.loads(licenses_out.read_text())
+    assert "branch" in written, "v3 CLI 출력에 branch 키가 없음"
+    assert written["branch"] in {
+        "imprint_washout_supported", "imprint_only", "noise_only",
+        "degenerate_qualified", "no_claim_m1_only", "integrity_fail",
+    }, f"알 수 없는 branch: {written['branch']!r}"
+
+
+def test_v3_redteam_tb001_strict_m2_true(tmp_path):
+    """v3: AXS-TB-001 strict_pass + 정상 delta → M2=True, caveatRequired=False."""
+    prereg_path, report_paths, ledger_path, _, _ = _build_v3_full_set(
+        tmp_path, tb001_strict=True
+    )
+    result = evaluate_mechanism_license(
+        prereg_path, report_paths, ledger_path=ledger_path, git_runner=_good_git_runner
+    )
+    assert result["rungs"]["M2"] is True
+    assert result["caveatRequired"] is False
+
+
+def test_v3_redteam_tb001_soft_caveat_required(tmp_path):
+    """v3: AXS-TB-001 soft_pass + 정상 delta → M2=True, caveatRequired=True."""
+    prereg_path, report_paths, ledger_path, _, _ = _build_v3_full_set(
+        tmp_path, tb001_strict=False
+    )
+    result = evaluate_mechanism_license(
+        prereg_path, report_paths, ledger_path=ledger_path, git_runner=_good_git_runner
+    )
+    assert result["rungs"]["M2"] is True
+    assert result["caveatRequired"] is True

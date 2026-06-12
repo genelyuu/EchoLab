@@ -35,6 +35,7 @@ from echo_bench.logging.prereg import (
     prereg_hash,
     run_git,
 )
+from echo_bench.metrics.aggregate import aggregate_values
 from echo_bench.utils.hash import canonical_hash
 
 __all__ = ["evaluate_mechanism_license", "main"]
@@ -42,6 +43,20 @@ __all__ = ["evaluate_mechanism_license", "main"]
 _logger = get_logger(__name__)
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
+
+# v3 사전등록에서 사용되는 실험 ID 집합 (하드코딩; 제네릭 규칙 인터프리터 없음)
+_V3_EXPERIMENT_IDS = frozenset(
+    {"AXS-IMP-001", "AXS-NOISE-001", "AXS-TB-001", "AXS-ALPHA-EXP"}
+)
+
+# AXS-IMP-001 정확한 arm 순서
+_V3_IMP_ARMS = ["freeze_at_1", "freeze_at_quarter", "freeze_at_half", "freeze_none"]
+# AXS-NOISE-001 arm 집합
+_V3_NOISE_ARMS = ["axs_ucb_default", "axs_yoked_bonus"]
+# AXS-ALPHA-EXP arm 집합
+_V3_ALPHA_ARMS = ["axs_ucb_default", "axs_ucb_alpha0"]
+# AXS-TB-001 변형
+_V3_TB_VARIANTS = {"reverse", "hash_seeded", "feature_lexicographic"}
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +135,50 @@ def _separability_absent(
 # ---------------------------------------------------------------------------
 
 
+def _check_prereg_status(prereg: Dict[str, Any]) -> Dict[str, Any]:
+    """검사 0: prereg_status.
+
+    - status 키가 있고 값이 "registered" 가 아니면 → 실패 (모든 버전).
+    - status 키가 없으면:
+        version 1 → 통과 (하위 호환, 관례 이전 버전).
+        version >= 2 → 실패 (status 필수).
+    """
+    status = prereg.get("status")
+    version = prereg.get("version", 1)
+    if status is not None:
+        if status != "registered":
+            return {
+                "check": "prereg_status",
+                "ok": False,
+                "detail": (
+                    f"design-draft prereg로는 라이선스 발급 불가 "
+                    f"(status={status!r}; 'registered' 이어야 함) — "
+                    "등록된 사전등록만 증거 심사를 통과할 수 있음"
+                ),
+            }
+        return {
+            "check": "prereg_status",
+            "ok": True,
+            "detail": f"prereg status={status!r} — 등록 확인",
+        }
+    # status 키 없음
+    if version >= 2:
+        return {
+            "check": "prereg_status",
+            "ok": False,
+            "detail": (
+                f"version {version} 사전등록에 status 키 누락 — "
+                "v2 이상은 status='registered' 가 명시되어야 함 (fail closed)"
+            ),
+        }
+    # version 1: 하위 호환 허용
+    return {
+        "check": "prereg_status",
+        "ok": True,
+        "detail": "version 1 prereg — status 관례 이전 버전, 하위 호환 허용",
+    }
+
+
 def _check_prereg_hash_match(
     prereg: Dict[str, Any],
     reports: List[Dict[str, Any]],
@@ -192,6 +251,59 @@ def _check_replayable(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {"check": "replayable", "ok": ok, "detail": detail}
 
 
+def _validate_arm_degenerate_triple(
+    exp_id: str,
+    arm_id: str,
+    arm_data: Dict[str, Any],
+    random_cov: float,
+    ok_ref: List[bool],
+    details: List[str],
+) -> None:
+    """RANDOM 기준 미달 arm 의 degenerate 3개 필드를 검증하는 공통 헬퍼.
+
+    ok_ref: [True/False] 단일 요소 리스트 — in-place 로 False 로 설정.
+    v1/v3 모두 동일 경로.
+    """
+    degenerate_fields = {"degenerate", "degenerateReason", "includedInMechanismClaim"}
+    arm_cov = (arm_data.get("utility") or {}).get("coordinate_coverage_mean")
+    if not _strict_number(arm_cov):
+        ok_ref[0] = False
+        details.append(
+            f"{exp_id} arm {arm_id!r}: utility.coordinate_coverage_mean 누락 또는 비숫자 "
+            f"(값: {arm_cov!r})"
+        )
+        return
+    if arm_cov < random_cov:
+        # RANDOM 미달 → degenerate 3개 필드 필수
+        for field in degenerate_fields:
+            if field not in arm_data:
+                ok_ref[0] = False
+                details.append(
+                    f"{exp_id} arm {arm_id!r}: RANDOM 기준 미달이나 "
+                    f"degenerate 필드 {field!r} 누락"
+                )
+        if arm_data.get("degenerate") is not True:
+            ok_ref[0] = False
+            details.append(
+                f"{exp_id} arm {arm_id!r}: RANDOM 기준 미달이나 "
+                f"degenerate={arm_data.get('degenerate')!r} (True 여야 함)"
+            )
+        reason = arm_data.get("degenerateReason")
+        if not isinstance(reason, str) or not reason.strip():
+            ok_ref[0] = False
+            details.append(
+                f"{exp_id} arm {arm_id!r}: degenerateReason 이 비어 있거나 "
+                f"문자열이 아님 ({reason!r})"
+            )
+        if arm_data.get("includedInMechanismClaim") is not False:
+            ok_ref[0] = False
+            details.append(
+                f"{exp_id} arm {arm_id!r}: RANDOM 기준 미달이나 "
+                f"includedInMechanismClaim="
+                f"{arm_data.get('includedInMechanismClaim')!r} (False 여야 함)"
+            )
+
+
 def _check_arms_complete(
     prereg: Dict[str, Any],
     reports: List[Dict[str, Any]],
@@ -200,11 +312,11 @@ def _check_arms_complete(
 
     각 실험 리포트의 arm 집합이 prereg 에 등록된 것과 일치하는지 확인.
     RANDOM 기준 미달 arm 은 degenerate 3개 필드 필수.
-    AXS-010 은 tieBreak 구조 검사.
+    AXS-010/AXS-TB-001 은 tieBreak 구조 검사.
+    v3 실험 ID: AXS-IMP-001/AXS-NOISE-001/AXS-TB-001/AXS-ALPHA-EXP.
     """
     ok = True
     details = []
-    degenerate_fields = {"degenerate", "degenerateReason", "includedInMechanismClaim"}
 
     # ITEM 5: 중복 experimentId 검사 (먼저 수행)
     seen_exp_ids: Dict[str, int] = {}
@@ -224,7 +336,7 @@ def _check_arms_complete(
         reports_by_exp[exp_id] = r
 
     # ITEM 4: 알 수 없는 experimentId 검사
-    known_exp_ids = set(prereg.get("experiments", {}).keys()) | {"AXS-010"}
+    known_exp_ids = set(prereg.get("experiments", {}).keys()) | {"AXS-010", "AXS-TB-001"}
     for r in reports:
         exp_id = r.get("experimentId", "")
         if exp_id not in known_exp_ids:
@@ -239,27 +351,39 @@ def _check_arms_complete(
             # 해당 실험 리포트가 소비 목록에 없으면 건너뜀
             continue
 
-        if exp_id == "AXS-010":
-            # AXS-010: tieBreak 구조 검사
+        # AXS-010 (v1) 또는 AXS-TB-001 (v3): tieBreak 구조 검사
+        if exp_id in ("AXS-010", "AXS-TB-001"):
             tie_break = r.get("tieBreak")
             if not isinstance(tie_break, dict):
                 ok = False
-                details.append("AXS-010: tieBreak 필드 누락 또는 잘못된 형식")
+                details.append(f"{exp_id}: tieBreak 필드 누락 또는 잘못된 형식")
                 continue
             if "baseline" not in tie_break:
                 ok = False
-                details.append("AXS-010: tieBreak.baseline 누락")
+                details.append(f"{exp_id}: tieBreak.baseline 누락")
             required_variants = {"reverse", "hash_seeded", "feature_lexicographic"}
             variants = tie_break.get("variants") or {}
             missing_variants = required_variants - set(variants.keys())
             if missing_variants:
                 ok = False
                 details.append(
-                    f"AXS-010: tieBreak.variants 누락: {sorted(missing_variants)}"
+                    f"{exp_id}: tieBreak.variants 누락: {sorted(missing_variants)}"
                 )
             continue
 
-        # 일반 실험: arms 검사
+        # AXS-ALPHA-EXP (v3): arm 집합만 확인, baselines/degenerate 불필요 (noClaimLicense)
+        if exp_id == "AXS-ALPHA-EXP":
+            prereg_arms = set(exp_cfg.get("arms", []))
+            report_arms = set((r.get("arms") or {}).keys())
+            missing_arms = prereg_arms - report_arms
+            if missing_arms:
+                ok = False
+                details.append(
+                    f"AXS-ALPHA-EXP: arm 누락 {sorted(missing_arms)}"
+                )
+            continue
+
+        # 일반 실험(v1 및 v3 IMP/NOISE): arms + baselines + degenerate 검사
         prereg_arms = set(exp_cfg.get("arms", []))
         report_arms = set((r.get("arms") or {}).keys())
         missing_arms = prereg_arms - report_arms
@@ -282,49 +406,14 @@ def _check_arms_complete(
             )
             continue
 
-        # ITEM 3: arm coverage 도 strict_number 로 검사
+        ok_ref = [ok]
         for arm_id, arm_data in (r.get("arms") or {}).items():
             if arm_id not in prereg_arms:
                 continue
-            arm_cov = (arm_data.get("utility") or {}).get("coordinate_coverage_mean")
-            if not _strict_number(arm_cov):
-                ok = False
-                details.append(
-                    f"{exp_id} arm {arm_id!r}: utility.coordinate_coverage_mean 누락 또는 비숫자 "
-                    f"(값: {arm_cov!r})"
-                )
-                continue
-            if arm_cov < random_cov:
-                # RANDOM 미달 → degenerate 3개 필드 필수, 값도 정확해야 함
-                for field in degenerate_fields:
-                    if field not in arm_data:
-                        ok = False
-                        details.append(
-                            f"{exp_id} arm {arm_id!r}: RANDOM 기준 미달이나 "
-                            f"degenerate 필드 {field!r} 누락"
-                        )
-                # 값 검증: degenerate=True, degenerateReason 비어있지 않은 문자열,
-                # includedInMechanismClaim=False 이어야 함
-                if arm_data.get("degenerate") is not True:
-                    ok = False
-                    details.append(
-                        f"{exp_id} arm {arm_id!r}: RANDOM 기준 미달이나 "
-                        f"degenerate={arm_data.get('degenerate')!r} (True 여야 함)"
-                    )
-                reason = arm_data.get("degenerateReason")
-                if not isinstance(reason, str) or not reason.strip():
-                    ok = False
-                    details.append(
-                        f"{exp_id} arm {arm_id!r}: degenerateReason 이 비어 있거나 "
-                        f"문자열이 아님 ({reason!r})"
-                    )
-                if arm_data.get("includedInMechanismClaim") is not False:
-                    ok = False
-                    details.append(
-                        f"{exp_id} arm {arm_id!r}: RANDOM 기준 미달이나 "
-                        f"includedInMechanismClaim="
-                        f"{arm_data.get('includedInMechanismClaim')!r} (False 여야 함)"
-                    )
+            _validate_arm_degenerate_triple(
+                exp_id, arm_id, arm_data, random_cov, ok_ref, details
+            )
+        ok = ok_ref[0]
 
     detail = "; ".join(details) if details else "모든 arm 완전성 확인"
     return {"check": "arms_complete", "ok": ok, "detail": detail}
@@ -486,6 +575,266 @@ def _check_acceptance_recomputed(
     return {"check": "acceptance_recomputed", "ok": ok, "detail": detail}
 
 
+# ---------------------------------------------------------------------------
+# v3 delta computation helpers
+# ---------------------------------------------------------------------------
+
+
+def _compute_delta_from_arms(
+    arm_a: Dict[str, Any],
+    arm_b: Dict[str, Any],
+    metric: str,
+    eval_fams: List[str],
+) -> tuple[Optional[Dict[str, float]], Optional[str]]:
+    """arm_a[fam][metric] - arm_b[fam][metric] 의 per-family delta 계산.
+
+    Returns (delta_dict, error_msg).
+    delta_dict: name-sorted family keys → float delta.
+    error_msg: None 이면 성공; 실패 이유 문자열.
+
+    - 패밀리 집합이 두 arm 간에 정확히 일치해야 함 (불일치 → 오류).
+    - 모든 값이 strict_number 이어야 함 (불리언 위장 → 오류).
+    """
+    fams_set = set(str(f) for f in eval_fams)
+
+    pf_a = arm_a.get("perFamily") or {}
+    pf_b = arm_b.get("perFamily") or {}
+
+    keys_a = set(str(k) for k in pf_a.keys())
+    keys_b = set(str(k) for k in pf_b.keys())
+
+    if keys_a != fams_set:
+        return None, (
+            f"arm_a perFamily 키 집합 {sorted(keys_a)} 이 "
+            f"evaluationFamilies {sorted(fams_set)} 와 불일치"
+        )
+    if keys_b != fams_set:
+        return None, (
+            f"arm_b perFamily 키 집합 {sorted(keys_b)} 이 "
+            f"evaluationFamilies {sorted(fams_set)} 와 불일치"
+        )
+
+    delta: Dict[str, float] = {}
+    for fam in sorted(fams_set):
+        va = (pf_a.get(fam) or {}).get(metric)
+        vb = (pf_b.get(fam) or {}).get(metric)
+        if not _strict_number(va):
+            return None, (
+                f"arm_a perFamily[{fam!r}][{metric!r}] 이 strict_number 가 아님: {va!r}"
+            )
+        if not _strict_number(vb):
+            return None, (
+                f"arm_b perFamily[{fam!r}][{metric!r}] 이 strict_number 가 아님: {vb!r}"
+            )
+        delta[fam] = float(va) - float(vb)
+    return delta, None
+
+
+def _delta_primary_pass(
+    delta: Dict[str, float],
+    min_consistent: int,
+    ci_bound: float,
+    delta_key: str,
+) -> tuple[bool, bool, float]:
+    """primary pass 규칙 평가.
+
+    Returns (sign_pass, ci_pass, ci_low).
+    sign_pass: >= min_consistent families 에서 delta > 0.
+    ci_pass: gate 의 own seeded bootstrap ciLow > ci_bound.
+    name-sorted family order 로 aggregate_values 호출.
+    """
+    sorted_vals = [delta[k] for k in sorted(delta.keys())]
+    sign_count = sum(1 for v in sorted_vals if v > 0)
+    sign_pass = sign_count >= min_consistent
+
+    agg = aggregate_values(sorted_vals, key=delta_key)
+    ci_low = agg["ci_low"]
+    ci_pass = ci_low > ci_bound
+    return sign_pass, ci_pass, ci_low
+
+
+def _is_arm_degenerate_gate_computed(
+    report: Dict[str, Any],
+    arm_id: str,
+) -> bool:
+    """arm 의 degenerate 여부를 게이트가 직접 계산 (자가증명 무시).
+
+    report 의 baselines.RANDOM.coordinate_coverage_mean 과
+    arms[arm_id].utility.coordinate_coverage_mean 을 비교.
+    RANDOM 또는 arm coverage 누락 → 안전하게 True 반환 (degenerate 취급).
+    """
+    random_cov = (report.get("baselines") or {}).get("RANDOM", {}).get(
+        "coordinate_coverage_mean"
+    )
+    if not _strict_number(random_cov):
+        return True
+    arms = report.get("arms") or {}
+    arm_data = arms.get(arm_id) or {}
+    arm_cov = (arm_data.get("utility") or {}).get("coordinate_coverage_mean")
+    if not _strict_number(arm_cov):
+        return True
+    return float(arm_cov) < float(random_cov)
+
+
+def _check_acceptance_recomputed_v3(
+    prereg: Dict[str, Any],
+    reports: List[Dict[str, Any]],
+) -> tuple[
+    Dict[str, Any],  # check result
+    bool,  # delta_imp_pass
+    bool,  # delta_noise_pass
+    bool,  # imp_key_arm_degenerate (freeze_at_1)
+    bool,  # noise_key_arm_degenerate (axs_ucb_default)
+]:
+    """검사 5-v3: acceptance_recomputed_v3.
+
+    v3 사전등록(AXS-IMP-001/AXS-NOISE-001/AXS-ALPHA-EXP)에 대한 판정 재계산.
+
+    - 리포트에 내장된 delta 블록은 전적으로 무시 (재계산).
+    - AXS-ALPHA-EXP 는 구조만 확인, 판정 계산 없음.
+    - requiresPass: ["AXS-IMP-001", "AXS-NOISE-001"] 강제.
+    """
+    ok = True
+    details = []
+
+    reports_by_exp: Dict[str, Dict[str, Any]] = {}
+    for r in reports:
+        reports_by_exp[r.get("experimentId", "")] = r
+
+    eval_fams = [str(f) for f in prereg.get("evaluationFamilies", [])]
+    min_consistent = prereg.get("signRule", {}).get("minConsistentFamilies", 4)
+    ci_bound = prereg.get("ciRule", {}).get("lowerBoundMustExceed", 0.0)
+    metric = "slate_excess_nmi"
+
+    # requiresPass 강제 (fail-open 방지)
+    requires_pass_exps = list(
+        prereg.get("claimTransitions", {}).get("M2", {}).get("requiresPass", [])
+    )
+    if not requires_pass_exps:
+        ok = False
+        details.append(
+            "claimTransitions.M2.requiresPass 가 비어 있거나 누락됨 — "
+            "M2 라이선스 발급 조건 미충족 (fail-open 방지)"
+        )
+    else:
+        missing_exps = [exp for exp in requires_pass_exps if exp not in reports_by_exp]
+        if missing_exps:
+            ok = False
+            details.append(
+                f"requiresPass 실험 리포트 누락: {sorted(missing_exps)} — "
+                "해당 실험 리포트 없이는 M2 라이선스 발급 불가"
+            )
+
+    # AXS-IMP-001 delta_imp
+    delta_imp_pass = False
+    imp_key_arm_degenerate = True  # 기본값: 안전하게 True
+
+    r_imp = reports_by_exp.get("AXS-IMP-001")
+    if r_imp is not None:
+        arms_imp = r_imp.get("arms") or {}
+        arm_freeze1 = arms_imp.get("freeze_at_1") or {}
+        arm_freeze_none = arms_imp.get("freeze_none") or {}
+
+        # delta_imp = sep(freeze_at_1)[fam] - sep(freeze_none)[fam]
+        delta_imp_vals, err = _compute_delta_from_arms(
+            arm_freeze1, arm_freeze_none, metric, eval_fams
+        )
+        if err is not None:
+            ok = False
+            details.append(f"AXS-IMP-001 delta_imp 계산 실패: {err}")
+        else:
+            assert delta_imp_vals is not None
+            sign_pass, ci_pass, ci_low = _delta_primary_pass(
+                delta_imp_vals, min_consistent, ci_bound, "delta_imp"
+            )
+            delta_imp_pass = sign_pass and ci_pass
+            if not sign_pass:
+                pos_count = sum(1 for v in delta_imp_vals.values() if v > 0)
+                details.append(
+                    f"AXS-IMP-001 delta_imp 부호 일관성 불충분: "
+                    f"{pos_count}/{len(delta_imp_vals)} (최소 {min_consistent} 필요)"
+                )
+            if not ci_pass:
+                details.append(
+                    f"AXS-IMP-001 delta_imp bootstrap ciLow={ci_low:.6f} ≤ {ci_bound} — CI 조건 불충족"
+                )
+
+            # 이차 대비 (M2 비차단, 정보 공개용)
+            for sec_name, arm_id_sec in [("delta_q", "freeze_at_quarter"), ("delta_h", "freeze_at_half")]:
+                arm_sec = arms_imp.get(arm_id_sec) or {}
+                sec_delta, sec_err = _compute_delta_from_arms(
+                    arm_sec, arm_freeze_none, metric, eval_fams
+                )
+                if sec_err is None and sec_delta is not None:
+                    sec_pos = sum(1 for v in sec_delta.values() if v > 0)
+                    details.append(
+                        f"AXS-IMP-001 {sec_name} 이차 부호: {sec_pos}/{len(sec_delta)} 양수 (정보 공개, M2 비차단)"
+                    )
+
+        # imp 핵심 arm degenerate 여부 (게이트 재계산)
+        imp_key_arm_degenerate = _is_arm_degenerate_gate_computed(r_imp, "freeze_at_1")
+
+    # AXS-NOISE-001 delta_noise
+    delta_noise_pass = False
+    noise_key_arm_degenerate = True  # 기본값: 안전하게 True
+
+    r_noise = reports_by_exp.get("AXS-NOISE-001")
+    if r_noise is not None:
+        arms_noise = r_noise.get("arms") or {}
+        arm_default = arms_noise.get("axs_ucb_default") or {}
+        arm_yoked = arms_noise.get("axs_yoked_bonus") or {}
+
+        delta_noise_vals, err = _compute_delta_from_arms(
+            arm_default, arm_yoked, metric, eval_fams
+        )
+        if err is not None:
+            ok = False
+            details.append(f"AXS-NOISE-001 delta_noise 계산 실패: {err}")
+        else:
+            assert delta_noise_vals is not None
+            sign_pass, ci_pass, ci_low = _delta_primary_pass(
+                delta_noise_vals, min_consistent, ci_bound, "delta_noise"
+            )
+            delta_noise_pass = sign_pass and ci_pass
+            if not sign_pass:
+                pos_count = sum(1 for v in delta_noise_vals.values() if v > 0)
+                details.append(
+                    f"AXS-NOISE-001 delta_noise 부호 일관성 불충분: "
+                    f"{pos_count}/{len(delta_noise_vals)} (최소 {min_consistent} 필요)"
+                )
+            if not ci_pass:
+                details.append(
+                    f"AXS-NOISE-001 delta_noise bootstrap ciLow={ci_low:.6f} ≤ {ci_bound} — CI 조건 불충족"
+                )
+
+            # yokedAbsence 이차 공개 (M2 비차단)
+            yoked_pos = sum(1 for v in delta_noise_vals.values() if v < 0)  # yoked > default
+            agg_noise = aggregate_values(
+                [delta_noise_vals[k] for k in sorted(delta_noise_vals.keys())],
+                key="delta_noise",
+            )
+            # yokedAbsence: axs_yoked_bonus sep NOT >0 in >=4/5 OR ciLower<=0
+            # i.e. delta_noise < 0 이거나 ci_low <= 0 → yoked_absence
+            yoked_absence = (yoked_pos >= min_consistent) or (agg_noise["ci_low"] <= ci_bound)
+            details.append(
+                f"AXS-NOISE-001 yokedAbsence 이차: {'확인' if yoked_absence else '미확인'} (정보 공개, M2 비차단)"
+            )
+
+        # noise 핵심 arm degenerate 여부 (게이트 재계산)
+        noise_key_arm_degenerate = _is_arm_degenerate_gate_computed(
+            r_noise, "axs_ucb_default"
+        )
+
+    detail = "; ".join(details) if details else "v3 모든 실험 판정 재계산 통과"
+    return (
+        {"check": "acceptance_recomputed", "ok": ok, "detail": detail},
+        delta_imp_pass,
+        delta_noise_pass,
+        imp_key_arm_degenerate,
+        noise_key_arm_degenerate,
+    )
+
+
 def _check_ledger_registered(
     prereg: Dict[str, Any],
     reports: List[Dict[str, Any]],
@@ -641,33 +990,39 @@ def _check_pilot_disjoint(
     }
 
 
-def _check_axs010_invariance(
-    prereg: Dict[str, Any],
+def _check_tiebreak_invariance(
     reports: List[Dict[str, Any]],
+    experiment_id: str,
 ) -> tuple[Dict[str, Any], bool, bool]:
-    """검사 9: axs010_invariance.
+    """tieBreak invariance 검사 (AXS-010 또는 AXS-TB-001).
 
-    Returns: (check_result, caveat_required, axs010_present)
+    experiment_id 로 리포트를 조회한다. v1 = "AXS-010", v3 = "AXS-TB-001".
+    check 키는 호출 컨텍스트에 따라 결정 ("axs010_invariance" 또는 "axstb001_invariance").
+
+    Returns: (check_result, caveat_required, present)
     strict_pass → caveat_required=False
     soft_pass  → caveat_required=True
     fail       → ok=False
     absent     → ok=True (M2=False 이지만 검사 자체는 fail 아님), caveat_required=False
     """
-    r10 = next(
-        (r for r in reports if r.get("experimentId") == "AXS-010"), None
+    check_name = (
+        "axs010_invariance" if experiment_id == "AXS-010" else "axstb001_invariance"
     )
-    if r10 is None:
+    r = next(
+        (rep for rep in reports if rep.get("experimentId") == experiment_id), None
+    )
+    if r is None:
         return (
             {
-                "check": "axs010_invariance",
+                "check": check_name,
                 "ok": True,
-                "detail": "AXS-010 invariance 증거 없음",
+                "detail": f"{experiment_id} invariance 증거 없음",
             },
             False,
             False,
         )
 
-    tie_break = r10.get("tieBreak") or {}
+    tie_break = r.get("tieBreak") or {}
     baseline = tie_break.get("baseline") or {}
     variants = tie_break.get("variants") or {}
 
@@ -676,14 +1031,14 @@ def _check_axs010_invariance(
     b_ci_upper = baseline.get("ciUpper")
     b_track = baseline.get("trackDecision")
 
-    # ITEM 1: fail closed — baseline required fields must be present and non-None
+    # fail closed — baseline required fields must be present and non-None
     if b_sign is None or b_track is None or b_ci_lower is None or b_ci_upper is None:
         return (
             {
-                "check": "axs010_invariance",
+                "check": check_name,
                 "ok": False,
                 "detail": (
-                    "AXS-010: baseline 필수 필드 누락 "
+                    f"{experiment_id}: baseline 필수 필드 누락 "
                     f"(sign={b_sign!r}, trackDecision={b_track!r}, "
                     f"ciLower={b_ci_lower!r}, ciUpper={b_ci_upper!r}) — fail closed"
                 ),
@@ -701,14 +1056,14 @@ def _check_axs010_invariance(
         v_track = var_data.get("trackDecision")
         v_est = var_data.get("estimate")
 
-        # ITEM 1: variant required fields must be present and non-None
+        # variant required fields must be present and non-None
         if v_sign is None or v_track is None:
             return (
                 {
-                    "check": "axs010_invariance",
+                    "check": check_name,
                     "ok": False,
                     "detail": (
-                        f"AXS-010: 변형 {var_id!r} 필수 필드 누락 "
+                        f"{experiment_id}: 변형 {var_id!r} 필수 필드 누락 "
                         f"(sign={v_sign!r}, trackDecision={v_track!r}) — fail closed"
                     ),
                 },
@@ -727,38 +1082,100 @@ def _check_axs010_invariance(
             all_within_ci = False
 
     if not all_signs_match or not all_tracks_match:
-        # fail
         return (
             {
-                "check": "axs010_invariance",
+                "check": check_name,
                 "ok": False,
-                "detail": "AXS-010: 변형 부호 또는 trackDecision 불일치 (fail)",
+                "detail": f"{experiment_id}: 변형 부호 또는 trackDecision 불일치 (fail)",
             },
             False,
             True,
         )
     if all_within_ci:
-        # strict_pass
         return (
             {
-                "check": "axs010_invariance",
+                "check": check_name,
                 "ok": True,
-                "detail": "AXS-010 strict_pass: 모든 변형 부호·추정치 CI 내 일치",
+                "detail": f"{experiment_id} strict_pass: 모든 변형 부호·추정치 CI 내 일치",
             },
             False,
             True,
         )
     else:
-        # soft_pass
         return (
             {
-                "check": "axs010_invariance",
+                "check": check_name,
                 "ok": True,
-                "detail": "AXS-010 soft_pass: 부호·trackDecision 일치, CI 외 추정치 존재 → caveatRequired",
+                "detail": f"{experiment_id} soft_pass: 부호·trackDecision 일치, CI 외 추정치 존재 → caveatRequired",
             },
             True,
             True,
         )
+
+
+def _check_axs010_invariance(
+    prereg: Dict[str, Any],
+    reports: List[Dict[str, Any]],
+) -> tuple[Dict[str, Any], bool, bool]:
+    """검사 9: axs010_invariance (v1 호환 래퍼).
+
+    Returns: (check_result, caveat_required, axs010_present)
+    """
+    result, caveat, present = _check_tiebreak_invariance(reports, "AXS-010")
+    return result, caveat, present
+
+
+def _check_branch_decision(
+    checks_ok: bool,
+    delta_imp_pass: bool,
+    delta_noise_pass: bool,
+    imp_key_arm_degenerate: bool,
+    noise_key_arm_degenerate: bool,
+) -> Dict[str, Any]:
+    """검사 10-v3: branch_decision.
+
+    v3 사전등록에서만 실행. 결정 트리:
+
+    1. 어떤 필수 검사 실패 → "integrity_fail"
+    2. delta_imp pass ∧ delta_noise pass ∧ 두 핵심 arm 모두 non-degenerate
+       → "imprint_washout_supported"
+    3. delta_imp pass ∧ delta_noise pass ∧ (핵심 arm 중 하나 degenerate)
+       → "degenerate_qualified"
+    4. delta_imp pass ∧ delta_noise fail → "imprint_only"
+       delta_imp fail ∧ delta_noise pass → "noise_only"
+    5. 그 외 → "no_claim_m1_only"
+    """
+    if not checks_ok:
+        branch = "integrity_fail"
+    elif delta_imp_pass and delta_noise_pass:
+        if imp_key_arm_degenerate or noise_key_arm_degenerate:
+            branch = "degenerate_qualified"
+        else:
+            branch = "imprint_washout_supported"
+    elif delta_imp_pass and not delta_noise_pass:
+        branch = "imprint_only"
+    elif not delta_imp_pass and delta_noise_pass:
+        branch = "noise_only"
+    else:
+        branch = "no_claim_m1_only"
+
+    return {
+        "check": "branch_decision",
+        "ok": True,  # 브랜치 결정 자체는 항상 ok (결과는 branch 필드에)
+        "detail": f"브랜치 결정: {branch!r}",
+        "branch": branch,
+    }
+
+
+# ---------------------------------------------------------------------------
+# v3 prereg 감지 헬퍼
+# ---------------------------------------------------------------------------
+
+
+def _is_v3_prereg(prereg: Dict[str, Any]) -> bool:
+    """prereg 가 v3 실험 ID 집합을 포함하면 True."""
+    exp_ids = set(prereg.get("experiments", {}).keys())
+    return bool(exp_ids & _V3_EXPERIMENT_IDS)
 
 
 # ---------------------------------------------------------------------------
@@ -784,7 +1201,8 @@ def evaluate_mechanism_license(
         release: True 이면 원격 브랜치 ancestry 추가 확인.
 
     Returns:
-        rungs, checks, caveatRequired, consumedReports, familyHistory, provisional 포함 dict.
+        rungs, checks, caveatRequired, consumedReports, familyHistory, provisional,
+        branch (v3 prereg 에만 존재) 포함 dict.
 
     NON-NEGOTIABLE: licenses.json 은 절대 읽지 않음. 자가 증명 불리언 무시.
     """
@@ -820,8 +1238,15 @@ def evaluate_mechanism_license(
         reports.append(r)
         str_report_paths.append(str(rp))
 
+    # v3 사전등록 여부 감지
+    is_v3 = _is_v3_prereg(prereg)
+
     # 검사 실행
     checks: List[Dict[str, Any]] = []
+
+    # 검사 0: prereg_status (모든 prereg 에 적용)
+    c0 = _check_prereg_status(prereg)
+    checks.append(c0)
 
     c1 = _check_prereg_hash_match(prereg, reports, expected_hash)
     checks.append(c1)
@@ -835,7 +1260,18 @@ def evaluate_mechanism_license(
     c4 = _check_arms_complete(prereg, reports)
     checks.append(c4)
 
-    c5 = _check_acceptance_recomputed(prereg, reports)
+    # 검사 5: v3 와 v1 분기
+    delta_imp_pass = False
+    delta_noise_pass = False
+    imp_key_arm_degenerate = True
+    noise_key_arm_degenerate = True
+
+    if is_v3:
+        c5, delta_imp_pass, delta_noise_pass, imp_key_arm_degenerate, noise_key_arm_degenerate = (
+            _check_acceptance_recomputed_v3(prereg, reports)
+        )
+    else:
+        c5 = _check_acceptance_recomputed(prereg, reports)
     checks.append(c5)
 
     c6, consumed_reports, family_history = _check_ledger_registered(
@@ -849,16 +1285,43 @@ def evaluate_mechanism_license(
     c8 = _check_pilot_disjoint(prereg, reports)
     checks.append(c8)
 
-    c9, caveat_required, axs010_present = _check_axs010_invariance(prereg, reports)
+    # 검사 9: tieBreak invariance
+    if is_v3:
+        # v3: AXS-TB-001
+        c9, caveat_required, tb_present = _check_tiebreak_invariance(reports, "AXS-TB-001")
+        c9["check"] = "axs010_invariance"  # 하위 호환: check 이름 유지
+    else:
+        # v1: AXS-010
+        c9, caveat_required, tb_present = _check_axs010_invariance(prereg, reports)
     checks.append(c9)
 
     # M0/M1 always True (가설은 항상 허용)
     # M3 always False (MVP; AXS-001 필요)
     all_ok = all(c["ok"] for c in checks)
 
-    # M2: 모든 검사 통과 AND AXS-010 >= soft_pass (axs010_present + c9["ok"])
-    m2 = all_ok and axs010_present
-    # M2 also requires caveat is not a blocker (soft_pass allows M2 with caveat)
+    # branch_decision (v3 전용)
+    branch: Optional[str] = None
+    if is_v3:
+        c10 = _check_branch_decision(
+            all_ok,
+            delta_imp_pass,
+            delta_noise_pass,
+            imp_key_arm_degenerate,
+            noise_key_arm_degenerate,
+        )
+        checks.append(c10)
+        branch = c10["branch"]
+        # all_ok 재확인 (branch_decision 추가 후)
+        all_ok = all(c["ok"] for c in checks)
+
+    # M2 계산
+    if is_v3:
+        # v3: all checks ok ∧ branch == "imprint_washout_supported"
+        #     ∧ AXS-TB-001 present ∧ >= soft_pass (tb_present + c9["ok"])
+        m2 = all_ok and (branch == "imprint_washout_supported") and tb_present
+    else:
+        # v1: 모든 검사 통과 AND AXS-010 >= soft_pass (axs010_present + c9["ok"])
+        m2 = all_ok and tb_present
 
     rungs = {
         "M0": True,
@@ -873,7 +1336,7 @@ def evaluate_mechanism_license(
         f"검사수={len(checks)}, 실패={sum(1 for c in checks if not c['ok'])}",
     )
 
-    return {
+    result: Dict[str, Any] = {
         "rungs": rungs,
         "checks": checks,
         "caveatRequired": caveat_required,
@@ -881,6 +1344,10 @@ def evaluate_mechanism_license(
         "familyHistory": family_history,
         "provisional": not release,
     }
+    if is_v3:
+        result["branch"] = branch
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -957,6 +1424,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"런그 상태: M0={rungs['M0']} M1={rungs['M1']} M2={rungs['M2']} M3={rungs['M3']}")
     print(f"caveatRequired: {result['caveatRequired']}")
     print(f"provisional: {result['provisional']}")
+    if "branch" in result:
+        print(f"branch: {result['branch']}")
 
     if failed_checks:
         print(f"\n실패 검사 ({len(failed_checks)}건):")
