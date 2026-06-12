@@ -90,7 +90,6 @@ def run_axs_imp_001(
     replay_mode: str = "first_family",
     replay_sample_size: int = 2,
     prereg_path: Any = None,
-    rereg_path: Any = None,
     git_runner: Optional[Callable[[List[str]], str]] = None,
     dry_run: bool = False,
     reports_dir: Optional[Path] = None,
@@ -110,7 +109,6 @@ def run_axs_imp_001(
         replay_mode: 인라인 리플레이 감사 모드.
         replay_sample_size: sampled_families 모드 재계산 패밀리 수.
         prereg_path: 사전등록 JSON 경로 (None → 기본 v3 draft).
-        rereg_path: prereg_path 의 별칭 (테스트 주입용).
         git_runner: 테스트용 git 명령 인젝터.
         dry_run: True 이면 계획만 반환, 파일 미작성.
         reports_dir: 리포트 출력 디렉토리.
@@ -119,8 +117,7 @@ def run_axs_imp_001(
     Returns:
         dry_run=True 이면 계획 dict, 그 외 리포트 dict.
     """
-    # rereg_path 는 테스트 주입용 별칭 (prereg_path 와 동일 의미)
-    eff_prereg = rereg_path if rereg_path is not None else prereg_path
+    eff_prereg = prereg_path
     if eff_prereg is None:
         eff_prereg = _PREREG_PATH
 

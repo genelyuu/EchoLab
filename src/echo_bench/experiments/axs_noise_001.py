@@ -109,7 +109,6 @@ def run_axs_noise_001(
     replay_mode: str = "first_family",
     replay_sample_size: int = 2,
     prereg_path: Any = None,
-    rereg_path: Any = None,
     git_runner: Optional[Callable[[List[str]], str]] = None,
     dry_run: bool = False,
     reports_dir: Optional[Path] = None,
@@ -129,7 +128,6 @@ def run_axs_noise_001(
         replay_mode: 인라인 리플레이 감사 모드.
         replay_sample_size: sampled_families 모드 재계산 패밀리 수.
         prereg_path: 사전등록 JSON 경로 (None → 기본 v3 draft).
-        rereg_path: prereg_path 의 별칭 (테스트 주입용).
         git_runner: 테스트용 git 명령 인젝터.
         dry_run: True 이면 계획만 반환, 파일 미작성.
         reports_dir: 리포트 출력 디렉토리.
@@ -138,7 +136,7 @@ def run_axs_noise_001(
     Returns:
         dry_run=True 이면 계획 dict, 그 외 리포트 dict.
     """
-    eff_prereg = rereg_path if rereg_path is not None else prereg_path
+    eff_prereg = prereg_path
     if eff_prereg is None:
         eff_prereg = _PREREG_PATH
 
@@ -150,6 +148,17 @@ def run_axs_noise_001(
     eff_schedule_path = schedule_path if schedule_path is not None else str(_DEFAULT_SCHEDULE_PATH)
     schedule_hash = _load_schedule_hash(eff_schedule_path)
 
+    # schedule_path in run_params: store repo-relative path (or basename) so that
+    # seedBatchId is path-independent (checkout-path-independent).
+    # The absolute path is kept internally for file loading only.
+    _abs_sched = Path(eff_schedule_path).resolve()
+    try:
+        _rel_sched_path = str(_abs_sched.relative_to(_REPO_ROOT))
+    except ValueError:
+        # schedule is outside the repo — fall back to basename
+        _rel_sched_path = _abs_sched.name
+    _stable_schedule_path = _rel_sched_path
+
     bases, archive_cfg = load_default_configs()
     base_cfg = _load_yaml(_AXS_UCB_CFG_PATH)
 
@@ -160,7 +169,7 @@ def run_axs_noise_001(
         "n_permutations": n_permutations,
         "experiment": "AXS-NOISE-001",
         "base_seeds": [int(s) for s in base_seeds],
-        "schedule_path": eff_schedule_path,
+        "schedule_path": _stable_schedule_path,
         "yokedScheduleHash": schedule_hash,
     }
 

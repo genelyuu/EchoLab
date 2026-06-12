@@ -41,6 +41,7 @@ from echo_bench.experiments.axs_common import (
     write_report,
 )
 from echo_bench.logging import get_logger, log_ko
+from echo_bench.logging.prereg import load_prereg
 from echo_bench.metrics.leakage import DEFAULT_NULL_PERMUTATIONS
 from echo_bench.policies.axs_ucb import AxsUcbPolicy
 
@@ -95,7 +96,6 @@ def run_axs_tb_001(
     replay_mode: str = "first_family",
     replay_sample_size: int = 2,
     prereg_path: Any = None,
-    rereg_path: Any = None,
     git_runner: Optional[Callable[[List[str]], str]] = None,
     dry_run: bool = False,
     reports_dir: Optional[Path] = None,
@@ -118,7 +118,6 @@ def run_axs_tb_001(
         replay_mode: 리플레이 감사 모드.
         replay_sample_size: sampled_families 모드 재계산 패밀리 수.
         prereg_path: 사전등록 JSON 경로 (None → v3 draft).
-        rereg_path: prereg_path 의 별칭 (테스트 주입용).
         git_runner: 테스트용 git 명령 인젝터.
         dry_run: True 이면 계획만 반환.
         reports_dir: 리포트 출력 디렉토리.
@@ -127,7 +126,7 @@ def run_axs_tb_001(
     Returns:
         dry_run=True 이면 계획 dict, 그 외 리포트 dict.
     """
-    eff_prereg = rereg_path if rereg_path is not None else prereg_path
+    eff_prereg = prereg_path
     if eff_prereg is None:
         eff_prereg = _PREREG_PATH
 
@@ -204,6 +203,13 @@ def run_axs_tb_001(
                 block[f"{scheme}_{arm_id}_traceHashes"] = raw_data[scheme][arm_id][fam]["traceHashes"]
         family_blocks[fam] = block
 
+    # ---- load signRule.minConsistentFamilies from prereg (fail-closed) ----
+    # The prereg is already loaded for the stamp in build_axs_report; load it here too
+    # to drive the pass threshold from the registered rule rather than a literal.
+    _prereg_doc = load_prereg(eff_prereg)
+    _sign_rule = _prereg_doc.get("signRule", {})
+    _prereg_min_consistent = int(_sign_rule.get("minConsistentFamilies", 4))
+
     # ---- build tieBreak blocks ----
     # per-family delta_imp[scheme][fam] = nmi(freeze_at_1) - nmi(freeze_none)
     metric = "slate_excess_nmi"
@@ -218,16 +224,16 @@ def run_axs_tb_001(
 
         bs = bootstrap_block(delta_by_fam, key=delta_key)
         mean = bs["mean"]
+        # sign for mean==0.0 is "-" (fail-closed: a zero mean is not a positive signal)
         sign = "+" if mean > 0 else "-"
 
-        # trackDecision: delta_imp_pass if >=4/5 positive AND ciLower > 0
+        # trackDecision: derived from prereg signRule (minConsistentFamilies) AND ciLower > 0
         n_pos = sum(1 for v in delta_by_fam.values() if v > 0)
         n_total = len(delta_by_fam)
-        min_consistent = max(4, n_total - 1) if n_total >= 5 else n_total
         ci_lower = float(bs["ciLower"])
-        # Use 4/5 rule: >=4 of 5 positive AND ciLower > 0
+        # At full scale use prereg-registered threshold; at smoke scale (n_total < 5) require all.
         if n_total >= 5:
-            pass_threshold = 4
+            pass_threshold = _prereg_min_consistent
         else:
             pass_threshold = n_total  # smoke scale: require all
         track = (
