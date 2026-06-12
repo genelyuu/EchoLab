@@ -150,6 +150,7 @@ def run_axs_010(
         "pool_size": pool_size,
         "n_permutations": n_permutations,
         "experiment": "AXS-010",
+        "base_seeds": [int(s) for s in base_seeds],
     }
 
     if dry_run:

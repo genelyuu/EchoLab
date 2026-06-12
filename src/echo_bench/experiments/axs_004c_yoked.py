@@ -155,6 +155,7 @@ def run_axs_004c(
         "pool_size": pool_size,
         "n_permutations": n_permutations,
         "experiment": "AXS-004c",
+        "base_seeds": [int(s) for s in base_seeds],
         "schedule_path": eff_schedule_path,
         "yokedScheduleHash": schedule_hash,
     }

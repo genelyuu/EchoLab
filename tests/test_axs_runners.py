@@ -1027,3 +1027,234 @@ def test_axs003_recompute_fn_covers_random_baseline(smoke_axs003, _prereg_path):
         assert fam_entry.get("replayable") is True, (
             f"AXS-003 full-replay 감사 실패: perFamily[{fam!r}].replayable 이 True 가 아닙니다"
         )
+
+
+# ===========================================================================
+# (i) AXS-V3 N1: base_seeds 누락 봉쇄 — seedBatchId 충돌 방지
+#
+# 버그: 네 러너의 run_params 에 base_seeds 가 없어 서로 다른 family set 이
+#       동일한 seedBatchId → 동일한 파일명을 생성, 리포트가 덮어쓰여지는 문제.
+# 픽스: run_params 에 "base_seeds": [int(s) for s in base_seeds] 추가.
+# ===========================================================================
+
+
+def test_axs003_different_base_seeds_produce_different_seedbatchid_and_filename(
+    tmp_path, _prereg_path
+):
+    """AXS-003: 서로 다른 base_seeds → 다른 seedBatchId + 다른 파일명 (덮어쓰기 없음).
+
+    두 실행을 동일한 reports_dir 에 기록해 파일이 2개 생성되는지 검증한다.
+    (기존 버그: 두 파일 모두 axs_003_d61d7a9deb3a.json 으로 중복 생성됨)
+    """
+    from echo_bench.experiments.axs_003_alpha_kill import run_axs_003
+
+    reports_dir = tmp_path / "reports_collision"
+    reports_dir.mkdir()
+
+    # family set A: seeds [42, 7]
+    r_a = run_axs_003(
+        [42, 7],
+        H=SMOKE_H,
+        k=4,
+        pool_size=SMOKE_POOL_SIZE,
+        n_permutations=SMOKE_N_PERM,
+        prereg_path=_prereg_path,
+        git_runner=_good_git_runner,
+        reports_dir=reports_dir,
+    )
+    # family set B: seeds [123, 55555] — completely different families
+    r_b = run_axs_003(
+        [123, 55555],
+        H=SMOKE_H,
+        k=4,
+        pool_size=SMOKE_POOL_SIZE,
+        n_permutations=SMOKE_N_PERM,
+        prereg_path=_prereg_path,
+        git_runner=_good_git_runner,
+        reports_dir=reports_dir,
+    )
+
+    assert r_a["seedBatchId"] != r_b["seedBatchId"], (
+        "AXS-003: 서로 다른 base_seeds 임에도 seedBatchId 가 동일합니다 — "
+        f"base_seeds A={[42, 7]}, B={[123, 55555]}, "
+        f"seedBatchId={r_a['seedBatchId'][:12]}"
+    )
+    assert r_a["reportHash"] != r_b["reportHash"], (
+        "AXS-003: 서로 다른 base_seeds 임에도 reportHash 가 동일합니다."
+    )
+
+    # 파일이 두 개 생성되어야 함 (덮어쓰기 없음)
+    json_files = sorted(reports_dir.glob("axs_003_*.json"))
+    assert len(json_files) == 2, (
+        f"AXS-003: 서로 다른 family set 으로 실행했는데 파일이 {len(json_files)}개입니다 "
+        f"(2개 기대) — 파일명 충돌로 덮어쓰기가 발생했습니다.\n"
+        f"파일 목록: {[f.name for f in json_files]}"
+    )
+
+
+def test_axs003_same_base_seeds_produce_identical_seedbatchid(tmp_path, _prereg_path):
+    """AXS-003: 동일 base_seeds → 동일 seedBatchId + 동일 reportHash (결정론성 보존)."""
+    from echo_bench.experiments.axs_003_alpha_kill import run_axs_003
+
+    kw = dict(
+        H=SMOKE_H,
+        k=4,
+        pool_size=SMOKE_POOL_SIZE,
+        n_permutations=SMOKE_N_PERM,
+        prereg_path=_prereg_path,
+        git_runner=_good_git_runner,
+        reports_dir=tmp_path / "det_same_a",
+    )
+    r1 = run_axs_003([42, 7], **kw)
+    kw2 = dict(kw, reports_dir=tmp_path / "det_same_b")
+    r2 = run_axs_003([42, 7], **kw2)
+
+    assert r1["seedBatchId"] == r2["seedBatchId"], (
+        "AXS-003: 동일 base_seeds 임에도 seedBatchId 가 달라졌습니다 — 결정론성 파괴."
+    )
+    assert r1["reportHash"] == r2["reportHash"], (
+        "AXS-003: 동일 base_seeds 임에도 reportHash 가 달라졌습니다 — 결정론성 파괴."
+    )
+
+
+def test_axs003_seedbatchid_includes_base_seeds(tmp_path, _prereg_path):
+    """AXS-003: seedBatchId 계산에 base_seeds 가 포함됨을 인테스트 재구성으로 검증.
+
+    build_axs_report 내 stable 필터가 base_seeds 를 pick-up 하는지 확인한다.
+    run_params 에 base_seeds 가 없으면 재구성 해시가 불일치한다.
+    """
+    from echo_bench.experiments.axs_003_alpha_kill import run_axs_003
+    from echo_bench.experiments.e_leakage_diagnostic import EXPANDED_PROBE_SET
+    from echo_bench.utils.hash import canonical_hash
+
+    r = run_axs_003(
+        [42, 7],
+        H=SMOKE_H,
+        k=4,
+        pool_size=SMOKE_POOL_SIZE,
+        n_permutations=SMOKE_N_PERM,
+        prereg_path=_prereg_path,
+        git_runner=_good_git_runner,
+        reports_dir=tmp_path / "bs_check",
+    )
+
+    # base_seeds 포함 재구성
+    run_params_with_seeds = {
+        "H": SMOKE_H,
+        "k": 4,
+        "pool_size": SMOKE_POOL_SIZE,
+        "n_permutations": SMOKE_N_PERM,
+        "experiment": "AXS-003",
+        "base_seeds": [42, 7],
+    }
+    stable_with = {
+        k: run_params_with_seeds[k]
+        for k in sorted(run_params_with_seeds)
+        if k != "configFreeze"
+    }
+    expected_with = canonical_hash(
+        {"experiment": "AXS-003", "probes": list(EXPANDED_PROBE_SET), **stable_with}
+    )
+
+    # base_seeds 제외 재구성
+    run_params_without_seeds = {
+        "H": SMOKE_H,
+        "k": 4,
+        "pool_size": SMOKE_POOL_SIZE,
+        "n_permutations": SMOKE_N_PERM,
+        "experiment": "AXS-003",
+    }
+    stable_without = {
+        k: run_params_without_seeds[k]
+        for k in sorted(run_params_without_seeds)
+        if k != "configFreeze"
+    }
+    expected_without = canonical_hash(
+        {"experiment": "AXS-003", "probes": list(EXPANDED_PROBE_SET), **stable_without}
+    )
+
+    actual = r["seedBatchId"]
+    assert actual == expected_with, (
+        f"AXS-003 seedBatchId 가 base_seeds 를 포함하지 않습니다.\n"
+        f"  actual:          {actual[:12]}\n"
+        f"  expected_with:   {expected_with[:12]}\n"
+        f"  expected_without:{expected_without[:12]}"
+    )
+    assert actual != expected_without, (
+        "AXS-003 seedBatchId 가 base_seeds 없는 해시와 동일 — base_seeds 가 실제로 누락됨."
+    )
+
+
+@pytest.mark.parametrize("runner_name,base_seeds_a,base_seeds_b,experiment_id", [
+    ("axs_009_freeze", [42, 7], [123, 55555], "AXS-009"),
+    ("axs_004c_yoked", [42, 7], [123, 55555], "AXS-004c"),
+    ("axs_010_tiebreak", [42, 7], [123, 55555], "AXS-010"),
+])
+def test_other_runners_different_base_seeds_produce_different_seedbatchid(
+    runner_name, base_seeds_a, base_seeds_b, experiment_id,
+    tmp_path, _prereg_path, _smoke_configs
+):
+    """AXS-009/004c/010: 서로 다른 base_seeds → 다른 seedBatchId (덮어쓰기 봉쇄 검증).
+
+    AXS-004c 는 smoke schedule 이 필요하므로 별도 생성.
+    """
+    if runner_name == "axs_009_freeze":
+        from echo_bench.experiments.axs_009_freeze import run_axs_009 as run_fn
+        def call_runner(seeds, rd):
+            return run_fn(
+                seeds,
+                H=SMOKE_H, k=4, pool_size=SMOKE_POOL_SIZE, n_permutations=SMOKE_N_PERM,
+                prereg_path=_prereg_path, git_runner=_good_git_runner,
+                reports_dir=rd,
+            )
+    elif runner_name == "axs_004c_yoked":
+        from echo_bench.experiments.axs_004c_schedule_gen import generate_yoked_schedule, write_schedule
+        from echo_bench.experiments.axs_004c_yoked import run_axs_004c
+        bases, archive_cfg = _smoke_configs
+        sched_path = tmp_path / "sched_collision.json"
+        schedule = generate_yoked_schedule(
+            H=SMOKE_H, k=4, pool_size=SMOKE_POOL_SIZE, base_seed=999,
+            bases=bases, archive_cfg=archive_cfg,
+            policy_config={"k": 4, "alpha": 1.0, "lambda_reg": 1.0,
+                           "features": ["coordinate_gap", "band_progress", "redundancy", "bias"],
+                           "freeze_round": None, "tie_break_order": "canonical"},
+        )
+        write_schedule(schedule, sched_path)
+        def call_runner(seeds, rd):
+            return run_axs_004c(
+                seeds,
+                H=SMOKE_H, k=4, pool_size=SMOKE_POOL_SIZE, n_permutations=SMOKE_N_PERM,
+                schedule_path=str(sched_path),
+                prereg_path=_prereg_path, git_runner=_good_git_runner,
+                reports_dir=rd,
+            )
+    else:  # axs_010_tiebreak
+        from echo_bench.experiments.axs_010_tiebreak import run_axs_010
+        def call_runner(seeds, rd):
+            return run_axs_010(
+                seeds,
+                H=SMOKE_H, k=4, pool_size=SMOKE_POOL_SIZE, n_permutations=SMOKE_N_PERM,
+                prereg_path=_prereg_path, git_runner=_good_git_runner,
+                reports_dir=rd,
+            )
+
+    reports_dir = tmp_path / f"collision_{runner_name}"
+    reports_dir.mkdir()
+
+    r_a = call_runner(base_seeds_a, reports_dir)
+    r_b = call_runner(base_seeds_b, reports_dir)
+
+    assert r_a["seedBatchId"] != r_b["seedBatchId"], (
+        f"{experiment_id}: 서로 다른 base_seeds 임에도 seedBatchId 가 동일합니다 — "
+        f"base_seeds A={base_seeds_a}, B={base_seeds_b}, "
+        f"seedBatchId={r_a['seedBatchId'][:12]}"
+    )
+
+    # 파일이 두 개 생성되어야 함 (덮어쓰기 없음)
+    short_id = experiment_id.upper().replace("AXS-", "").lower()
+    json_files = sorted(reports_dir.glob(f"axs_{short_id}_*.json"))
+    assert len(json_files) == 2, (
+        f"{experiment_id}: 서로 다른 family set 으로 실행했는데 파일이 {len(json_files)}개입니다 "
+        f"(2개 기대) — 파일명 충돌로 덮어쓰기가 발생했습니다.\n"
+        f"파일 목록: {[f.name for f in json_files]}"
+    )
