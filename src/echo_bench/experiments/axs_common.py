@@ -4,6 +4,14 @@ AXS-010/003/009/004c 네 개 실험 러너(이후 태스크에서 작성)가 공
 재사용 가능한 함수 모음. ladder_gate 가 요구하는 리포트 계약을 충족시키는
 JSON 구조를 생성한다.
 
+Hash semantics note
+-------------------
+AXS reportHash 와 e_leakage reportHash 의 계산 범위가 다르다.
+- AXS: ``reportHash = canonical_hash(report - {reportHash})`` — 즉 pack/packHash
+  포함 전체 바디에 대해 계산 (hashSemantics 필드 참조).
+- e_leakage: ``reportHash = canonical_hash(pre-pack body)`` — pack 삽입 전 계산.
+이 차이는 각 리포트의 ``hashSemantics`` 필드에 문서화되어 있다.
+
 Guardrails
 ----------
 - 모든 정책은 trace-only. user_id/persona/emotion/preference 벡터 없음.
@@ -18,10 +26,12 @@ are Korean per the project logging convention.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
+import os
 import subprocess
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 import yaml
 
@@ -52,6 +62,7 @@ from echo_bench.utils.hash import canonical_hash
 
 __all__ = [
     "run_arm_family",
+    "reportable_block",
     "bootstrap_block",
     "build_arm_entry",
     "build_axs_report",
@@ -59,6 +70,8 @@ __all__ = [
     "register_report",
     "make_axs_arg_parser",
     "dry_run_plan",
+    "parse_base_seeds",
+    "load_default_configs",
     "REPLAY_MODES",
 ]
 
@@ -76,6 +89,47 @@ def _load_yaml(path: Path) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as handle:
         doc = yaml.safe_load(handle)
     return doc if isinstance(doc, dict) else {}
+
+
+def load_default_configs() -> tuple:
+    """기본 configs/basis/bases.yaml + configs/archive/archive.yaml 로드.
+
+    Returns:
+        (bases, archive_cfg) — bases 는 load_bases 결과, archive_cfg 는 dict.
+
+    실험 러너가 bases/archive 설정을 직접 로드할 때 사용.
+    (e_leakage_diagnostic 의 _load_yaml 패턴 미러.)
+    """
+    bases = load_bases(_BASES_CFG_PATH)
+    archive_cfg = _load_yaml(_ARCHIVE_CFG_PATH)
+    return bases, archive_cfg
+
+
+def parse_base_seeds(s: str) -> List[int]:
+    """쉼표 구분 base-seed 문자열 → int 리스트.
+
+    빈 세그먼트나 정수가 아닌 세그먼트는 ValueError(한국어 메시지) 발생.
+
+    Args:
+        s: 예) "42,7,101"
+
+    Returns:
+        [42, 7, 101]
+    """
+    seeds: List[int] = []
+    for segment in s.split(","):
+        segment = segment.strip()
+        if not segment:
+            raise ValueError(
+                f"base-seeds 파싱 실패: 빈 세그먼트가 포함되어 있습니다. 입력: {s!r}"
+            )
+        try:
+            seeds.append(int(segment))
+        except (ValueError, TypeError):
+            raise ValueError(
+                f"base-seeds 파싱 실패: '{segment}' 는 정수가 아닙니다. 입력: {s!r}"
+            )
+    return seeds
 
 
 def _git_commit_hash(git_runner: Optional[Callable[[List[str]], str]] = None) -> str:
@@ -101,7 +155,27 @@ def _git_commit_hash(git_runner: Optional[Callable[[List[str]], str]] = None) ->
 
 
 # ---------------------------------------------------------------------------
-# 1. run_arm_family
+# 1. reportable_block
+# ---------------------------------------------------------------------------
+
+
+def reportable_block(raw_family_block: Dict[str, Any]) -> Dict[str, Any]:
+    """raw run_arm_family 출력에서 roundsByProbe 를 제거한 리포트용 블록 반환.
+
+    roundsByProbe 는 워킹 데이터(AXS-009 prefix 재계산용)로, 리포트 바디에서
+    제외되어야 한다. 이 함수를 통해 stripping 계약을 단일 위치에서 관리한다.
+
+    Args:
+        raw_family_block: run_arm_family() 반환값 (roundsByProbe 포함 가능).
+
+    Returns:
+        roundsByProbe 를 제거한 새 dict. 원본은 변경되지 않는다.
+    """
+    return {k: v for k, v in raw_family_block.items() if k != "roundsByProbe"}
+
+
+# ---------------------------------------------------------------------------
+# 2. run_arm_family
 # ---------------------------------------------------------------------------
 
 
@@ -124,11 +198,20 @@ def run_arm_family(
 
     정책은 probe별 새 인스턴스 — 상태 누적 차단.
 
+    recompute_fn 계약:
+        recompute_fn 이 이 함수의 출력을 기반으로 패밀리 블록을 재계산할 때,
+        반환 블록은 reportable_block() 적용 후 원래 블록과 canonical_hash 가
+        동일해야 한다. 즉:
+            canonical_hash(reportable_block(recompute_fn(family)))
+            == canonical_hash(reportable_block(original_block))
+        build_axs_report 는 비교 전에 양쪽에 모두 reportable_block() 을 적용한다.
+
     반환:
         dict — slate_excess_nmi(float), coordinate_coverage_values(list[float]),
         coordinate_coverage_mean(float), archiveHash, poolHash,
         traceHashes(list[str]), slateHashes(list[str]),
         roundsByProbe(dict — 워킹 데이터, 리포트 바디에서 제외됨).
+        reportable_block() 을 통해 roundsByProbe 를 제거하면 리포트용 블록이 된다.
     """
     archive_hash, pool, pool_hash = _build_family_pool(
         bases, archive_cfg, int(base_seed), pool_size
@@ -201,7 +284,7 @@ def run_arm_family(
 
 
 # ---------------------------------------------------------------------------
-# 2. bootstrap_block
+# 3. bootstrap_block
 # ---------------------------------------------------------------------------
 
 
@@ -225,7 +308,7 @@ def bootstrap_block(
 
 
 # ---------------------------------------------------------------------------
-# 3. build_arm_entry
+# 4. build_arm_entry
 # ---------------------------------------------------------------------------
 
 
@@ -269,7 +352,7 @@ def build_arm_entry(
 
 
 # ---------------------------------------------------------------------------
-# 4. build_axs_report
+# 5. build_axs_report
 # ---------------------------------------------------------------------------
 
 
@@ -287,24 +370,47 @@ def build_axs_report(
 ) -> Dict[str, Any]:
     """AXS 실험 리포트 조립 (ladder_gate 계약 충족).
 
+    body_extra 는 함수 진입 시 deep-copy 되어 원본 불변성이 보장된다(거버넌스 요건).
+
+    roundsByProbe stripping 계약:
+        family_blocks 의 각 값에서 roundsByProbe 를 제거한 뒤 해시 체인에 사용한다.
+        recompute_fn 이 반환하는 블록도 동일하게 reportable_block() 을 적용한 후
+        비교한다. 따라서 recompute_fn 은 roundsByProbe 포함·미포함 모두 허용되지만,
+        reportable_block() 적용 후 원래 블록과 canonical_hash 가 일치해야 한다.
+
+    recompute_fn 계약:
+        recompute_fn(family: str) -> Mapping[str, Any]
+        반환값은 reportable_block() 적용 후 원래 family_blocks[family] 와
+        canonical_hash 가 동일해야 한다(재현 가능성 검증).
+        roundsByProbe 는 stripping 후 비교되므로 포함 여부는 무관하다.
+
     순서:
-    1. verify_trace_greedy_freeze() → configFreeze
-    2. build_prereg_stamp() → preregStamp
-    3. seedBatchId 계산
-    4. build_replay_section()
-    5. ReproducibilityPack + packHash
-    6. reportId 생성
-    7. body_extra 병합
-    8. reportHash 계산(마지막)
+    1. body_extra deep-copy
+    2. verify_trace_greedy_freeze() → configFreeze
+    3. build_prereg_stamp() → preregStamp
+    4. seedBatchId 계산
+    5. family_blocks 에서 roundsByProbe 방어적 제거
+    6. recompute_fn 래퍼: 반환 블록에서도 roundsByProbe 방어적 제거
+    7. build_replay_section()
+    8. 해시 체인
+    9. reportId 생성
+    10. 리포트 바디 조립
+    11. outputHash
+    12. hashSemantics 삽입
+    13. ReproducibilityPack (pre-pack body hash)
+    14. reportHash (마지막)
     """
-    # 1. C-011 config-freeze 게이트
+    # 1. body_extra deep-copy — 거버넌스 리포트 불변성 보장
+    body_extra = copy.deepcopy(body_extra)
+
+    # 2. C-011 config-freeze 게이트
     freeze = verify_trace_greedy_freeze()
     log_ko(_logger, f"AXS 리포트 조립 시작: experiment_id={experiment_id}")
 
-    # 2. prereg 스탬프
+    # 3. prereg 스탬프
     prereg_stamp = build_prereg_stamp(prereg_path, git_runner=git_runner)
 
-    # 3. seedBatchId — run_params 에서 안정적 키들만 사용 + probe 목록 포함
+    # 4. seedBatchId — run_params 에서 안정적 키들만 사용 + probe 목록 포함
     stable = {
         k: run_params[k]
         for k in sorted(run_params)
@@ -318,33 +424,43 @@ def build_axs_report(
         }
     )
 
-    # 4. 인라인 리플레이 감사
+    # 5. family_blocks 에서 roundsByProbe 방어적 제거 (symmetric stripping)
+    clean_family_blocks: Dict[str, Dict[str, Any]] = {
+        family: reportable_block(block)
+        for family, block in family_blocks.items()
+    }
+
+    # 6. recompute_fn 래퍼: 반환 블록에서도 roundsByProbe 방어적 제거
+    def _clean_recompute_fn(family: str) -> Dict[str, Any]:
+        return reportable_block(dict(recompute_fn(family)))
+
+    # 7. 인라인 리플레이 감사
     replay_section = build_replay_section(
-        family_blocks,
-        recompute_fn,
+        clean_family_blocks,
+        _clean_recompute_fn,
         replay_mode=replay_mode,
         replay_sample_size=replay_sample_size,
         config_key=seed_batch_id,
     )
 
-    # 5. 해시 체인
+    # 8. 해시 체인
     archive_hash = canonical_hash(
-        {family: block["archiveHash"] for family, block in family_blocks.items()}
+        {family: block["archiveHash"] for family, block in clean_family_blocks.items()}
     )
     pool_hash = canonical_hash(
-        {family: block["poolHash"] for family, block in family_blocks.items()}
+        {family: block["poolHash"] for family, block in clean_family_blocks.items()}
     )
     slate_hash = canonical_hash(
-        {family: block["slateHashes"] for family, block in family_blocks.items()}
+        {family: block["slateHashes"] for family, block in clean_family_blocks.items()}
     )
     trace_hash = canonical_hash(
-        {family: block["traceHashes"] for family, block in family_blocks.items()}
+        {family: block["traceHashes"] for family, block in clean_family_blocks.items()}
     )
 
-    # 6. reportId: 결정론적
+    # 9. reportId: 결정론적
     report_id = f"{experiment_id.lower().replace('-', '')}-{seed_batch_id[:12]}"
 
-    # 7. 리포트 바디 조립 (reportHash 제외)
+    # 10. 리포트 바디 조립 (reportHash 제외)
     report: Dict[str, Any] = {
         "reportId": report_id,
         "experimentId": experiment_id,
@@ -363,14 +479,14 @@ def build_axs_report(
         **body_extra,
     }
 
-    # outputHash: 현재까지 조립된 바디 기반
-    results_body = {k: v for k, v in report.items()}
-    output_hash = canonical_hash(results_body)
+    # 11. outputHash: 현재까지 조립된 바디 기반
+    output_hash = canonical_hash(dict(report))
     report["outputHash"] = output_hash
 
-    # hashSemantics: 두 reportHash 필드의 의미 명시 (e_leakage_diagnostic 패턴 준수).
-    # pack/packHash/reportHash 삽입 전에 추가 → pre-pack body hash 에 포함됨.
-    # 따라서 pack.reportHash == canonical_hash(report - {reproducibilityPack, packHash, reportHash})
+    # 12. hashSemantics: 두 reportHash 필드의 의미 명시.
+    # AXS top-level reportHash = canonical_hash(전체 바디 - {reportHash}).
+    # pack.reportHash = pack/packHash/reportHash 삽입 전 바디 해시 (pre-pack body hash).
+    # e_leakage 는 pre-pack 방식만 사용; AXS 는 양쪽 모두 기록.
     report["hashSemantics"] = (
         "top-level reportHash = canonical_hash of the complete report minus the "
         "reportHash key (i.e. canonical_hash(report - {reportHash})); "
@@ -378,14 +494,8 @@ def build_axs_report(
         "pack / packHash / reportHash fields were inserted (pre-pack body hash)."
     )
 
-    # ReproducibilityPack: 먼저 임시 reportHash 로 생성
-    commit_hash = _git_commit_hash(git_runner)
-    # 실제 흐름: hashSemantics 포함된 바디 기반 pre-pack body hash 계산 후
-    #           pack 생성(reportHash 에 저장) → pack/packHash 삽입 → 최종 reportHash 계산.
-    # 따라서: pack.reportHash == canonical_hash(report - {reproducibilityPack, packHash, reportHash})
-
-    # pre-pack body hash: pack/packHash/reportHash 삽입 전 바디 해시
-    # → reproducibilityPack.reportHash 에 저장됨 (hashSemantics 참조)
+    # 13. pre-pack body hash: pack/packHash/reportHash 삽입 전 바디 해시
+    #     → reproducibilityPack.reportHash 에 저장 (hashSemantics 참조)
     pre_pack_body = {
         k: v for k, v in report.items()
         if k not in {"reproducibilityPack", "packHash", "reportHash"}
@@ -393,6 +503,7 @@ def build_axs_report(
     pre_pack_body_hash = canonical_hash(pre_pack_body)
 
     # pack 생성 (pre-pack body hash 포함)
+    commit_hash = _git_commit_hash(git_runner)
     pack = ReproducibilityPack(
         configHash=canonical_hash(run_params),
         commitHash=commit_hash,
@@ -407,7 +518,7 @@ def build_axs_report(
     report["reproducibilityPack"] = pack.to_dict()
     report["packHash"] = pack.pack_hash()
 
-    # 8. reportHash 는 pack+packHash 포함된 전체 바디에 대해 계산(마지막)
+    # 14. reportHash: pack+packHash 포함된 전체 바디에 대해 계산(마지막)
     report_without_hash = {k: v for k, v in report.items() if k != "reportHash"}
     report_hash = canonical_hash(report_without_hash)
     report["reportHash"] = report_hash
@@ -423,12 +534,15 @@ def build_axs_report(
 
 
 # ---------------------------------------------------------------------------
-# 5. write_report
+# 6. write_report
 # ---------------------------------------------------------------------------
 
 
 def write_report(report: Dict[str, Any], *, reports_dir: Path) -> Path:
-    """리포트를 JSON 으로 저장하고 경로 반환.
+    """리포트를 JSON 으로 원자적 저장하고 경로 반환.
+
+    tmp 형제 파일 → flush + fsync → os.replace 원자적 교체
+    (append_ledger_entry 패턴 미러, src/echo_bench/logging/prereg.py 참조).
 
     파일명: axs_<experimentId lower dashes stripped>_<seedBatchId[:12]>.json
     예: axs_003_<12hex>.json (AXS-003), axs_010_<12hex>.json (AXS-010)
@@ -441,8 +555,17 @@ def write_report(report: Dict[str, Any], *, reports_dir: Path) -> Path:
     out_path = Path(reports_dir) / file_name
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with open(out_path, "w", encoding="utf-8") as handle:
-        json.dump(report, handle, indent=2, sort_keys=True, ensure_ascii=True)
+    tmp_path = out_path.with_suffix(".json.tmp")
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(report, handle, indent=2, sort_keys=True, ensure_ascii=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, out_path)
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+        raise
 
     log_ko(
         _logger,
@@ -453,7 +576,7 @@ def write_report(report: Dict[str, Any], *, reports_dir: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# 6. register_report
+# 7. register_report
 # ---------------------------------------------------------------------------
 
 
@@ -488,7 +611,7 @@ def register_report(
 
 
 # ---------------------------------------------------------------------------
-# 7. make_axs_arg_parser
+# 8. make_axs_arg_parser
 # ---------------------------------------------------------------------------
 
 
@@ -502,7 +625,8 @@ def make_axs_arg_parser(description: str) -> argparse.ArgumentParser:
     try:
         horizon_cfg = load_horizon(_HORIZON_CFG_PATH)
         h_default = default_h(horizon_cfg)
-    except Exception:
+    except (OSError, KeyError, TypeError, ValueError, yaml.YAMLError):
+        log_ko(_logger, "horizon 설정 파일 로드 실패 — 기본값 H=8 사용")
         h_default = 8  # fallback
 
     parser = argparse.ArgumentParser(description=description)
@@ -567,7 +691,7 @@ def make_axs_arg_parser(description: str) -> argparse.ArgumentParser:
 
 
 # ---------------------------------------------------------------------------
-# 8. dry_run_plan
+# 9. dry_run_plan
 # ---------------------------------------------------------------------------
 
 
@@ -581,6 +705,9 @@ def dry_run_plan(
     """드라이런: 파일 미작성, config + freeze + 패밀리별 아카이브/풀 해시 계획 반환.
 
     e_leakage_diagnostic.run_leakage_diagnostic dry_run 블록 미러.
+
+    configFreeze 는 리포트와 동일한 3-키 subset 으로 노출된다:
+        {policyName, policyEffectiveConfigHash, taskId}
     """
     freeze = verify_trace_greedy_freeze()
     seeds = [int(s) for s in base_seeds]
@@ -606,6 +733,10 @@ def dry_run_plan(
     return {
         "dryRun": True,
         "config": dict(run_params),
-        "configFreeze": freeze,
+        "configFreeze": {
+            "policyName": freeze["policyName"],
+            "policyEffectiveConfigHash": freeze["frozenHash"],
+            "taskId": freeze["taskId"],
+        },
         "families": families_plan,
     }
