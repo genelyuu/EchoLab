@@ -15,6 +15,7 @@ import json
 import math
 import subprocess
 import sys
+import warnings
 from pathlib import Path
 from typing import Any, Dict
 
@@ -86,7 +87,11 @@ def smoke_schedule(smoke_bases, smoke_archive_cfg, smoke_policy_config):
 
 
 def test_determinism(smoke_bases, smoke_archive_cfg, smoke_policy_config):
-    """동일 인수로 두 번 호출 → canonical_hash 동일."""
+    """동일 인수로 두 번 호출 → canonical_hash 동일.
+
+    Note: smoke_schedule 픽스처(module-scope)를 재사용하지 않고 의도적으로 두 번
+    독립 생성한다 — 픽스처 캐시가 결정론성을 숨기지 않도록 하기 위함.
+    """
     from echo_bench.experiments.axs_004c_schedule_gen import generate_yoked_schedule
     from echo_bench.utils.hash import canonical_hash
 
@@ -181,8 +186,8 @@ def test_round_trip_load_and_select(tmp_path, smoke_bases, smoke_archive_cfg, sm
     }
     policy = AxsYokedBonusPolicy(policy_cfg)
 
-    # 슬레이트 선택 테스트: 스모크 풀 준비
-    _, pool, _ = _build_family_pool(smoke_bases, smoke_archive_cfg, SMOKE_BASE_SEED, SMOKE_POOL)
+    # 슬레이트 선택 테스트: 스모크 풀 준비 (dict() 복사로 픽스처 원본 보호)
+    _, pool, _ = _build_family_pool(smoke_bases, dict(smoke_archive_cfg), SMOKE_BASE_SEED, SMOKE_POOL)
     trace = TraceState()
 
     # 첫 번째 라운드 선택
@@ -228,7 +233,6 @@ def test_bonus_diversity_or_nonneg(smoke_schedule):
     unique_count = len(set(bonuses))
     # 로그로 남겨두어 CI에서 확인 가능
     if unique_count == 1:
-        import warnings
         warnings.warn(
             f"perRoundBonus 가 모두 동일합니다 ({bonuses[0]:.6f}). "
             "스모크 스케일에서는 분산이 없을 수 있습니다 (약 보증 통과).",

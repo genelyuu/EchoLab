@@ -29,7 +29,6 @@ from typing import Any, Dict, List, Mapping, Optional
 
 import yaml
 
-from echo_bench.basis.schema import load_bases
 from echo_bench.env.horizon import default_h, load_horizon
 from echo_bench.env.round_runner import run_round
 from echo_bench.env.trace_state import TraceState
@@ -97,7 +96,7 @@ def _run_probe_episode_manual(
     for i in range(H):
         round_seed = int(canonical_hash({"seed": base_seed, "round": i}), 16)
 
-        # run_round 는 policy.select() 를 내부 호출하므로 select_fn 으로 프로브 사용
+        # policy.select() 가 슬레이트를 구성·보너스를 기록; select_fn(probe) 는 그 슬레이트에서 카드 하나를 선택
         run_round(
             pool,
             policy,
@@ -118,16 +117,17 @@ def _run_probe_episode_manual(
             )
 
         # 슬레이트에 있는 카드들의 bonus 평균 (last_score_components 는 슬레이트 카드만 포함)
-        bonus_values = [
-            float(comp["bonus"])
-            for comp in components.values()
-            if "bonus" in comp
-        ]
-        if not bonus_values:
-            raise ValueError(
-                f"AXS-004c 스케줄 생성: 라운드 {i} last_score_components 에 "
-                "'bonus' 키가 없습니다."
-            )
+        # bonus 키 부재는 정책 버그이므로 명시적 루프에서 KeyError → 한국어 ValueError 변환 (fail-closed)
+        bonus_values: List[float] = []
+        for card_id, comp in components.items():
+            try:
+                bonus_values.append(float(comp["bonus"]))
+            except KeyError as exc:
+                raise ValueError(
+                    f"AXS-004c 스케줄 생성: 라운드 {i} 카드 {card_id!r} 의 "
+                    "last_score_components 에 'bonus' 키가 없습니다. "
+                    "policy 구현을 확인하세요."
+                ) from exc
         if not all(math.isfinite(b) for b in bonus_values):
             raise ValueError(
                 f"AXS-004c 스케줄 생성: 라운드 {i} bonus 값에 유한하지 않은 값이 "
@@ -236,7 +236,7 @@ def generate_yoked_schedule(
         "referenceArm": "axs_ucb_default",
         "derivation": (
             "deterministic from pilot config + seed: mean per-round slate bonus "
-            "of axs_ucb_default over EXPANDED_PROBE_SET on pilot family 999"
+            f"of axs_ucb_default over EXPANDED_PROBE_SET on pilot family {base_seed}"
         ),
         "H": H,
         "k": k,
@@ -401,12 +401,13 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     if args.dry_run:
         # 드라이런: 파일럿 풀 해시만 계산하고 파일 미작성
-        from echo_bench.experiments.e_leakage_diagnostic import _build_family_pool
-
         archive_hash, _pool, pool_hash = _build_family_pool(
             bases, dict(archive_cfg), _PILOT_BASE_SEED, args.pool_size
         )
-        config_hash = canonical_hash(dict(policy_config))
+        # 실제 실행 경로와 동일하게 k 오버라이드 적용 후 해시 계산
+        effective_dry_cfg = dict(policy_config)
+        effective_dry_cfg["k"] = args.k
+        config_hash = canonical_hash(effective_dry_cfg)
 
         log_ko(
             _logger,
