@@ -247,14 +247,40 @@ _MECHANISM_PATTERN_RES_V1: tuple[tuple[str, "re.Pattern[str]"], ...] = tuple(
 # a NEW tuple so that MECHANISM_CLAIM_PATTERNS remains BYTE-IDENTICAL (existing
 # tests pin it exactly). All patterns use bounded gaps [^.\n]{0,N} only; causal
 # verb + mechanism noun coupling only; plain technical prose must pass.
+#
+# N2 review fixes applied here:
+#   Fix 1 (Gap-spec): frozen\s+.{0,40}state → frozen\s+[^.\n]{0,40}state (both
+#     amplify patterns). The comment above now accurately reflects the invariant.
+#   Fix 2 (entry-point over-suppression): entry[-\s]point removed from the shared
+#     v2-era noun group; replaced by two dedicated patterns (verb-first and
+#     noun-first) that require a mechanism-context anchor token
+#     (?:separabilit|probe|slate|mechanism) within [^.\n]{0,80} of entry-point.
+#     Plain CLI prose ("The CLI entry-point requires three positional arguments.")
+#     carries no such anchor and therefore passes.
+#   Fix 3a (washout bare coupling): washout split out of the imprint/washout group;
+#     the washout-specific patterns require a mechanism-context anchor token
+#     (?:separabilit|probe|slate|trace|polic|state|imprint) in the same bounded
+#     window. imprint(?:ing)? remains in its own patterns without the anchor
+#     requirement (it is inherently mechanism-specific).
+#   Fix 3b (noun-first freeze bare coupling): freez(?:e|ing) split out of the
+#     noun-first amplify group; the bare-freeze noun-first pattern requires a
+#     mechanism-context anchor token (?:trace|polic|state|imprint|separabilit|
+#     probe|slate) in [^.\n]{0,160} before freeze OR [^.\n]{0,80} between freeze
+#     and amplif OR [^.\n]{0,80} after amplif. Inherently-mechanism nouns
+#     (trace[-\s]conditioned, frozen\s+[^.\n]{0,40}state, imprint(?:ing)?) keep
+#     their own noun-first pattern without the anchor requirement.
 MECHANISM_CLAIM_PATTERNS_V3: tuple[str, ...] = (
     # amplification coupling: amplify verb ↔ trace-conditioned / frozen state / imprint
-    # (verb-first)
+    # (verb-first) — freez(?:e|ing) retained here; amplif is the anchor itself
     r"amplif(?:y|ies|ied)[^.\n]{0,80}"
-    r"(?:trace[-\s]conditioned|frozen\s+.{0,40}state|freez(?:e|ing)|imprint(?:ing)?)",
-    # (noun-first)
-    r"(?:trace[-\s]conditioned|frozen\s+.{0,40}state|freez(?:e|ing)|imprint(?:ing)?)"
+    r"(?:trace[-\s]conditioned|frozen\s+[^.\n]{0,40}state|freez(?:e|ing)|imprint(?:ing)?)",
+    # (noun-first, inherently mechanism-specific nouns — no bare freeze)
+    r"(?:trace[-\s]conditioned|frozen\s+[^.\n]{0,40}state|imprint(?:ing)?)"
     r"[^.\n]{0,80}amplif(?:y|ies|ied)",
+    # (noun-first, bare freeze — requires mechanism-context anchor in sentence)
+    r"(?:trace|polic|state|imprint|separabilit|probe|slate)[^.\n]{0,160}freez(?:e|ing)[^.\n]{0,80}amplif(?:y|ies|ied)"
+    r"|freez(?:e|ing)[^.\n]{0,80}(?:trace|polic|state|imprint|separabilit|probe|slate)[^.\n]{0,80}amplif(?:y|ies|ied)"
+    r"|freez(?:e|ing)[^.\n]{0,80}amplif(?:y|ies|ied)[^.\n]{0,80}(?:trace|polic|state|imprint|separabilit|probe|slate)",
     # elimination coupling: eliminate ↔ trace-independent bonus/score/randomization
     # (verb-first)
     r"eliminat(?:e|es|ed|ion)[^.\n]{0,80}"
@@ -269,25 +295,42 @@ MECHANISM_CLAIM_PATTERNS_V3: tuple[str, ...] = (
     # (noun-first)
     r"(?:separability|imprint|trace[-\s]conditioned\s+updates?)"
     r"[^.\n]{0,80}attenuat(?:e|es|ed)",
-    # imprint/washout as mechanism nouns with v1 causal verbs (verb-first)
+    # imprint as mechanism noun with v1 causal verbs (verb-first, inherently specific)
     r"(?:requires|driven\s+by|attributable\s+to|caus(?:ed|es|ing))"
-    r"[^.\n]{0,80}(?:imprint(?:ing)?|washout)",
-    # (noun-first)
-    r"(?:imprint(?:ing)?|washout)"
+    r"[^.\n]{0,80}imprint(?:ing)?",
+    # (noun-first, inherently specific)
+    r"imprint(?:ing)?"
     r"[^.\n]{0,80}(?:requires|driven\s+by|attributable\s+to|caus(?:ed|es|ing))",
+    # washout as mechanism noun with v1 causal verbs — requires mechanism-context anchor
+    # (verb-first: anchor before verb OR anchor after washout)
+    r"(?:separabilit|probe|slate|trace|polic|state|imprint)[^.\n]{0,160}(?:requires|driven\s+by|attributable\s+to|caus(?:ed|es|ing))[^.\n]{0,80}washout"
+    r"|(?:requires|driven\s+by|attributable\s+to|caus(?:ed|es|ing))[^.\n]{0,80}washout[^.\n]{0,80}(?:separabilit|probe|slate|trace|polic|state|imprint)",
+    # (noun-first: anchor before washout OR anchor after verb)
+    r"(?:separabilit|probe|slate|trace|polic|state|imprint)[^.\n]{0,80}washout[^.\n]{0,80}(?:requires|driven\s+by|attributable\s+to|caus(?:ed|es|ing))"
+    r"|washout[^.\n]{0,80}(?:requires|driven\s+by|attributable\s+to|caus(?:ed|es|ing))[^.\n]{0,80}(?:separabilit|probe|slate|trace|polic|state|imprint)",
     # v2-era vocabulary hole — context-feature path/channel/pathway/entry,
-    # entry-point, mean-value path, learned-weight path/channel, selection pathway
+    # mean-value path, learned-weight path/channel, selection pathway
+    # (entry[-\s]point removed to its own anchor-required patterns below)
     # (verb-first)
     r"(?:requires|driven\s+by|attributable\s+to|caus(?:ed|es|ing))"
     r"[^.\n]{0,80}"
     r"(?:context[-\s]feature\s+(?:path|channel|pathway|entry)"
-    r"|entry[-\s]point|mean[-\s]value\s+path"
+    r"|mean[-\s]value\s+path"
     r"|learned[-\s]weight\s+(?:path|channel)|selection\s+pathway)",
     # (noun-first)
     r"(?:context[-\s]feature\s+(?:path|channel|pathway|entry)"
-    r"|entry[-\s]point|mean[-\s]value\s+path"
+    r"|mean[-\s]value\s+path"
     r"|learned[-\s]weight\s+(?:path|channel)|selection\s+pathway)"
     r"[^.\n]{0,80}(?:requires|driven\s+by|attributable\s+to|caus(?:ed|es|ing))",
+    # entry-point — requires mechanism-context anchor (?:separabilit|probe|slate|mechanism)
+    # Plain CLI prose ("The CLI entry-point requires three positional arguments.") has
+    # no such anchor and therefore passes.
+    # (verb-first: anchor before verb OR anchor after entry-point)
+    r"(?:separabilit|probe|slate|mechanism)[^.\n]{0,160}(?:requires|driven\s+by|attributable\s+to|caus(?:ed|es|ing))[^.\n]{0,80}entry[-\s]point"
+    r"|(?:requires|driven\s+by|attributable\s+to|caus(?:ed|es|ing))[^.\n]{0,80}entry[-\s]point[^.\n]{0,80}(?:separabilit|probe|slate|mechanism)",
+    # (noun-first: anchor before entry-point OR anchor after verb)
+    r"(?:separabilit|probe|slate|mechanism)[^.\n]{0,80}entry[-\s]point[^.\n]{0,80}(?:requires|driven\s+by|attributable\s+to|caus(?:ed|es|ing))"
+    r"|entry[-\s]point[^.\n]{0,80}(?:requires|driven\s+by|attributable\s+to|caus(?:ed|es|ing))[^.\n]{0,80}(?:separabilit|probe|slate|mechanism)",
 )
 
 _MECHANISM_PATTERN_RES_V3: tuple[tuple[str, "re.Pattern[str]"], ...] = tuple(

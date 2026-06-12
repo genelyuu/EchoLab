@@ -1126,14 +1126,29 @@ _V3_M2_PARAPHRASED_CAVEAT = (
 # ---------------------------------------------------------------------------
 # v3 pattern constants (for assert-on-pattern tests)
 # ---------------------------------------------------------------------------
+# N2 review fixes reflected here:
+#   Fix 1: frozen\s+.{0,40}state → frozen\s+[^.\n]{0,40}state in both amplify patterns
+#   Fix 2: entry[-\s]point removed from _PAT_V2_ENTRY / _PAT_V2_ENTRY_REV;
+#           new _PAT_V2_ENTRY_POINT / _PAT_V2_ENTRY_POINT_REV require mechanism anchor
+#   Fix 3a: washout split out of _PAT_V3_IMPRINT_CAUSAL / _PAT_V3_IMPRINT_CAUSAL_REV;
+#            new _PAT_V3_WASHOUT_CAUSAL / _PAT_V3_WASHOUT_CAUSAL_REV require anchor
+#   Fix 3b: freez(?:e|ing) split out of _PAT_V3_AMPLIFY_REV; new
+#            _PAT_V3_AMPLIFY_FREEZE_ANCHOR requires mechanism anchor in sentence
 
 _PAT_V3_AMPLIFY = (
     r"amplif(?:y|ies|ied)[^.\n]{0,80}"
-    r"(?:trace[-\s]conditioned|frozen\s+.{0,40}state|freez(?:e|ing)|imprint(?:ing)?)"
+    r"(?:trace[-\s]conditioned|frozen\s+[^.\n]{0,40}state|freez(?:e|ing)|imprint(?:ing)?)"
 )
+# noun-first: inherently mechanism-specific nouns only (bare freeze removed — Fix 3b)
 _PAT_V3_AMPLIFY_REV = (
-    r"(?:trace[-\s]conditioned|frozen\s+.{0,40}state|freez(?:e|ing)|imprint(?:ing)?)"
+    r"(?:trace[-\s]conditioned|frozen\s+[^.\n]{0,40}state|imprint(?:ing)?)"
     r"[^.\n]{0,80}amplif(?:y|ies|ied)"
+)
+# noun-first bare freeze with mechanism-context anchor (Fix 3b)
+_PAT_V3_AMPLIFY_FREEZE_ANCHOR = (
+    r"(?:trace|polic|state|imprint|separabilit|probe|slate)[^.\n]{0,160}freez(?:e|ing)[^.\n]{0,80}amplif(?:y|ies|ied)"
+    r"|freez(?:e|ing)[^.\n]{0,80}(?:trace|polic|state|imprint|separabilit|probe|slate)[^.\n]{0,80}amplif(?:y|ies|ied)"
+    r"|freez(?:e|ing)[^.\n]{0,80}amplif(?:y|ies|ied)[^.\n]{0,80}(?:trace|polic|state|imprint|separabilit|probe|slate)"
 )
 _PAT_V3_ELIM = (
     r"eliminat(?:e|es|ed|ion)[^.\n]{0,80}"
@@ -1151,26 +1166,46 @@ _PAT_V3_ATTEN_REV = (
     r"(?:separability|imprint|trace[-\s]conditioned\s+updates?)"
     r"[^.\n]{0,80}attenuat(?:e|es|ed)"
 )
+# imprint-only causal patterns (washout removed — Fix 3a)
 _PAT_V3_IMPRINT_CAUSAL = (
     r"(?:requires|driven\s+by|attributable\s+to|caus(?:ed|es|ing))"
-    r"[^.\n]{0,80}(?:imprint(?:ing)?|washout)"
+    r"[^.\n]{0,80}imprint(?:ing)?"
 )
 _PAT_V3_IMPRINT_CAUSAL_REV = (
-    r"(?:imprint(?:ing)?|washout)"
+    r"imprint(?:ing)?"
     r"[^.\n]{0,80}(?:requires|driven\s+by|attributable\s+to|caus(?:ed|es|ing))"
 )
+# washout causal patterns with mechanism-context anchor (Fix 3a)
+_PAT_V3_WASHOUT_CAUSAL = (
+    r"(?:separabilit|probe|slate|trace|polic|state|imprint)[^.\n]{0,160}(?:requires|driven\s+by|attributable\s+to|caus(?:ed|es|ing))[^.\n]{0,80}washout"
+    r"|(?:requires|driven\s+by|attributable\s+to|caus(?:ed|es|ing))[^.\n]{0,80}washout[^.\n]{0,80}(?:separabilit|probe|slate|trace|polic|state|imprint)"
+)
+_PAT_V3_WASHOUT_CAUSAL_REV = (
+    r"(?:separabilit|probe|slate|trace|polic|state|imprint)[^.\n]{0,80}washout[^.\n]{0,80}(?:requires|driven\s+by|attributable\s+to|caus(?:ed|es|ing))"
+    r"|washout[^.\n]{0,80}(?:requires|driven\s+by|attributable\s+to|caus(?:ed|es|ing))[^.\n]{0,80}(?:separabilit|probe|slate|trace|polic|state|imprint)"
+)
+# v2-era entry noun group without entry[-\s]point (Fix 2)
 _PAT_V2_ENTRY = (
     r"(?:requires|driven\s+by|attributable\s+to|caus(?:ed|es|ing))"
     r"[^.\n]{0,80}"
     r"(?:context[-\s]feature\s+(?:path|channel|pathway|entry)"
-    r"|entry[-\s]point|mean[-\s]value\s+path"
+    r"|mean[-\s]value\s+path"
     r"|learned[-\s]weight\s+(?:path|channel)|selection\s+pathway)"
 )
 _PAT_V2_ENTRY_REV = (
     r"(?:context[-\s]feature\s+(?:path|channel|pathway|entry)"
-    r"|entry[-\s]point|mean[-\s]value\s+path"
+    r"|mean[-\s]value\s+path"
     r"|learned[-\s]weight\s+(?:path|channel)|selection\s+pathway)"
     r"[^.\n]{0,80}(?:requires|driven\s+by|attributable\s+to|caus(?:ed|es|ing))"
+)
+# entry-point patterns with mechanism-context anchor (Fix 2)
+_PAT_V2_ENTRY_POINT = (
+    r"(?:separabilit|probe|slate|mechanism)[^.\n]{0,160}(?:requires|driven\s+by|attributable\s+to|caus(?:ed|es|ing))[^.\n]{0,80}entry[-\s]point"
+    r"|(?:requires|driven\s+by|attributable\s+to|caus(?:ed|es|ing))[^.\n]{0,80}entry[-\s]point[^.\n]{0,80}(?:separabilit|probe|slate|mechanism)"
+)
+_PAT_V2_ENTRY_POINT_REV = (
+    r"(?:separabilit|probe|slate|mechanism)[^.\n]{0,80}entry[-\s]point[^.\n]{0,80}(?:requires|driven\s+by|attributable\s+to|caus(?:ed|es|ing))"
+    r"|entry[-\s]point[^.\n]{0,80}(?:requires|driven\s+by|attributable\s+to|caus(?:ed|es|ing))[^.\n]{0,80}(?:separabilit|probe|slate|mechanism)"
 )
 
 
@@ -1187,14 +1222,19 @@ def test_v3_patterns_contain_required_patterns():
     for required in (
         _PAT_V3_AMPLIFY,
         _PAT_V3_AMPLIFY_REV,
+        _PAT_V3_AMPLIFY_FREEZE_ANCHOR,
         _PAT_V3_ELIM,
         _PAT_V3_ELIM_REV,
         _PAT_V3_ATTEN,
         _PAT_V3_ATTEN_REV,
         _PAT_V3_IMPRINT_CAUSAL,
         _PAT_V3_IMPRINT_CAUSAL_REV,
+        _PAT_V3_WASHOUT_CAUSAL,
+        _PAT_V3_WASHOUT_CAUSAL_REV,
         _PAT_V2_ENTRY,
         _PAT_V2_ENTRY_REV,
+        _PAT_V2_ENTRY_POINT,
+        _PAT_V2_ENTRY_POINT_REV,
     ):
         assert required in MECHANISM_CLAIM_PATTERNS_V3, (
             f"v3 pattern missing from MECHANISM_CLAIM_PATTERNS_V3: {required!r}"
@@ -1378,4 +1418,127 @@ def test_v3_user_vocab_warning_triggered():
     scan_text(text, warnings=warnings)
     assert any("[경고]" in w for w in warnings), (
         f"mechanism+user co-occurrence must trigger Korean WARNING: {warnings!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# N2 review fix fixtures
+# ---------------------------------------------------------------------------
+
+# Fix 1: Gap-spec — frozen\s+[^.\n]{0,40}state (not .)
+
+def test_fix1_frozen_state_no_newline_crossing():
+    r"""frozen\s+[^.\n]{0,40}state must not cross a sentence boundary (newline)."""
+    import re as _re
+    verb_first = _PAT_V3_AMPLIFY
+    noun_first = _PAT_V3_AMPLIFY_REV
+    cross_newline = "frozen policy\nstate"
+    assert _re.search(r"frozen\s+[^.\n]{0,40}state", cross_newline) is None, (
+        "frozen..state pattern must not cross a newline — gap-spec violation"
+    )
+    # Sanity: the verb-first and noun-first patterns reference [^.\n]{0,40}
+    assert r"[^.\n]{0,40}state" in verb_first, (
+        "verb-first amplify pattern must use [^.\\n]{0,40}state (Fix 1)"
+    )
+    assert r"[^.\n]{0,40}state" in noun_first, (
+        "noun-first amplify pattern must use [^.\\n]{0,40}state (Fix 1)"
+    )
+
+
+# Fix 2: entry-point over-suppression
+
+def test_fix2_cli_entry_point_verb_first_passes():
+    """'The CLI entry-point requires three positional arguments.' must PASS (no mechanism anchor)."""
+    assert scan_text("The CLI entry-point requires three positional arguments.") == [], (
+        "plain CLI entry-point prose must not be flagged"
+    )
+
+
+def test_fix2_cli_entry_point_noun_first_passes():
+    """'The entry-point requires a config path.' must PASS (no mechanism anchor)."""
+    assert scan_text("The entry-point requires a config path.") == [], (
+        "plain CLI noun-first entry-point prose must not be flagged"
+    )
+
+
+def test_fix2_cli_entry_point_multiple_args_passes():
+    """'This entry point requires a seed and a policy name.' must PASS."""
+    assert scan_text("This entry point requires a seed and a policy name.") == [], (
+        "generic entry-point prose must not be flagged"
+    )
+
+
+def test_fix2_entry_point_with_separability_fails():
+    """'Above-null slate separability requires the context entry-point.' must FAIL."""
+    findings = scan_text("Above-null slate separability requires the context entry-point.")
+    assert findings, (
+        "entry-point sentence with separability/slate anchor must be flagged"
+    )
+
+
+# Fix 3a: washout bare coupling
+
+def test_fix3a_solver_washout_passes():
+    """'The solver requires a washout period of 50 steps before sampling.' must PASS."""
+    assert scan_text(
+        "The solver requires a washout period of 50 steps before sampling."
+    ) == [], (
+        "plain solver washout sentence (no mechanism anchor) must not be flagged"
+    )
+
+
+def test_fix3a_slate_separability_washout_fails():
+    """'Slate separability requires update washout.' must FAIL (mechanism anchor present)."""
+    findings = scan_text("Slate separability requires update washout.")
+    assert findings, (
+        "washout sentence with slate/separability anchor must be flagged"
+    )
+
+
+def test_fix3a_imprint_causal_still_flagged():
+    """imprint-causal catch fixture must still fire (regression check)."""
+    text = "Slate separability is driven by early imprinting of the learned state."
+    findings = scan_text(text)
+    assert findings, f"imprint causal pattern must still be flagged after Fix 3a: {text!r}"
+    assert any(f.phrase == _PAT_V3_IMPRINT_CAUSAL for f in findings), (
+        f"must fire on imprint causal pattern; got: {[f.phrase for f in findings]}"
+    )
+
+
+# Fix 3b: noun-first bare freeze coupling
+
+def test_fix3b_colormap_freeze_amplify_passes():
+    """'Freezing the colormap amplifies banding artifacts in the preview.' must PASS."""
+    assert scan_text(
+        "Freezing the colormap amplifies banding artifacts in the preview."
+    ) == [], (
+        "bare freeze/amplify with no mechanism anchor must not be flagged"
+    )
+
+
+def test_fix3b_early_freezing_trace_conditioned_fails():
+    """'Early freezing of trace-conditioned state amplifies separability.' must FAIL."""
+    findings = scan_text(
+        "Early freezing of trace-conditioned state amplifies separability."
+    )
+    assert findings, (
+        "freeze+trace-conditioned noun-first amplify must be flagged"
+    )
+
+
+def test_fix3b_frozen_policy_state_amplify_fails():
+    """'Frozen policy state amplifies probe separability.' must FAIL."""
+    findings = scan_text("Frozen policy state amplifies probe separability.")
+    assert findings, (
+        "frozen policy state amplifies probe separability must be flagged"
+    )
+
+
+def test_fix3b_amplify_pattern_verb_first_still_catches_freeze():
+    """Verb-first amplify with freez still fires — no anchor required for verb-first."""
+    # verb-first: amplif ... freez — the amplif verb is the mechanism anchor
+    text = "The update amplifies freezing artifacts in the probe output."
+    findings = scan_text(text)
+    assert findings, (
+        "verb-first amplif...freez must still be caught after Fix 3b"
     )
