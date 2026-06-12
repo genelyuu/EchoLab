@@ -815,62 +815,164 @@ def test_axs009_baselines_random_present(smoke_axs009):
 
 # ===========================================================================
 # (h) Tamper-detection regression tests — single-source binding
+#
+# Approach: inspect.getsource code-level guard.
+#
+# Why: the old tests only checked isinstance(value, float) — a parallel
+# *_raw_by_family[fam] variable feeding arms/baselines directly would still
+# pass. The real regression is a runner that derives report numbers from a
+# variable OTHER than family_blocks after the construction block.
+#
+# This test reads the runner source and asserts two structural invariants:
+#   1. The "derive values from family_blocks" section references
+#      `family_blocks[fam]` (not just family_blocks as a dict key container).
+#   2. The per-arm raw-result dicts (_raw_by_family / arm_raw) do NOT appear
+#      inside the arms/baselines derivation section — i.e. only family_blocks
+#      is the source. We check that the source fragment between the
+#      "derive all report values" marker comment and the build_arm_entry /
+#      body_extra construction contains `family_blocks[fam]` and does NOT
+#      contain any `_raw_by_family[fam]` or `arm_raw[` reads (which would
+#      indicate a parallel source bypassing the single-source block).
+#
+# This is a code-level guard: it would fail if someone reintroduces a
+# parallel non-family_blocks variable feeding arms/baselines.
+# It does NOT test runtime values — the existing smoke fixtures cover that.
 # ===========================================================================
 
+def _extract_derive_section(source: str, marker: str = "derive all report values") -> str:
+    """Return source lines from the 'derive all report values' comment onward.
+
+    Stops at the first 'def ' line (recompute_fn / next function) so the
+    guard is scoped to the derivation block only and not the recompute closure.
+    """
+    lines = source.splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if marker in line:
+            start = i
+            break
+    if start is None:
+        return ""
+    result_lines = []
+    for line in lines[start:]:
+        # Stop at the recompute_fn closure or next top-level def
+        stripped = line.lstrip()
+        if stripped.startswith("def recompute_fn") or stripped.startswith("def _"):
+            break
+        result_lines.append(line)
+    return "\n".join(result_lines)
+
+
 def test_axs003_family_blocks_contain_all_arm_coverage(smoke_axs003):
-    """family_blocks single-source: all arm coverage_mean values derivable from report."""
-    arms = smoke_axs003.get("arms", {})
-    baselines = smoke_axs003.get("baselines", {})
+    """family_blocks single-source guard (AXS-003): source-level assertion.
 
-    for arm_id in ["axs_ucb_default", "axs_ucb_alpha0"]:
-        cov = arms.get(arm_id, {}).get("utility", {}).get("coordinate_coverage_mean")
-        assert cov is not None and isinstance(cov, float), (
-            f"arms[{arm_id!r}].utility.coordinate_coverage_mean 누락 또는 비float"
-        )
+    Verifies that in the derivation section the runner reads from family_blocks
+    exclusively — no parallel *_raw_by_family[fam] bypasses the single-source
+    block when building arm entries and baselines.
+    """
+    import inspect
+    import echo_bench.experiments.axs_003_alpha_kill as _mod003
 
-    rand_cov = baselines.get("RANDOM", {}).get("coordinate_coverage_mean")
-    assert rand_cov is not None and isinstance(rand_cov, float), (
-        "baselines.RANDOM.coordinate_coverage_mean 누락"
+    src = inspect.getsource(_mod003)
+    derive = _extract_derive_section(src)
+
+    assert derive, (
+        "AXS-003 러너에서 'derive all report values' 마커 섹션을 찾을 수 없음 — "
+        "single-source 계약 주석이 삭제되었거나 이동되었습니다."
     )
+    assert "family_blocks[fam]" in derive, (
+        "AXS-003 derivation section에 family_blocks[fam] 참조가 없습니다 — "
+        "단일 소스 계약 위반: arms/baselines 값이 family_blocks 에서 파생되어야 합니다."
+    )
+    # Parallel raw-dict reads in the derivation section indicate a bypass
+    forbidden_patterns = [
+        "default_raw_by_family[fam]",
+        "alpha0_raw_by_family[fam]",
+        "random_raw_by_family[fam]",
+    ]
+    for pat in forbidden_patterns:
+        assert pat not in derive, (
+            f"AXS-003 derivation section에 {pat!r} 가 있습니다 — "
+            "family_blocks 를 우회하는 병렬 원시 변수 접근이 탐지되었습니다."
+        )
 
 
 def test_axs009_family_blocks_contain_all_arm_coverage(smoke_axs009):
-    """family_blocks single-source: AXS-009 all arm coverage present."""
-    arms = smoke_axs009.get("arms", {})
-    baselines = smoke_axs009.get("baselines", {})
+    """family_blocks single-source guard (AXS-009): source-level assertion.
 
-    for arm_id in ["freeze_at_1", "freeze_at_quarter", "freeze_at_half", "freeze_none"]:
-        cov = arms.get(arm_id, {}).get("utility", {}).get("coordinate_coverage_mean")
-        assert cov is not None and isinstance(cov, float), (
-            f"AXS-009 arms[{arm_id!r}].utility.coordinate_coverage_mean 누락"
-        )
+    Verifies that in the derivation section arm coverage values and baselines
+    are derived exclusively from family_blocks, not from arm_raw directly.
+    """
+    import inspect
+    import echo_bench.experiments.axs_009_freeze as _mod009
 
-    rand_cov = baselines.get("RANDOM", {}).get("coordinate_coverage_mean")
-    assert rand_cov is not None and isinstance(rand_cov, float), (
-        "AXS-009 baselines.RANDOM.coordinate_coverage_mean 누락"
+    src = inspect.getsource(_mod009)
+    derive = _extract_derive_section(src)
+
+    assert derive, (
+        "AXS-009 러너에서 'derive all report values' 마커 섹션을 찾을 수 없음 — "
+        "single-source 계약 주석이 삭제되었거나 이동되었습니다."
+    )
+    assert "family_blocks[fam]" in derive, (
+        "AXS-009 derivation section에 family_blocks[fam] 참조가 없습니다 — "
+        "단일 소스 계약 위반: arms/baselines 값이 family_blocks 에서 파생되어야 합니다."
+    )
+    # arm_raw[arm_id][fam] reads outside the family_blocks construction block
+    # indicate a bypass of the single-source invariant
+    assert "arm_raw[arm_id][fam]" not in derive, (
+        "AXS-009 derivation section에 arm_raw[arm_id][fam] 가 있습니다 — "
+        "family_blocks 를 우회하는 병렬 원시 변수 접근이 탐지되었습니다."
+    )
+    assert "random_raw_by_family[fam]" not in derive, (
+        "AXS-009 derivation section에 random_raw_by_family[fam] 가 있습니다 — "
+        "RANDOM baseline 이 family_blocks 를 우회하고 있습니다."
     )
 
 
 def test_axs004c_family_blocks_contain_all_arm_coverage(smoke_axs004c):
-    """family_blocks single-source: AXS-004c all arm coverage present."""
-    arms = smoke_axs004c.get("arms", {})
-    baselines = smoke_axs004c.get("baselines", {})
+    """family_blocks single-source guard (AXS-004c): source-level assertion.
 
-    for arm_id in ["axs_ucb_default", "axs_yoked_bonus"]:
-        cov = arms.get(arm_id, {}).get("utility", {}).get("coordinate_coverage_mean")
-        assert cov is not None and isinstance(cov, float), (
-            f"AXS-004c arms[{arm_id!r}].utility.coordinate_coverage_mean 누락"
-        )
+    Verifies that in the derivation section arm coverage values and baselines
+    are derived exclusively from family_blocks, not from the raw-by-family dicts.
+    """
+    import inspect
+    import echo_bench.experiments.axs_004c_yoked as _mod004c
 
-    rand_cov = baselines.get("RANDOM", {}).get("coordinate_coverage_mean")
-    assert rand_cov is not None and isinstance(rand_cov, float), (
-        "AXS-004c baselines.RANDOM.coordinate_coverage_mean 누락"
+    src = inspect.getsource(_mod004c)
+    derive = _extract_derive_section(src)
+
+    assert derive, (
+        "AXS-004c 러너에서 'derive all report values' 마커 섹션을 찾을 수 없음 — "
+        "single-source 계약 주석이 삭제되었거나 이동되었습니다."
     )
+    assert "family_blocks[fam]" in derive, (
+        "AXS-004c derivation section에 family_blocks[fam] 참조가 없습니다 — "
+        "단일 소스 계약 위반: arms/baselines 값이 family_blocks 에서 파생되어야 합니다."
+    )
+    forbidden_patterns = [
+        "default_raw_by_family[fam]",
+        "yoked_raw_by_family[fam]",
+        "random_raw_by_family[fam]",
+    ]
+    for pat in forbidden_patterns:
+        assert pat not in derive, (
+            f"AXS-004c derivation section에 {pat!r} 가 있습니다 — "
+            "family_blocks 를 우회하는 병렬 원시 변수 접근이 탐지되었습니다."
+        )
 
 
 def test_axs003_recompute_fn_covers_random_baseline(smoke_axs003, _prereg_path):
-    """recompute_fn covers RANDOM baseline: smoke report's random_coverage_mean
-    must be derivable from family_blocks (single-source assertion).
+    """recompute_fn covers RANDOM baseline + full-coverage replay audit binding.
+
+    Two bindings:
+    1. Determinism: a second run with identical args produces the same
+       reportHash, proving arms/baselines values are stable single-source.
+    2. Full-replay familyBlockHash coverage: running with replay_mode="full"
+       produces replayAudit.perFamily[fam].familyBlockHash for ALL 5 families,
+       confirming the replay audit actually audited every family block.
+       If arms/baselines came from a parallel variable diverging from
+       family_blocks, the recomputed block would hash differently and
+       replayable would be False — caught here.
     """
     from echo_bench.experiments.axs_003_alpha_kill import run_axs_003
 
@@ -878,8 +980,7 @@ def test_axs003_recompute_fn_covers_random_baseline(smoke_axs003, _prereg_path):
     rand_cov = baselines.get("RANDOM", {}).get("coordinate_coverage_mean")
     assert rand_cov is not None, "baselines.RANDOM.coordinate_coverage_mean 누락"
 
-    from pathlib import Path
-    import tempfile
+    # --- binding 1: determinism (uses module-level Path and tempfile) ---
     with tempfile.TemporaryDirectory() as tmp:
         r2 = run_axs_003(
             SMOKE_BASE_SEEDS,
@@ -894,3 +995,35 @@ def test_axs003_recompute_fn_covers_random_baseline(smoke_axs003, _prereg_path):
     assert smoke_axs003["reportHash"] == r2["reportHash"], (
         "Determinism check: report hashes must match"
     )
+
+    # --- binding 2: full-replay familyBlockHash present for all 5 families ---
+    # replay_mode="full" forces the runner to recompute every family block and
+    # record familyBlockHash in replayAudit.perFamily. If any arm or baseline
+    # value was sourced from a parallel variable rather than family_blocks, the
+    # recomputed block hash would diverge and replayable would be False.
+    with tempfile.TemporaryDirectory() as tmp_full:
+        r_full = run_axs_003(
+            SMOKE_BASE_SEEDS,
+            H=SMOKE_H, k=4, pool_size=SMOKE_POOL_SIZE, n_permutations=SMOKE_N_PERM,
+            prereg_path=_prereg_path, git_runner=_good_git_runner,
+            reports_dir=Path(tmp_full),
+            replay_mode="full",
+        )
+    audit = r_full.get("replayAudit", {})
+    assert audit.get("replayable") is True, (
+        "AXS-003 full-replay 감사 실패: replayAudit.replayable 이 True 가 아닙니다 — "
+        f"perFamily={audit.get('perFamily')}"
+    )
+    per_family_audit = audit.get("perFamily", {})
+    expected_families = [str(s) for s in SMOKE_BASE_SEEDS]
+    for fam in expected_families:
+        assert fam in per_family_audit, (
+            f"AXS-003 full-replay 감사 누락: replayAudit.perFamily[{fam!r}] 없음"
+        )
+        fam_entry = per_family_audit[fam]
+        assert "familyBlockHash" in fam_entry, (
+            f"AXS-003 full-replay 감사 누락: perFamily[{fam!r}].familyBlockHash 없음"
+        )
+        assert fam_entry.get("replayable") is True, (
+            f"AXS-003 full-replay 감사 실패: perFamily[{fam!r}].replayable 이 True 가 아닙니다"
+        )
