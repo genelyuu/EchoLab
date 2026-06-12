@@ -9,6 +9,11 @@ Covers:
 6. Unknown tie_break_order raises Korean ValueError.
 7. AxsYokedBonusPolicy: u(card) trace-independence, B_t clamping, hash checks.
 8. Slate validity: every slate passes check_slate.
+9. freeze_round validation (Important fix #1).
+10. perRoundBonus structure validation (Important fix #2).
+11. Per-call config consistency for yoked arm (Important fix #3).
+12. Golden-slate regression tests pinning AXS behavior (Important fix #4).
+13. Bandit-state characterization test (_replay_bandit_state matrices).
 
 No user/persona/emotion/preference/demographic field anywhere.
 """
@@ -16,6 +21,7 @@ No user/persona/emotion/preference/demographic field anywhere.
 from __future__ import annotations
 
 import json
+import math
 import random
 from pathlib import Path
 from typing import Any, Dict, List
@@ -25,6 +31,7 @@ import pytest
 
 from echo_bench.env.constraints import check_slate
 from echo_bench.env.trace_state import TraceState
+from echo_bench.policies.axs_ucb import AxsUcbPolicy, AxsYokedBonusPolicy, TraceView
 from echo_bench.utils.hash import canonical_hash
 
 
@@ -46,6 +53,21 @@ def _make_pool(n: int = 16, n_bases: int = 4) -> List[Dict[str, Any]]:
             ],
         }
         for i in range(n)
+    ]
+
+
+def _make_tied_pool() -> List[Dict[str, Any]]:
+    """Pool where all cards have identical features (UCB scores tie exactly).
+    Use 4 bases to satisfy k=4 constraint."""
+    return [
+        {
+            "cardId": f"card_{chr(65 + i)}",  # card_A, card_B, ...
+            "basis": f"B{(i % 4) + 1}",
+            "complexityBand": "mid",
+            "salienceScore": 0.5,
+            "coordinateContribution": [1.0, 0.0, 0.0, 0.0],  # identical features
+        }
+        for i in range(8)
     ]
 
 
@@ -91,13 +113,6 @@ def _make_yoked_schedule(tmp_path: Path, per_round: List[float] | None = None) -
     p = tmp_path / "axs_yoked_test.json"
     p.write_text(json.dumps(body), encoding="utf-8")
     return p
-
-
-# ---------------------------------------------------------------------------
-# Import the module under test (must exist for tests to pass)
-# ---------------------------------------------------------------------------
-
-from echo_bench.policies.axs_ucb import AxsUcbPolicy, AxsYokedBonusPolicy, TraceView
 
 
 # ---------------------------------------------------------------------------
@@ -374,20 +389,6 @@ class TestFreezeRound:
 # ---------------------------------------------------------------------------
 
 class TestTieBreakOrder:
-    def _make_tied_pool(self) -> List[Dict[str, Any]]:
-        """Pool where all cards have identical features (UCB scores tie exactly).
-        Use 4 bases to satisfy k=4 constraint."""
-        return [
-            {
-                "cardId": f"card_{chr(65 + i)}",  # card_A, card_B, ...
-                "basis": f"B{(i % 4) + 1}",
-                "complexityBand": "mid",
-                "salienceScore": 0.5,
-                "coordinateContribution": [1.0, 0.0, 0.0, 0.0],  # identical features
-            }
-            for i in range(8)
-        ]
-
     def test_canonical_deterministic(self):
         pool = _make_pool()
         trace = TraceState()
@@ -397,28 +398,21 @@ class TestTieBreakOrder:
         assert s1 == s2
 
     def test_four_orders_at_least_two_distinct_slates_on_tied_pool(self):
-        pool = self._make_tied_pool()
+        pool = _make_tied_pool()
         trace = TraceState()
         seed = 7
         orders = ["canonical", "reverse", "hash_seeded", "feature_lexicographic"]
-        slates = []
-        for o in orders:
-            p = AxsUcbPolicy({"k": 4, "tie_break_order": o})
-            s = p.select(pool, trace, seed)
-            assert len(s) == 4
-            slates.append(tuple(sorted(s)))  # compare as sets since order may not matter
-        # At least 2 distinct slates (or slate orderings) across 4 modes
-        unique_slates = len(set(slates))
-        # Relax: at least canonical != reverse OR canonical != hash_seeded
-        # (On a fully-tied pool, different mechanisms must differ)
-        # We check that at least the ordered slates are not all identical
+        # Collect ordered slates (preserving selection order matters for asserting
+        # that tiebreak mechanisms produce different selections).
         ordered_slates = []
         for o in orders:
             p = AxsUcbPolicy({"k": 4, "tie_break_order": o})
             s = p.select(pool, trace, seed)
             ordered_slates.append(tuple(s))
-        assert len(set(ordered_slates)) >= 2, (
-            f"Expected ≥2 distinct ordered slates across tiebreak modes, got: {ordered_slates}"
+        unique_slates = len(set(ordered_slates))
+        assert unique_slates >= 2, (
+            f"Expected ≥2 distinct ordered slates across tiebreak modes, "
+            f"got: {ordered_slates}"
         )
 
     def test_tie_break_orders_same_slate_when_unique_scores(self):
@@ -856,3 +850,473 @@ class TestTraceView:
         tv_full = TraceView(full_records)
         tv_trunc = TraceView(full_records[:2])
         assert tv_full.trace_hash() != tv_trunc.trace_hash()
+
+
+# ---------------------------------------------------------------------------
+# 10. freeze_round validation (Important fix #1)
+# ---------------------------------------------------------------------------
+
+class TestFreezeRoundValidation:
+    """Validate that freeze_round rejects invalid values with Korean ValueError."""
+
+    def test_negative_freeze_round_raises(self):
+        """freeze_round=-1 must raise Korean ValueError."""
+        pool = _make_pool()
+        p = AxsUcbPolicy({"k": 4, "freeze_round": -1})
+        with pytest.raises(ValueError) as exc_info:
+            p.select(pool, TraceState(), 7)
+        msg = str(exc_info.value)
+        assert any(ord(c) > 127 for c in msg), f"Expected Korean error, got: {msg!r}"
+
+    def test_float_freeze_round_raises(self):
+        """freeze_round=2.5 (float) must raise Korean ValueError."""
+        pool = _make_pool()
+        p = AxsUcbPolicy({"k": 4, "freeze_round": 2.5})
+        with pytest.raises(ValueError) as exc_info:
+            p.select(pool, TraceState(), 7)
+        msg = str(exc_info.value)
+        assert any(ord(c) > 127 for c in msg), f"Expected Korean error, got: {msg!r}"
+
+    def test_bool_freeze_round_raises(self):
+        """freeze_round=True (bool subclass of int) must raise Korean ValueError."""
+        pool = _make_pool()
+        p = AxsUcbPolicy({"k": 4, "freeze_round": True})
+        with pytest.raises(ValueError) as exc_info:
+            p.select(pool, TraceState(), 7)
+        msg = str(exc_info.value)
+        assert any(ord(c) > 127 for c in msg), f"Expected Korean error, got: {msg!r}"
+
+    def test_valid_freeze_round_zero_accepted(self):
+        """freeze_round=0 is valid (non-negative int, not bool)."""
+        pool = _make_pool()
+        p = AxsUcbPolicy({"k": 4, "freeze_round": 0})
+        s = p.select(pool, TraceState(), 7)
+        assert len(s) == 4
+
+    def test_valid_freeze_round_positive_accepted(self):
+        """freeze_round=2 is valid."""
+        pool = _make_pool()
+        trace = _trace_with([pool[0], pool[1], pool[2]])
+        p = AxsUcbPolicy({"k": 4, "freeze_round": 2})
+        s = p.select(pool, trace, 7)
+        assert len(s) == 4
+
+    def test_freeze_round_beyond_trace_length_works(self):
+        """freeze_round > len(rounds) is valid: slice clamps (no IndexError).
+
+        Regression test documenting that slice semantics are used: trace[:100] on
+        a 3-round trace returns 3 rounds, not an error. The resulting behavior is
+        equivalent to freeze_round=None for that trace length.
+        """
+        pool = _make_pool()
+        trace = _trace_with([pool[0], pool[1]])  # only 2 rounds
+        p = AxsUcbPolicy({"k": 4, "freeze_round": 100})  # well beyond trace length
+        # Must not raise; slice [:100] silently clamps to available rounds.
+        s = p.select(pool, trace, 7)
+        assert len(s) == 4
+        # Behavior equivalent to freeze_round=None (no extra rounds to drop).
+        p_none = AxsUcbPolicy({"k": 4, "freeze_round": None})
+        s_none = p_none.select(pool, trace, 7)
+        assert s == s_none, (
+            "freeze_round beyond trace length should behave like freeze_round=None"
+        )
+
+    def test_yoked_freeze_round_negative_raises(self):
+        """AxsYokedBonusPolicy also validates freeze_round=-1."""
+        # Use a minimal schedule; the ValueError should fire before schedule load.
+        p = AxsYokedBonusPolicy({
+            "k": 4,
+            "schedule_path": "/nonexistent/path.json",
+            "schedule_hash": "dummy",
+            "freeze_round": -1,
+        })
+        with pytest.raises(ValueError) as exc_info:
+            p.select(_make_pool(), TraceState(), 7)
+        msg = str(exc_info.value)
+        assert any(ord(c) > 127 for c in msg), f"Expected Korean error, got: {msg!r}"
+
+    def test_yoked_freeze_round_float_raises(self):
+        """AxsYokedBonusPolicy also validates freeze_round=2.5."""
+        p = AxsYokedBonusPolicy({
+            "k": 4,
+            "schedule_path": "/nonexistent/path.json",
+            "schedule_hash": "dummy",
+            "freeze_round": 2.5,
+        })
+        with pytest.raises(ValueError) as exc_info:
+            p.select(_make_pool(), TraceState(), 7)
+        msg = str(exc_info.value)
+        assert any(ord(c) > 127 for c in msg), f"Expected Korean error, got: {msg!r}"
+
+    def test_yoked_freeze_round_bool_raises(self):
+        """AxsYokedBonusPolicy also validates freeze_round=True."""
+        p = AxsYokedBonusPolicy({
+            "k": 4,
+            "schedule_path": "/nonexistent/path.json",
+            "schedule_hash": "dummy",
+            "freeze_round": True,
+        })
+        with pytest.raises(ValueError) as exc_info:
+            p.select(_make_pool(), TraceState(), 7)
+        msg = str(exc_info.value)
+        assert any(ord(c) > 127 for c in msg), f"Expected Korean error, got: {msg!r}"
+
+
+# ---------------------------------------------------------------------------
+# 11. perRoundBonus structure validation (Important fix #2)
+# ---------------------------------------------------------------------------
+
+class TestPerRoundBonusValidation:
+    """Validate schedule perRoundBonus structure after hash check."""
+
+    def _write_schedule_body(self, tmp_path: Path, body_overrides: dict) -> tuple[Path, str]:
+        """Create a schedule JSON with custom body, returning (path, expected_hash)."""
+        base_body = {
+            "scheduleId": "sched-val-test",
+            "preregId": "prereg-test",
+            "preregVersion": 1,
+            "pilotFamily": "999",
+            "referenceArm": "axs_ucb_default",
+            "derivation": "validation test fixture",
+            "H": 3,
+            "k": 4,
+            "pool_size": 16,
+            "perRoundBonus": [1.0, 0.8, 0.6],
+            "configHash": "dummy",
+        }
+        base_body.update(body_overrides)
+        # Recompute hash from current body (without scheduleHash)
+        schedule_hash = canonical_hash(base_body)
+        base_body["scheduleHash"] = schedule_hash
+        p = tmp_path / "sched_val.json"
+        p.write_text(json.dumps(base_body), encoding="utf-8")
+        return p, schedule_hash
+
+    def test_missing_per_round_bonus_key(self, tmp_path):
+        """Schedule without 'perRoundBonus' key -> Korean ValueError."""
+        # Build body without perRoundBonus, compute hash, embed it.
+        body = {
+            "scheduleId": "sched-missing-key",
+            "preregId": "x",
+            "preregVersion": 1,
+            "pilotFamily": "999",
+            "referenceArm": "r",
+            "derivation": "d",
+            "H": 3,
+            "k": 4,
+            "pool_size": 16,
+            "configHash": "c",
+        }
+        schedule_hash = canonical_hash(body)
+        body["scheduleHash"] = schedule_hash
+        p = tmp_path / "no_key.json"
+        p.write_text(json.dumps(body), encoding="utf-8")
+        cfg = {"k": 4, "schedule_path": str(p), "schedule_hash": schedule_hash}
+        policy = AxsYokedBonusPolicy(cfg)
+        with pytest.raises(ValueError) as exc_info:
+            policy.select(_make_pool(), TraceState(), 7)
+        msg = str(exc_info.value)
+        assert any(ord(c) > 127 for c in msg), f"Expected Korean error, got: {msg!r}"
+
+    def test_empty_per_round_bonus(self, tmp_path):
+        """perRoundBonus=[] -> Korean ValueError."""
+        path, schedule_hash = self._write_schedule_body(
+            tmp_path, {"perRoundBonus": []}
+        )
+        cfg = {"k": 4, "schedule_path": str(path), "schedule_hash": schedule_hash}
+        policy = AxsYokedBonusPolicy(cfg)
+        with pytest.raises(ValueError) as exc_info:
+            policy.select(_make_pool(), TraceState(), 7)
+        msg = str(exc_info.value)
+        assert any(ord(c) > 127 for c in msg), f"Expected Korean error, got: {msg!r}"
+
+    def test_nan_entry_in_per_round_bonus(self, tmp_path):
+        """perRoundBonus containing NaN -> Korean ValueError (not finite)."""
+        path, schedule_hash = self._write_schedule_body(
+            tmp_path, {"perRoundBonus": [1.0, float("nan"), 0.5]}
+        )
+        cfg = {"k": 4, "schedule_path": str(path), "schedule_hash": schedule_hash}
+        policy = AxsYokedBonusPolicy(cfg)
+        with pytest.raises(ValueError) as exc_info:
+            policy.select(_make_pool(), TraceState(), 7)
+        msg = str(exc_info.value)
+        assert any(ord(c) > 127 for c in msg), f"Expected Korean error, got: {msg!r}"
+
+    def test_bool_entry_in_per_round_bonus(self, tmp_path):
+        """perRoundBonus containing True (bool) -> Korean ValueError (not valid number)."""
+        path, schedule_hash = self._write_schedule_body(
+            tmp_path, {"perRoundBonus": [1.0, True, 0.5]}
+        )
+        cfg = {"k": 4, "schedule_path": str(path), "schedule_hash": schedule_hash}
+        policy = AxsYokedBonusPolicy(cfg)
+        with pytest.raises(ValueError) as exc_info:
+            policy.select(_make_pool(), TraceState(), 7)
+        msg = str(exc_info.value)
+        assert any(ord(c) > 127 for c in msg), f"Expected Korean error, got: {msg!r}"
+
+
+# ---------------------------------------------------------------------------
+# 12. Per-call config consistency (Important fix #3)
+# ---------------------------------------------------------------------------
+
+class TestYokedPerCallConfigConsistency:
+    """Yoked arm must reject per-call config keys that alter preregistered behavior."""
+
+    def _make_yoked_policy(self, tmp_path: Path) -> tuple[AxsYokedBonusPolicy, dict]:
+        sched_path = _make_yoked_schedule(tmp_path)
+        body = json.loads(sched_path.read_text())
+        cfg = {
+            "k": 4,
+            "schedule_path": str(sched_path),
+            "schedule_hash": body["scheduleHash"],
+        }
+        return AxsYokedBonusPolicy(cfg), cfg
+
+    def test_per_call_schedule_path_raises(self, tmp_path):
+        """Passing schedule_path in per-call config -> Korean ValueError."""
+        policy, cfg = self._make_yoked_policy(tmp_path)
+        pool = _make_pool()
+        with pytest.raises(ValueError) as exc_info:
+            policy.select(pool, TraceState(), 7, config={**cfg, "schedule_path": "/other.json"})
+        msg = str(exc_info.value)
+        assert any(ord(c) > 127 for c in msg), f"Expected Korean error, got: {msg!r}"
+
+    def test_per_call_schedule_hash_raises(self, tmp_path):
+        """Passing schedule_hash in per-call config -> Korean ValueError."""
+        policy, cfg = self._make_yoked_policy(tmp_path)
+        pool = _make_pool()
+        with pytest.raises(ValueError) as exc_info:
+            policy.select(pool, TraceState(), 7, config={**cfg, "schedule_hash": "abc123"})
+        msg = str(exc_info.value)
+        assert any(ord(c) > 127 for c in msg), f"Expected Korean error, got: {msg!r}"
+
+    def test_per_call_non_canonical_tie_break_order_raises(self, tmp_path):
+        """Passing a non-canonical tie_break_order in per-call config -> Korean ValueError."""
+        policy, cfg = self._make_yoked_policy(tmp_path)
+        pool = _make_pool()
+        for bad_tbo in ["reverse", "hash_seeded", "feature_lexicographic"]:
+            with pytest.raises(ValueError) as exc_info:
+                policy.select(
+                    pool, TraceState(), 7,
+                    config={**cfg, "tie_break_order": bad_tbo}
+                )
+            msg = str(exc_info.value)
+            assert any(ord(c) > 127 for c in msg), (
+                f"Expected Korean error for tie_break_order={bad_tbo!r}, got: {msg!r}"
+            )
+
+    def test_per_call_canonical_tie_break_accepted(self, tmp_path):
+        """Passing tie_break_order='canonical' in per-call config is accepted.
+
+        Only the tie_break_order key is included (not schedule_path/schedule_hash,
+        which are constructor-only). The policy reads the schedule from its
+        constructor config and applies the per-call k/alpha/etc overrides.
+        """
+        policy, cfg = self._make_yoked_policy(tmp_path)
+        pool = _make_pool()
+        # Per-call config with only non-forbidden overrides — must not raise.
+        per_call = {"k": 4, "tie_break_order": "canonical"}
+        s = policy.select(pool, TraceState(), 7, config=per_call)
+        assert len(s) == 4
+
+
+# ---------------------------------------------------------------------------
+# 13. Golden-slate regression tests (Important fix #4)
+# ---------------------------------------------------------------------------
+# These tests pin the exact slate card-ID lists emitted by each arm config
+# against a FIXED constructed pool+trace+seed. They guard against drift in the
+# inherited helpers _features/_replay_bandit_state from trace_lin_ucb.
+#
+# HOW GOLDENS WERE CAPTURED:
+#   pool = _make_pool(16)  (n=16, n_bases=4, default params)
+#   trace = _trace_with([pool[0], pool[5]])  (2 rounds)
+#   seed = 7
+#   Each arm: AxsUcbPolicy(cfg).select(pool, trace, 7)
+#   Yoked: _make_yoked_schedule([1.0,0.8,0.6,0.4,0.2]) + AxsYokedBonusPolicy(cfg).select(...)
+#   Captured by running the module directly on commit bae3989 before any refactor.
+#
+# PINNED VALUES (do NOT change these without a deliberate re-baseline):
+#   canonical default   : ['c15', 'c14', 'c13', 'c11']
+#   alpha0              : ['c15', 'c14', 'c13', 'c12']
+#   freeze_round=2      : ['c15', 'c14', 'c13', 'c12']
+#   reverse             : ['c15', 'c14', 'c13', 'c11']
+#   hash_seeded         : ['c15', 'c14', 'c13', 'c11']
+#   feature_lexicographic: ['c15', 'c14', 'c13', 'c11']
+#   yoked               : ['c15', 'c14', 'c13', 'c12']
+
+class TestGoldenSlateRegression:
+    """Byte-identical slate regression tests. Changing these requires a deliberate
+    re-baseline with an explanation of why preregistered behavior changed."""
+
+    # Standard pool/trace/seed used for ALL golden tests.
+    _POOL = _make_pool(16)
+    _TRACE_CARDS = [_make_pool(16)[0], _make_pool(16)[5]]
+    _SEED = 7
+
+    # Freeze test uses a 3-round trace.
+    _TRACE_3_CARDS = [_make_pool(16)[0], _make_pool(16)[1], _make_pool(16)[2]]
+
+    def _pool(self):
+        return _make_pool(16)
+
+    def _trace(self):
+        pool = self._pool()
+        return _trace_with([pool[0], pool[5]])
+
+    def _trace3(self):
+        pool = self._pool()
+        return _trace_with([pool[0], pool[1], pool[2]])
+
+    def test_golden_canonical_default(self):
+        """Canonical default arm slate must match pinned value."""
+        pool = self._pool()
+        p = AxsUcbPolicy({"k": 4})
+        s = p.select(pool, self._trace(), self._SEED)
+        assert s == ["c15", "c14", "c13", "c11"], (
+            f"Golden: canonical default expected ['c15','c14','c13','c11'], got {s}"
+        )
+
+    def test_golden_alpha0(self):
+        """alpha=0 arm slate must match pinned value."""
+        pool = self._pool()
+        p = AxsUcbPolicy({"k": 4, "alpha": 0.0})
+        s = p.select(pool, self._trace(), self._SEED)
+        assert s == ["c15", "c14", "c13", "c12"], (
+            f"Golden: alpha0 expected ['c15','c14','c13','c12'], got {s}"
+        )
+
+    def test_golden_freeze_at_2(self):
+        """freeze_round=2 arm slate must match pinned value (3-round trace)."""
+        pool = self._pool()
+        p = AxsUcbPolicy({"k": 4, "freeze_round": 2})
+        s = p.select(pool, self._trace3(), self._SEED)
+        assert s == ["c15", "c14", "c13", "c12"], (
+            f"Golden: freeze_round=2 expected ['c15','c14','c13','c12'], got {s}"
+        )
+
+    def test_golden_reverse(self):
+        """reverse tiebreak arm slate must match pinned value."""
+        pool = self._pool()
+        p = AxsUcbPolicy({"k": 4, "tie_break_order": "reverse"})
+        s = p.select(pool, self._trace(), self._SEED)
+        assert s == ["c15", "c14", "c13", "c11"], (
+            f"Golden: reverse expected ['c15','c14','c13','c11'], got {s}"
+        )
+
+    def test_golden_hash_seeded(self):
+        """hash_seeded tiebreak arm slate must match pinned value."""
+        pool = self._pool()
+        p = AxsUcbPolicy({"k": 4, "tie_break_order": "hash_seeded"})
+        s = p.select(pool, self._trace(), self._SEED)
+        assert s == ["c15", "c14", "c13", "c11"], (
+            f"Golden: hash_seeded expected ['c15','c14','c13','c11'], got {s}"
+        )
+
+    def test_golden_feature_lexicographic(self):
+        """feature_lexicographic tiebreak arm slate must match pinned value."""
+        pool = self._pool()
+        p = AxsUcbPolicy({"k": 4, "tie_break_order": "feature_lexicographic"})
+        s = p.select(pool, self._trace(), self._SEED)
+        assert s == ["c15", "c14", "c13", "c11"], (
+            f"Golden: feature_lexicographic expected ['c15','c14','c13','c11'], got {s}"
+        )
+
+    def test_golden_yoked(self, tmp_path):
+        """Yoked arm slate must match pinned value."""
+        pool = self._pool()
+        sched_path = _make_yoked_schedule(tmp_path, per_round=[1.0, 0.8, 0.6, 0.4, 0.2])
+        body = json.loads(sched_path.read_text())
+        cfg = {
+            "k": 4,
+            "schedule_path": str(sched_path),
+            "schedule_hash": body["scheduleHash"],
+        }
+        p = AxsYokedBonusPolicy(cfg)
+        s = p.select(pool, self._trace(), self._SEED)
+        assert s == ["c15", "c14", "c13", "c12"], (
+            f"Golden: yoked expected ['c15','c14','c13','c12'], got {s}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 14. Bandit-state characterization test (_replay_bandit_state)
+# ---------------------------------------------------------------------------
+# Pins the (A, b) matrices for a small fixed trace against hard-coded values.
+# Uses pool[0] and pool[3] as the 2-round trace with default active features.
+#
+# PINNED VALUES (round to 8 decimals, captured from _replay_bandit_state directly):
+#   A (7x7): see hard-coded array below
+#   b (7,):  see hard-coded array below
+
+class TestBanditStateCharacterization:
+    """Characterization test for _replay_bandit_state (A, b) matrices.
+
+    These values pin the behavior of the inherited helper against numeric drift.
+    The active feature set is ('coordinate_gap','band_progress','redundancy','bias')
+    giving dimensionality 4+1+1+1=7.
+    """
+
+    def test_replay_bandit_state_fixed_trace(self):
+        """(A, b) from a 2-round trace must match hard-coded values (np.allclose, 8 dec)."""
+        pool = _make_pool(16)
+        p = AxsUcbPolicy({"k": 4})
+        active = ("coordinate_gap", "band_progress", "redundancy", "bias")
+        # Fixed trace: pool[0] then pool[3]
+        small_trace = _trace_with([pool[0], pool[3]])
+        A, b = p._replay_bandit_state(small_trace, active, 1.0)
+
+        # Hard-coded reference values captured from commit bae3989.
+        A_ref = np.array([
+            [10.0, 9.0, 6.0, 2.7, 1.5, 0.51939224, 3.0],
+            [9.0, 10.0, 6.0, 2.7, 1.5, 0.51939224, 3.0],
+            [6.0, 6.0, 5.0, 1.8, 1.0, 0.34626149, 2.0],
+            [2.7, 2.7, 1.8, 1.81, 0.45, 0.15581767, 0.9],
+            [1.5, 1.5, 1.0, 0.45, 2.25, 1.08656537, 1.5],
+            [0.51939224, 0.51939224, 0.34626149, 0.15581767, 1.08656537, 2.02997426, 1.17313075],
+            [3.0, 3.0, 2.0, 0.9, 1.5, 1.17313075, 3.0],
+        ])
+        b_ref = np.array([
+            14.32794472, 14.32794472, 9.55196315, 4.29838342,
+            2.38799079, 0.82686925, 4.77598157,
+        ])
+
+        assert A.shape == (7, 7), f"Expected A shape (7,7), got {A.shape}"
+        assert b.shape == (7,), f"Expected b shape (7,), got {b.shape}"
+        assert np.allclose(A, A_ref, atol=1e-8), (
+            f"A matrix differs from reference:\n{A}\nvs\n{A_ref}"
+        )
+        assert np.allclose(b, b_ref, atol=1e-8), (
+            f"b vector differs from reference:\n{b}\nvs\n{b_ref}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 15. schedule_path empty/blank validation (Minor fix #9)
+# ---------------------------------------------------------------------------
+
+class TestSchedulePathValidation:
+    """Explicit Korean ValueError for empty/blank schedule_path before filesystem access."""
+
+    def test_empty_string_path_raises(self):
+        """schedule_path='' -> Korean ValueError before filesystem access."""
+        p = AxsYokedBonusPolicy({"k": 4, "schedule_path": "", "schedule_hash": "x"})
+        with pytest.raises(ValueError) as exc_info:
+            p.select(_make_pool(), TraceState(), 7)
+        msg = str(exc_info.value)
+        assert any(ord(c) > 127 for c in msg), f"Expected Korean error, got: {msg!r}"
+
+    def test_blank_string_path_raises(self):
+        """schedule_path='   ' (whitespace only) -> Korean ValueError."""
+        p = AxsYokedBonusPolicy({"k": 4, "schedule_path": "   ", "schedule_hash": "x"})
+        with pytest.raises(ValueError) as exc_info:
+            p.select(_make_pool(), TraceState(), 7)
+        msg = str(exc_info.value)
+        assert any(ord(c) > 127 for c in msg), f"Expected Korean error, got: {msg!r}"
+
+    def test_missing_path_key_raises(self):
+        """schedule_path key absent -> Korean ValueError (defaults to empty string '')."""
+        p = AxsYokedBonusPolicy({"k": 4, "schedule_hash": "x"})
+        with pytest.raises(ValueError) as exc_info:
+            p.select(_make_pool(), TraceState(), 7)
+        msg = str(exc_info.value)
+        assert any(ord(c) > 127 for c in msg), f"Expected Korean error, got: {msg!r}"

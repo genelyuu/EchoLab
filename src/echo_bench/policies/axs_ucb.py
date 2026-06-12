@@ -27,9 +27,10 @@ All identifiers stay English; runtime log messages are Korean per convention.
 from __future__ import annotations
 
 import json
+import math
 import random
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 
@@ -56,6 +57,26 @@ _ALLOWED_TIE_BREAK_ORDERS = frozenset(
 
 # Repo root: src/echo_bench/policies/axs_ucb.py -> parents[3] = repo root
 _REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _validate_freeze_round(freeze_round: Any, policy_label: str) -> None:
+    """Raise Korean ValueError if freeze_round is not None or a non-negative int.
+
+    Booleans are rejected (True/False are int subclasses but not valid rounds).
+    Float values such as 2.5 are rejected. Only None or a plain non-negative int
+    is allowed.
+    """
+    if freeze_round is None:
+        return
+    if (
+        not isinstance(freeze_round, int)
+        or isinstance(freeze_round, bool)
+        or freeze_round < 0
+    ):
+        raise ValueError(
+            f"{policy_label}: freeze_round 값이 유효하지 않습니다 "
+            f"({freeze_round!r}). None 또는 0 이상의 정수만 허용합니다."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +148,11 @@ class AxsUcbPolicy(TraceLinUcbPolicy):
         seed: int,
         config: Dict[str, Any] | None = None,
     ) -> List[Any]:
-        """Return a constraint-satisfying slate by trace-only linear UCB (AXS variant)."""
+        """Return a constraint-satisfying slate by trace-only linear UCB (AXS variant).
+
+        TraceLinUcbPolicy.select() 사본, 기준 커밋 a1a8b6f
+        """
+        # SEAM 1: effective config resolution
         effective = config if config is not None else self.config
         k = int(effective["k"])
         alpha = float(effective.get("alpha", DEFAULT_ALPHA))
@@ -135,6 +160,9 @@ class AxsUcbPolicy(TraceLinUcbPolicy):
         active = tuple(effective.get("features") or DEFAULT_FEATURES)
         freeze_round: Optional[int] = effective.get("freeze_round", None)
         tie_break_order: str = str(effective.get("tie_break_order", "canonical"))
+
+        # SEAM 2: freeze_round validation
+        _validate_freeze_round(freeze_round, "AXS_UCB 정책")
 
         if tie_break_order not in _ALLOWED_TIE_BREAK_ORDERS:
             raise ValueError(
@@ -207,6 +235,7 @@ class AxsUcbPolicy(TraceLinUcbPolicy):
 
         comp_cache = {c["cardId"]: ucb_components(c) for c in pool}
 
+        # SEAM 3: tie_break_order rank-key dispatch
         def _rank_key(card: Dict[str, Any], need_new_basis: bool, chosen_bases: set) -> tuple:
             comp = comp_cache[card["cardId"]]
             cid = card["cardId"]
@@ -217,6 +246,11 @@ class AxsUcbPolicy(TraceLinUcbPolicy):
             if tie_break_order == "canonical":
                 return primary + (tiebreak[cid], cid)
             elif tie_break_order == "reverse":
+                # NOTE: desc_key uses -ord(ch) per character. For very short IDs
+                # that share all characters except length (e.g. "ab" vs "abc"),
+                # the ordering is identical in both directions — this is a known
+                # prefix-length ambiguity; document here so it is not silently
+                # relied upon.
                 neg_tb = -tiebreak[cid]
                 desc_key = tuple(-ord(ch) for ch in cid)
                 return primary + (neg_tb, desc_key)
@@ -232,36 +266,10 @@ class AxsUcbPolicy(TraceLinUcbPolicy):
                     f"AXS_UCB 정책: 알 수 없는 tie_break_order 값 {tie_break_order!r}"
                 )
 
-        chosen: List[Dict[str, Any]] = []
-        chosen_ids: set = set()
-        chosen_bases: set = set()
-
-        while len(chosen) < k:
-            pool_left = [c for c in pool if c["cardId"] not in chosen_ids]
-            if not pool_left:
-                break
-            slots_left = k - len(chosen)
-            distinct_bases_left = len({c["basis"] for c in pool_left} - chosen_bases)
-            need_new_basis = (
-                len(chosen_bases) < 3
-                and slots_left <= (3 - len(chosen_bases))
-                and distinct_bases_left > 0
-            )
-
-            pool_left.sort(key=lambda c: _rank_key(c, need_new_basis, chosen_bases))
-            pick = pool_left[0]
-            chosen.append(pick)
-            chosen_ids.add(pick["cardId"])
-            chosen_bases.add(pick["basis"])
-
-        slate = chosen if len(chosen) == k else None
-        if slate is not None:
-            ok, _reason, _perm = check_slate(slate, k, bases_cfg, seed)
-            if not ok:
-                slate = self._axs_diversity_fallback(
-                    pool, k, comp_cache, tiebreak, feature_cache, bases_cfg, seed,
-                    tie_break_order,
-                )
+        slate = self._assemble_slate(
+            pool, comp_cache, feature_cache, tiebreak, _rank_key,
+            k, bases_cfg, seed, tie_break_order, pool_hash,
+        )
 
         if slate is None:
             raise ValueError(
@@ -287,6 +295,83 @@ class AxsUcbPolicy(TraceLinUcbPolicy):
         )
         return [c["cardId"] for c in slate]
 
+    def _assemble_slate(
+        self,
+        pool: List[Dict[str, Any]],
+        comp_cache: Dict[str, Dict[str, float]],
+        feature_cache: Dict[str, np.ndarray],
+        tiebreak: Dict[str, float],
+        rank_key_fn: Callable,
+        k: int,
+        bases_cfg: dict,
+        seed: int,
+        tie_break_order: str,
+        pool_hash: str,
+    ) -> List[Dict[str, Any]] | None:
+        """Greedy slate assembly shared by AxsUcbPolicy and AxsYokedBonusPolicy.
+
+        Runs the greedy loop with constraint check and diversity fallback.
+        Returns the assembled list of card dicts, or None if no valid slate can
+        be constructed.
+
+        Parameters
+        ----------
+        pool:
+            Full candidate card list.
+        comp_cache:
+            Pre-computed score components (mean/bonus/ucb) keyed by cardId.
+        feature_cache:
+            Pre-computed feature vectors keyed by cardId (used by fallback).
+        tiebreak:
+            Per-card deterministic tiebreak floats (empty for
+            feature_lexicographic mode).
+        rank_key_fn:
+            Callable ``(card, need_new_basis, chosen_bases) -> tuple`` producing
+            the sort key for the greedy step.
+        k:
+            Target slate size.
+        bases_cfg:
+            Loaded bases configuration dict (passed to check_slate).
+        seed:
+            Round seed (passed to check_slate).
+        tie_break_order:
+            Active tiebreak mode (passed to fallback).
+        pool_hash:
+            Pre-computed pool hash (used in error message).
+        """
+        chosen: List[Dict[str, Any]] = []
+        chosen_ids: set = set()
+        chosen_bases: set = set()
+
+        while len(chosen) < k:
+            pool_left = [c for c in pool if c["cardId"] not in chosen_ids]
+            if not pool_left:
+                break
+            slots_left = k - len(chosen)
+            distinct_bases_left = len({c["basis"] for c in pool_left} - chosen_bases)
+            need_new_basis = (
+                len(chosen_bases) < 3
+                and slots_left <= (3 - len(chosen_bases))
+                and distinct_bases_left > 0
+            )
+
+            pool_left.sort(key=lambda c: rank_key_fn(c, need_new_basis, chosen_bases))
+            pick = pool_left[0]
+            chosen.append(pick)
+            chosen_ids.add(pick["cardId"])
+            chosen_bases.add(pick["basis"])
+
+        slate = chosen if len(chosen) == k else None
+        if slate is not None:
+            ok, _reason, _perm = check_slate(slate, k, bases_cfg, seed)
+            if not ok:
+                slate = self._axs_diversity_fallback(
+                    pool, k, comp_cache, tiebreak, feature_cache, bases_cfg, seed,
+                    tie_break_order,
+                )
+
+        return slate
+
     def _axs_diversity_fallback(
         self,
         pool: List[Dict[str, Any]],
@@ -310,11 +395,10 @@ class AxsUcbPolicy(TraceLinUcbPolicy):
                 desc_key = tuple(-ord(ch) for ch in cid)
                 return (ucb_neg, neg_tb, desc_key)
             elif tie_break_order == "feature_lexicographic":
-                x_card = feature_cache.get(cid)
-                if x_card is not None:
-                    feat_key = tuple(round(float(v), 12) for v in x_card)
-                else:
-                    feat_key = ()
+                # Use direct index — feature_cache is always populated for all
+                # pool cards before _assemble_slate is called.
+                x_card = feature_cache[cid]
+                feat_key = tuple(round(float(v), 12) for v in x_card)
                 return (ucb_neg, feat_key, cid)
             else:
                 return (ucb_neg, tiebreak[cid], cid)
@@ -363,7 +447,8 @@ class AxsYokedBonusPolicy(AxsUcbPolicy):
     -------------------------------------------------
     schedule_path : str
         Path to the schedule JSON. Relative paths are resolved against the repo
-        root (``Path(__file__).resolve().parents[3]``).
+        root (``Path(__file__).resolve().parents[3]``). Empty/blank paths are
+        explicitly rejected before filesystem access.
     schedule_hash : str
         Expected ``scheduleHash`` string. Must match the recomputed hash of the
         schedule body (with ``"scheduleHash"`` key excluded).
@@ -385,13 +470,22 @@ class AxsYokedBonusPolicy(AxsUcbPolicy):
         Raises
         ------
         ValueError
-            If the file is missing, not valid JSON, or the hash does not match
-            either the embedded ``scheduleHash`` or the config ``schedule_hash``.
+            If the schedule_path is empty/blank, the file is missing, not valid
+            JSON, the hash does not match, or the ``perRoundBonus`` field is
+            missing / empty / contains invalid values.
         """
         if self._schedule is not None:
             return self._schedule
 
         raw_path: str = self.config.get("schedule_path", "")
+
+        # Explicit rejection of empty/blank path before filesystem access.
+        if not raw_path or not raw_path.strip():
+            raise ValueError(
+                "AXS_YOKED 정책: schedule_path 가 비어 있습니다. "
+                "유효한 파일 경로를 지정해야 합니다."
+            )
+
         schedule_path = Path(raw_path)
         if not schedule_path.is_absolute():
             schedule_path = _REPO_ROOT / schedule_path
@@ -433,6 +527,30 @@ class AxsYokedBonusPolicy(AxsUcbPolicy):
                 f"(config={expected_from_config!r}, 파일={recomputed!r})"
             )
 
+        # Validate perRoundBonus structure after hash check.
+        per_round_bonus = body.get("perRoundBonus")
+        if per_round_bonus is None:
+            raise ValueError(
+                f"AXS_YOKED 정책: 스케줄 파일에 'perRoundBonus' 키가 없습니다: "
+                f"{schedule_path}"
+            )
+        if not isinstance(per_round_bonus, list) or len(per_round_bonus) == 0:
+            raise ValueError(
+                f"AXS_YOKED 정책: 'perRoundBonus' 가 비어 있거나 리스트가 아닙니다: "
+                f"{schedule_path}"
+            )
+        for idx, val in enumerate(per_round_bonus):
+            if isinstance(val, bool) or not isinstance(val, (int, float)):
+                raise ValueError(
+                    f"AXS_YOKED 정책: 'perRoundBonus[{idx}]' 값이 유효한 숫자가 "
+                    f"아닙니다 ({val!r}): {schedule_path}"
+                )
+            if not math.isfinite(float(val)):
+                raise ValueError(
+                    f"AXS_YOKED 정책: 'perRoundBonus[{idx}]' 값이 유한하지 않습니다 "
+                    f"({val!r}): {schedule_path}"
+                )
+
         self._schedule = body
         return body
 
@@ -443,13 +561,39 @@ class AxsYokedBonusPolicy(AxsUcbPolicy):
         seed: int,
         config: Dict[str, Any] | None = None,
     ) -> List[Any]:
-        """Return a constraint-satisfying slate using a yoked bonus schedule."""
+        """Return a constraint-satisfying slate using a yoked bonus schedule.
+
+        TraceLinUcbPolicy.select() 사본, 기준 커밋 a1a8b6f
+        """
+        # SEAM 1: effective config resolution + per-call consistency check
         effective = config if config is not None else self.config
+
+        # Explicit rejection of per-call config keys that would silently alter
+        # preregistered yoked-arm behavior.
+        if config is not None:
+            for forbidden_key in ("schedule_path", "schedule_hash"):
+                if forbidden_key in config:
+                    raise ValueError(
+                        f"AXS_YOKED 정책: per-call config 에 '{forbidden_key}' 키가 "
+                        "포함되어 있습니다. yoked arm은 생성자 config에서만 "
+                        "스케줄을 읽습니다."
+                    )
+            per_call_tbo = config.get("tie_break_order")
+            if per_call_tbo is not None and per_call_tbo != "canonical":
+                raise ValueError(
+                    f"AXS_YOKED 정책: per-call config의 tie_break_order="
+                    f"{per_call_tbo!r} 는 허용되지 않습니다. "
+                    "yoked arm은 'canonical' 만 지원합니다."
+                )
+
         k = int(effective["k"])
         alpha = float(effective.get("alpha", DEFAULT_ALPHA))
         lambda_reg = float(effective.get("lambda_reg", DEFAULT_LAMBDA))
         active = tuple(effective.get("features") or DEFAULT_FEATURES)
         freeze_round: Optional[int] = effective.get("freeze_round", None)
+
+        # SEAM 2: freeze_round validation
+        _validate_freeze_round(freeze_round, "AXS_YOKED 정책")
 
         # tie_break_order is always canonical for yoked (spec: "Tie-break stays canonical")
         tie_break_order = "canonical"
@@ -538,41 +682,17 @@ class AxsYokedBonusPolicy(AxsUcbPolicy):
 
         comp_cache = {c["cardId"]: yoked_components(c) for c in pool}
 
+        # SEAM 3: yoked rank key (canonical only)
         def _rank_key(card: Dict[str, Any], need_new_basis: bool, chosen_bases: set) -> tuple:
             comp = comp_cache[card["cardId"]]
             cid = card["cardId"]
             nb = 1 if (need_new_basis and card["basis"] not in chosen_bases) else 0
             return (-nb, -comp["ucb"], tiebreak[cid], cid)
 
-        chosen: List[Dict[str, Any]] = []
-        chosen_ids: set = set()
-        chosen_bases: set = set()
-
-        while len(chosen) < k:
-            pool_left = [c for c in pool if c["cardId"] not in chosen_ids]
-            if not pool_left:
-                break
-            slots_left = k - len(chosen)
-            distinct_bases_left = len({c["basis"] for c in pool_left} - chosen_bases)
-            need_new_basis = (
-                len(chosen_bases) < 3
-                and slots_left <= (3 - len(chosen_bases))
-                and distinct_bases_left > 0
-            )
-            pool_left.sort(key=lambda c: _rank_key(c, need_new_basis, chosen_bases))
-            pick = pool_left[0]
-            chosen.append(pick)
-            chosen_ids.add(pick["cardId"])
-            chosen_bases.add(pick["basis"])
-
-        slate = chosen if len(chosen) == k else None
-        if slate is not None:
-            ok, _reason, _perm = check_slate(slate, k, bases_cfg, seed)
-            if not ok:
-                slate = self._axs_diversity_fallback(
-                    pool, k, comp_cache, tiebreak, feature_cache, bases_cfg, seed,
-                    tie_break_order,
-                )
+        slate = self._assemble_slate(
+            pool, comp_cache, feature_cache, tiebreak, _rank_key,
+            k, bases_cfg, seed, tie_break_order, pool_hash,
+        )
 
         if slate is None:
             raise ValueError(
