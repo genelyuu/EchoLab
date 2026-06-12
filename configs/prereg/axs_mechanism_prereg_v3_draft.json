@@ -7,7 +7,7 @@
   "supersedes": "axs-mechanism v1 (registered, never consumed) and v2 design-draft (never registered)",
   "changeJustification": [
     "The v1 pilot that motivated the v2 entry-point-ablation draft was invalidated by a config-drop harness bug: run_round passed per-call {\"k\": k} and AxsUcbPolicy/AxsYokedBonusPolicy.select resolved effective = config if config is not None else self.config, replacing constructor config; alpha/freeze/tie-break manipulations were therefore never applied; fixed in b7b64b42350bb424999569138b373b189c8704b1.",
-    "Post-fix re-pilot on 4 non-evaluation critic families (123, 124, 777, 55555) shows all v1 contrasts are behaviorally live after the fix.",
+    "Post-fix re-pilot on 4 non-evaluation critic families (123, 124, 777, 55555) shows all v1 contrasts are behaviorally live after the fix; initial summary v2 was built from a collided-filename run (seedBatchId lacked base_seeds, so 12 reports overwrote to 4 files), falsely asserting 4/4 stability from 2 families' data — fixed in 89a8f4832cbca7be80acf0a1f1cb52b4a0855e33; complete re-pilot (pilot_v3, 16 distinct reports) is the evidence base.",
     "The robust cross-family phenomena confirmed in the post-fix pilot are: early-freeze imprint amplification (delta_imp positive 4/4, large), trace-independent-noise destruction (delta_noise positive 4/4, yoked negative 4/4), tie-break invariance (4/4).",
     "The alpha contrast is family-heterogeneous (3/4 positive, reversed in one family) and is therefore registered as exploratory-only with no claim license.",
     "Strict monotone freeze ordering is violated in one critic family (family 124: quarter > freeze_at_1) and is deliberately NOT registered as a confirmatory rule.",
@@ -50,7 +50,7 @@
   "designContaminatedFamilies": ["123", "124", "777", "55555"],
   "pilotSummaryRef": {
     "path": "configs/prereg/axs_pilot_summary_v2.json",
-    "summaryHash": "ddcce0beb70d244a60689f0014bd66f647a417e2846fa0f5022f421bef939a6b"
+    "summaryHash": "8eec34d221c59efa475014bb15f98945c0ac40fbbd2be74152491e5cd4041a89"
   },
   "experiments": {
     "AXS-IMP-001": {
@@ -163,17 +163,21 @@
     }
   },
   "contrastLivenessEvidence": {
-    "source": "post-fix critic re-pilot (families 123 and 55555 with report data) = pilot summary v2",
+    "source": "complete re-pilot (pilot_v3, 16 reports, 4 families x 4 experiments, runCommit 89a8f4832cbca7be80acf0a1f1cb52b4a0855e33) = pilot summary v2 rebuild",
     "deltaImpPerFamily": {
       "123": 0.4466197600781487,
+      "124": 0.13385212988756873,
+      "777": 0.3125849611469993,
       "55555": 0.24513087329328426
     },
     "deltaNoisePerFamily": {
       "123": 0.11460980653019132,
+      "124": 0.15756457331382562,
+      "777": 0.14494026354153755,
       "55555": 0.21008603261932818
     },
     "allConfirmatoryContrastsDifferentiated": true,
-    "criterionNote": "Every confirmatory contrast differentiates in available critic families with paired deltas far exceeding measurement granularity."
+    "criterionNote": "Every confirmatory contrast differentiates in all 4 critic families with paired deltas far exceeding measurement granularity."
   },
   "livenessCriteria": {
     "residualChecksBeforeRegistration": [

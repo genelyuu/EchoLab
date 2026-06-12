@@ -1,6 +1,6 @@
 """tests/test_prereg_v3_draft.py
 
-AXS v3 설계 초안 사전등록 + 파일럿 요약 v2 검증 테스트.
+AXS v3 설계 초안 사전등록 + 파일럿 요약 v2 검증 테스트 (pilot_v3 4-family 완전 재구축).
 
 Task: AXS-V3 N1
 """
@@ -18,10 +18,50 @@ PREREG_V1_PATH = REPO / "configs/prereg/axs_mechanism_prereg_v1.json"
 PREREG_V3_PATH = REPO / "configs/prereg/axs_mechanism_prereg_v3_draft.json"
 SUMMARY_V2_PATH = REPO / "configs/prereg/axs_pilot_summary_v2.json"
 
+PILOT_V3_DIR = REPO / "outputs/reports/pilot_v3"
+
+# 이전 단일-family 충돌 디렉터리 — 감사용으로 보존
 PILOT_123_DIR = REPO / "outputs/reports/pilot_123_postfix"
 PILOT_CRITIC_DIR = REPO / "outputs/reports/pilot_critic_postfix"
 
-POSTFIX_REPORTS_EXIST = PILOT_123_DIR.exists() and PILOT_CRITIC_DIR.exists()
+PILOT_V3_EXISTS = PILOT_V3_DIR.exists()
+
+# pilot_v3 내 모든 4개 family 디렉터리 확인 — 16개 파일이 있어야 함
+PILOT_V3_COMPLETE = (
+    PILOT_V3_EXISTS
+    and len(list(PILOT_V3_DIR.glob("axs_003_*.json"))) >= 4
+    and len(list(PILOT_V3_DIR.glob("axs_009_*.json"))) >= 4
+    and len(list(PILOT_V3_DIR.glob("axs_004c_*.json"))) >= 4
+    and len(list(PILOT_V3_DIR.glob("axs_010_*.json"))) >= 4
+)
+
+# pilot_v3 4-family 리포트 경로 매핑 (파일명 = 실험 prefix + seedBatchId prefix)
+PILOT_V3_REPORT_MAP: dict[str, dict[str, str]] = {
+    "123": {
+        "AXS-003": "axs_003_4145b41c3d60.json",
+        "AXS-009": "axs_009_bd3b7be2635d.json",
+        "AXS-004c": "axs_004c_c1a36fd19f76.json",
+        "AXS-010": "axs_010_9cf850cd0b9d.json",
+    },
+    "124": {
+        "AXS-003": "axs_003_8394f4e0a426.json",
+        "AXS-009": "axs_009_018a86e7a721.json",
+        "AXS-004c": "axs_004c_2416583d9373.json",
+        "AXS-010": "axs_010_8534040653d9.json",
+    },
+    "777": {
+        "AXS-003": "axs_003_090400a72f75.json",
+        "AXS-009": "axs_009_1920dac4060d.json",
+        "AXS-004c": "axs_004c_9cd233837029.json",
+        "AXS-010": "axs_010_972fd96d9fa3.json",
+    },
+    "55555": {
+        "AXS-003": "axs_003_563b27979dc3.json",
+        "AXS-009": "axs_009_0390d8a988bd.json",
+        "AXS-004c": "axs_004c_ceffbdd4bbae.json",
+        "AXS-010": "axs_010_19fd30af5ae8.json",
+    },
+}
 
 
 # ---------------------------------------------------------------------------
@@ -48,41 +88,18 @@ def summary_v2() -> dict:
 
 
 @pytest.fixture(scope="module")
-def postfix_reports_123() -> dict[str, dict]:
-    """pilot_123_postfix 디렉터리의 4개 리포트를 실험 ID별로 반환한다."""
-    if not PILOT_123_DIR.exists():
+def pilot_v3_reports() -> dict[str, dict[str, dict]]:
+    """pilot_v3 디렉터리의 모든 16개 리포트를 {family -> {exp_id -> report}} 형태로 반환한다."""
+    if not PILOT_V3_COMPLETE:
         return {}
-    reports: dict[str, dict] = {}
-    for exp_id, glob_prefix in [
-        ("AXS-003", "axs_003_"),
-        ("AXS-004c", "axs_004c_"),
-        ("AXS-009", "axs_009_"),
-        ("AXS-010", "axs_010_"),
-    ]:
-        matches = list(PILOT_123_DIR.glob(f"{glob_prefix}*.json"))
-        assert matches, f"{exp_id} 리포트 파일을 찾을 수 없음 (pilot_123_postfix)"
-        with open(matches[0], encoding="utf-8") as f:
-            reports[exp_id] = json.load(f)
-    return reports
-
-
-@pytest.fixture(scope="module")
-def postfix_reports_critic() -> dict[str, dict]:
-    """pilot_critic_postfix 디렉터리의 4개 리포트를 실험 ID별로 반환한다."""
-    if not PILOT_CRITIC_DIR.exists():
-        return {}
-    reports: dict[str, dict] = {}
-    for exp_id, glob_prefix in [
-        ("AXS-003", "axs_003_"),
-        ("AXS-004c", "axs_004c_"),
-        ("AXS-009", "axs_009_"),
-        ("AXS-010", "axs_010_"),
-    ]:
-        matches = list(PILOT_CRITIC_DIR.glob(f"{glob_prefix}*.json"))
-        assert matches, f"{exp_id} 리포트 파일을 찾을 수 없음 (pilot_critic_postfix)"
-        with open(matches[0], encoding="utf-8") as f:
-            reports[exp_id] = json.load(f)
-    return reports
+    result: dict[str, dict[str, dict]] = {}
+    for family, exp_map in PILOT_V3_REPORT_MAP.items():
+        result[family] = {}
+        for exp_id, filename in exp_map.items():
+            path = PILOT_V3_DIR / filename
+            with open(path, encoding="utf-8") as f:
+                result[family][exp_id] = json.load(f)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +129,17 @@ def test_changeJustification_present_and_nonempty(v3: dict) -> None:
     cj = v3["changeJustification"]
     assert isinstance(cj, list) and len(cj) > 0, (
         f"changeJustification이 비어 있거나 배열이 아님: {cj!r}"
+    )
+
+
+def test_changeJustification_mentions_filename_collision_bug(v3: dict) -> None:
+    """changeJustification에 seedBatchId/filename-collision 두 번째 버그 기록이 있어야 한다."""
+    cj_text = " ".join(str(e) for e in v3.get("changeJustification", []))
+    assert "89a8f4832cbca7be80acf0a1f1cb52b4a0855e33" in cj_text, (
+        "changeJustification에 seedBatchId 버그 fixCommit(89a8f48 full SHA) 언급 없음"
+    )
+    assert "pilot_v3" in cj_text, (
+        "changeJustification에 pilot_v3 언급 없음"
     )
 
 
@@ -221,64 +249,88 @@ def test_summary_v2_supersedesSummary_present(summary_v2: dict) -> None:
     )
 
 
-def test_summary_v2_bugRecord_fixCommit_resolves(summary_v2: dict) -> None:
-    """bugRecord.fixCommit이 git으로 해석 가능하고 b7b64b4로 시작해야 한다."""
-    if not POSTFIX_REPORTS_EXIST:
-        pytest.skip("postfix 리포트 디렉터리 없음 — CI 안전 스킵")
-
-    bug = summary_v2.get("bugRecord", {})
-    fix_commit = bug.get("fixCommit")
-    assert fix_commit is not None, "bugRecord.fixCommit 키 누락"
-    assert fix_commit.startswith("b7b64b4"), (
-        f"fixCommit이 b7b64b4로 시작하지 않음: {fix_commit!r}"
+def test_summary_v2_bugRecord_is_list_with_two_entries(summary_v2: dict) -> None:
+    """bugRecord가 2개 항목을 가진 배열이어야 한다."""
+    bug_record = summary_v2.get("bugRecord")
+    assert isinstance(bug_record, list), (
+        f"bugRecord가 배열이 아님: {type(bug_record)!r}"
     )
-    # git rev-parse를 통해 해석 가능 여부 확인
+    assert len(bug_record) == 2, (
+        f"bugRecord 항목 수가 2가 아님: {len(bug_record)}"
+    )
+
+
+def test_summary_v2_bugRecord_first_entry_fixCommit(summary_v2: dict) -> None:
+    """bugRecord[0] (config-drop 버그)의 fixCommit이 b7b64b4로 시작해야 한다."""
+    bug_record = summary_v2.get("bugRecord", [])
+    assert len(bug_record) >= 1, "bugRecord가 비어 있음"
+    first = bug_record[0]
+    fix_commit = first.get("fixCommit")
+    assert fix_commit is not None, "bugRecord[0].fixCommit 키 누락"
+    assert fix_commit.startswith("b7b64b4"), (
+        f"bugRecord[0].fixCommit이 b7b64b4로 시작하지 않음: {fix_commit!r}"
+    )
     result = subprocess.run(
         ["git", "-C", str(REPO), "rev-parse", "--verify", fix_commit],
         capture_output=True, text=True
     )
     assert result.returncode == 0, (
-        f"fixCommit을 git으로 해석할 수 없음: {fix_commit!r} "
-        f"(stderr: {result.stderr.strip()})"
+        f"bugRecord[0].fixCommit을 git으로 해석할 수 없음: {fix_commit!r}"
     )
 
 
-def test_summary_v2_postfix_report_hashes_match_source(
+def test_summary_v2_bugRecord_second_entry_fixCommit(summary_v2: dict) -> None:
+    """bugRecord[1] (seedBatchId 충돌 버그)의 fixCommit이 89a8f48으로 시작해야 한다."""
+    bug_record = summary_v2.get("bugRecord", [])
+    assert len(bug_record) >= 2, "bugRecord에 두 번째 항목 없음"
+    second = bug_record[1]
+    fix_commit = second.get("fixCommit")
+    assert fix_commit is not None, "bugRecord[1].fixCommit 키 누락"
+    assert fix_commit.startswith("89a8f48"), (
+        f"bugRecord[1].fixCommit이 89a8f48으로 시작하지 않음: {fix_commit!r}"
+    )
+    result = subprocess.run(
+        ["git", "-C", str(REPO), "rev-parse", "--verify", fix_commit],
+        capture_output=True, text=True
+    )
+    assert result.returncode == 0, (
+        f"bugRecord[1].fixCommit을 git으로 해석할 수 없음: {fix_commit!r}"
+    )
+
+
+def test_summary_v2_postFixPilot_has_all_4_families(summary_v2: dict) -> None:
+    """postFixPilot에 4개 family 키가 모두 있어야 한다."""
+    post_fix = summary_v2.get("postFixPilot", {})
+    expected_families = {"123", "124", "777", "55555"}
+    actual_families = set(post_fix.keys())
+    assert actual_families == expected_families, (
+        f"postFixPilot family 키 불일치: {actual_families} != {expected_families}"
+    )
+
+
+def test_summary_v2_all_16_report_hashes_match_source(
     summary_v2: dict,
-    postfix_reports_123: dict,
-    postfix_reports_critic: dict,
+    pilot_v3_reports: dict,
 ) -> None:
-    """summary v2의 postFixPilot 리포트 해시가 소스 리포트의 reportHash와 일치해야 한다."""
-    if not POSTFIX_REPORTS_EXIST:
-        pytest.skip("postfix 리포트 디렉터리 없음 — CI 안전 스킵")
+    """summary v2의 postFixPilot 모든 16개 리포트 해시가 소스 리포트의 reportHash와 일치해야 한다."""
+    if not PILOT_V3_COMPLETE:
+        pytest.skip("pilot_v3 디렉터리 없음 또는 완전하지 않음 — CI 안전 스킵")
 
     post_fix = summary_v2.get("postFixPilot", {})
 
-    # family 123 checks
-    family_123 = post_fix.get("123", {})
-    for exp_id, report in postfix_reports_123.items():
-        source_hash = report.get("reportHash")
-        stored_hash = family_123.get(exp_id, {}).get("reportHash")
-        assert stored_hash is not None, (
-            f"postFixPilot[123][{exp_id}].reportHash 키 누락"
-        )
-        assert stored_hash == source_hash, (
-            f"postFixPilot[123][{exp_id}].reportHash 불일치: "
-            f"저장됨={stored_hash!r}, 소스={source_hash!r}"
-        )
-
-    # family 55555 checks
-    family_55555 = post_fix.get("55555", {})
-    for exp_id, report in postfix_reports_critic.items():
-        source_hash = report.get("reportHash")
-        stored_hash = family_55555.get(exp_id, {}).get("reportHash")
-        assert stored_hash is not None, (
-            f"postFixPilot[55555][{exp_id}].reportHash 키 누락"
-        )
-        assert stored_hash == source_hash, (
-            f"postFixPilot[55555][{exp_id}].reportHash 불일치: "
-            f"저장됨={stored_hash!r}, 소스={source_hash!r}"
-        )
+    for family in ["123", "124", "777", "55555"]:
+        family_data = post_fix.get(family, {})
+        for exp_id in ["AXS-003", "AXS-009", "AXS-004c", "AXS-010"]:
+            source_report = pilot_v3_reports.get(family, {}).get(exp_id, {})
+            source_hash = source_report.get("reportHash")
+            stored_hash = family_data.get(exp_id, {}).get("reportHash")
+            assert stored_hash is not None, (
+                f"postFixPilot[{family}][{exp_id}].reportHash 키 누락"
+            )
+            assert stored_hash == source_hash, (
+                f"postFixPilot[{family}][{exp_id}].reportHash 불일치: "
+                f"저장됨={stored_hash!r}, 소스={source_hash!r}"
+            )
 
 
 def _extract_contrasts_from_reports(
@@ -303,69 +355,52 @@ def _extract_contrasts_from_reports(
     }
 
 
-def test_summary_v2_derived_contrasts_match_source(
+def test_summary_v2_all_4_families_derived_contrasts_match_source(
     summary_v2: dict,
-    postfix_reports_123: dict,
-    postfix_reports_critic: dict,
+    pilot_v3_reports: dict,
 ) -> None:
-    """summary v2의 derived contrast 값이 소스 리포트에서 재계산한 값과 일치해야 한다."""
-    if not POSTFIX_REPORTS_EXIST:
-        pytest.skip("postfix 리포트 디렉터리 없음 — CI 안전 스킵")
+    """summary v2의 4개 family 전체 derived contrast 값이 소스 리포트 재계산과 일치해야 한다."""
+    if not PILOT_V3_COMPLETE:
+        pytest.skip("pilot_v3 디렉터리 없음 또는 완전하지 않음 — CI 안전 스킵")
 
     post_fix = summary_v2.get("postFixPilot", {})
 
-    # Family 123
-    computed_123 = _extract_contrasts_from_reports(
-        postfix_reports_123["AXS-003"],
-        postfix_reports_123["AXS-009"],
-        postfix_reports_123["AXS-004c"],
-        "123",
-    )
-    stored_123 = post_fix.get("123", {})
-    for key, expected in computed_123.items():
-        stored = stored_123.get(key)
-        assert stored == expected, (
-            f"postFixPilot[123][{key}] 불일치: 저장됨={stored!r}, 계산됨={expected!r}"
+    for family in ["123", "124", "777", "55555"]:
+        computed = _extract_contrasts_from_reports(
+            pilot_v3_reports[family]["AXS-003"],
+            pilot_v3_reports[family]["AXS-009"],
+            pilot_v3_reports[family]["AXS-004c"],
+            family,
         )
-
-    # Family 55555
-    computed_55555 = _extract_contrasts_from_reports(
-        postfix_reports_critic["AXS-003"],
-        postfix_reports_critic["AXS-009"],
-        postfix_reports_critic["AXS-004c"],
-        "55555",
-    )
-    stored_55555 = post_fix.get("55555", {})
-    for key, expected in computed_55555.items():
-        stored = stored_55555.get(key)
-        assert stored == expected, (
-            f"postFixPilot[55555][{key}] 불일치: 저장됨={stored!r}, 계산됨={expected!r}"
-        )
+        stored = post_fix.get(family, {})
+        for key, expected in computed.items():
+            actual = stored.get(key)
+            assert actual == expected, (
+                f"postFixPilot[{family}][{key}] 불일치: 저장됨={actual!r}, 계산됨={expected!r}"
+            )
 
 
-def test_summary_v2_runCommit_consistent(
+def test_summary_v2_runCommit_all_16_reports_consistent(
     summary_v2: dict,
-    postfix_reports_123: dict,
-    postfix_reports_critic: dict,
+    pilot_v3_reports: dict,
 ) -> None:
-    """bugRecord.fixCommit이 모든 postfix 리포트의 preregStamp.runCommit과 일치해야 한다."""
-    if not POSTFIX_REPORTS_EXIST:
-        pytest.skip("postfix 리포트 디렉터리 없음 — CI 안전 스킵")
+    """bugRecord[1].fixCommit이 pilot_v3의 모든 16개 리포트 preregStamp.runCommit과 일치해야 한다."""
+    if not PILOT_V3_COMPLETE:
+        pytest.skip("pilot_v3 디렉터리 없음 또는 완전하지 않음 — CI 안전 스킵")
 
-    fix_commit = summary_v2.get("bugRecord", {}).get("fixCommit")
-    assert fix_commit is not None, "bugRecord.fixCommit 없음"
+    bug_record = summary_v2.get("bugRecord", [])
+    assert len(bug_record) >= 2, "bugRecord에 두 번째 항목 없음"
+    fix_commit = bug_record[1].get("fixCommit")
+    assert fix_commit is not None, "bugRecord[1].fixCommit 없음"
 
-    for exp_id, report in postfix_reports_123.items():
-        run_commit = report.get("preregStamp", {}).get("runCommit")
-        assert run_commit == fix_commit, (
-            f"pilot_123_postfix {exp_id}: runCommit={run_commit!r} != fixCommit={fix_commit!r}"
-        )
-
-    for exp_id, report in postfix_reports_critic.items():
-        run_commit = report.get("preregStamp", {}).get("runCommit")
-        assert run_commit == fix_commit, (
-            f"pilot_critic_postfix {exp_id}: runCommit={run_commit!r} != fixCommit={fix_commit!r}"
-        )
+    for family in ["123", "124", "777", "55555"]:
+        for exp_id in ["AXS-003", "AXS-009", "AXS-004c", "AXS-010"]:
+            report = pilot_v3_reports.get(family, {}).get(exp_id, {})
+            run_commit = report.get("preregStamp", {}).get("runCommit")
+            assert run_commit == fix_commit, (
+                f"pilot_v3 family={family} {exp_id}: "
+                f"runCommit={run_commit!r} != fixCommit={fix_commit!r}"
+            )
 
 
 def test_summary_v2_stabilityAssessment_strings_present(summary_v2: dict) -> None:
@@ -378,6 +413,84 @@ def test_summary_v2_stabilityAssessment_strings_present(summary_v2: dict) -> Non
     for key in required:
         assert key in sa, f"stabilityAssessment.{key} 키 누락"
         assert sa[key], f"stabilityAssessment.{key}가 비어 있음"
+
+
+def test_summary_v2_stabilityAssessment_sign_counts_match_data(
+    summary_v2: dict,
+    pilot_v3_reports: dict,
+) -> None:
+    """stabilityAssessment의 '4/4'/'3/4' 표현이 실제 데이터 사인 카운트와 일치해야 한다."""
+    if not PILOT_V3_COMPLETE:
+        pytest.skip("pilot_v3 디렉터리 없음 또는 완전하지 않음 — CI 안전 스킵")
+
+    families = ["123", "124", "777", "55555"]
+    contrasts_per_family = {
+        fam: _extract_contrasts_from_reports(
+            pilot_v3_reports[fam]["AXS-003"],
+            pilot_v3_reports[fam]["AXS-009"],
+            pilot_v3_reports[fam]["AXS-004c"],
+            fam,
+        )
+        for fam in families
+    }
+
+    sa = summary_v2.get("stabilityAssessment", {})
+
+    # delta_imp: expect 4/4 positive
+    delta_imp_pos = sum(1 for f in families if contrasts_per_family[f]["delta_imp"] > 0)
+    assert delta_imp_pos == 4, f"delta_imp positive count={delta_imp_pos}, expected 4"
+    assert "4/4" in sa["delta_imp"], (
+        f"stabilityAssessment.delta_imp에 '4/4' 없음: {sa['delta_imp']!r}"
+    )
+
+    # delta_q: expect 4/4 positive
+    delta_q_pos = sum(1 for f in families if contrasts_per_family[f]["delta_q"] > 0)
+    assert delta_q_pos == 4, f"delta_q positive count={delta_q_pos}, expected 4"
+    assert "4/4" in sa["delta_q"], (
+        f"stabilityAssessment.delta_q에 '4/4' 없음: {sa['delta_q']!r}"
+    )
+
+    # delta_h: expect 4/4 positive
+    delta_h_pos = sum(1 for f in families if contrasts_per_family[f]["delta_h"] > 0)
+    assert delta_h_pos == 4, f"delta_h positive count={delta_h_pos}, expected 4"
+    assert "4/4" in sa["delta_h"], (
+        f"stabilityAssessment.delta_h에 '4/4' 없음: {sa['delta_h']!r}"
+    )
+
+    # delta_noise: expect 4/4 positive
+    delta_noise_pos = sum(1 for f in families if contrasts_per_family[f]["delta_noise"] > 0)
+    assert delta_noise_pos == 4, f"delta_noise positive count={delta_noise_pos}, expected 4"
+    assert "4/4" in sa["delta_noise"], (
+        f"stabilityAssessment.delta_noise에 '4/4' 없음: {sa['delta_noise']!r}"
+    )
+
+    # delta_alpha: expect 3/4 positive (124 reversed)
+    delta_alpha_pos = sum(1 for f in families if contrasts_per_family[f]["delta_alpha"] > 0)
+    assert delta_alpha_pos == 3, f"delta_alpha positive count={delta_alpha_pos}, expected 3"
+    assert "3/4" in sa["delta_alpha"], (
+        f"stabilityAssessment.delta_alpha에 '3/4' 없음: {sa['delta_alpha']!r}"
+    )
+    assert "124" in sa["delta_alpha"], (
+        f"stabilityAssessment.delta_alpha에 반전 family '124' 언급 없음: {sa['delta_alpha']!r}"
+    )
+
+    # strict monotone check: 124 should violate
+    monotone_violations = []
+    for fam in families:
+        fam_reports = pilot_v3_reports[fam]
+        d009 = fam_reports["AXS-009"]
+        f1 = d009["arms"]["freeze_at_1"]["perFamily"][fam]["slate_excess_nmi"]
+        fq = d009["arms"]["freeze_at_quarter"]["perFamily"][fam]["slate_excess_nmi"]
+        fh = d009["arms"]["freeze_at_half"]["perFamily"][fam]["slate_excess_nmi"]
+        fn = d009["arms"]["freeze_none"]["perFamily"][fam]["slate_excess_nmi"]
+        if not (f1 > fq > fh > fn):
+            monotone_violations.append(fam)
+    assert "124" in monotone_violations, (
+        f"family 124가 strict monotone 위반 목록에 없음: {monotone_violations}"
+    )
+    assert "124" in sa["strictMonotoneChain"], (
+        f"stabilityAssessment.strictMonotoneChain에 '124' 언급 없음: {sa['strictMonotoneChain']!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -479,51 +592,50 @@ def test_tieBreakCaveatMarker_identical_to_v1(v1: dict, v3: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# contrastLivenessEvidence per-family floats가 summary와 일치
+# contrastLivenessEvidence 4-family per-family floats가 summary와 일치
 # ---------------------------------------------------------------------------
 
 
-def test_v3_contrastLivenessEvidence_matches_summary_contrasts(
+def test_v3_contrastLivenessEvidence_has_all_4_families(v3: dict) -> None:
+    """contrastLivenessEvidence에 4개 family 값이 모두 있어야 한다."""
+    clue = v3.get("contrastLivenessEvidence", {})
+    delta_imp_pf = clue.get("deltaImpPerFamily", {})
+    delta_noise_pf = clue.get("deltaNoisePerFamily", {})
+
+    expected_families = {"123", "124", "777", "55555"}
+    assert set(delta_imp_pf.keys()) == expected_families, (
+        f"deltaImpPerFamily 키 불일치: {set(delta_imp_pf.keys())} != {expected_families}"
+    )
+    assert set(delta_noise_pf.keys()) == expected_families, (
+        f"deltaNoisePerFamily 키 불일치: {set(delta_noise_pf.keys())} != {expected_families}"
+    )
+
+
+def test_v3_contrastLivenessEvidence_matches_pilot_v3_reports(
     v3: dict,
     summary_v2: dict,
-    postfix_reports_123: dict,
-    postfix_reports_critic: dict,
+    pilot_v3_reports: dict,
 ) -> None:
-    """contrastLivenessEvidence의 per-family float가 summary v2에서 도출한 값과 일치해야 한다."""
-    if not POSTFIX_REPORTS_EXIST:
-        pytest.skip("postfix 리포트 디렉터리 없음 — CI 안전 스킵")
+    """contrastLivenessEvidence의 4-family per-family float가 pilot_v3 소스에서 도출한 값과 일치해야 한다."""
+    if not PILOT_V3_COMPLETE:
+        pytest.skip("pilot_v3 디렉터리 없음 또는 완전하지 않음 — CI 안전 스킵")
 
     clue = v3.get("contrastLivenessEvidence", {})
     delta_imp_pf = clue.get("deltaImpPerFamily", {})
     delta_noise_pf = clue.get("deltaNoisePerFamily", {})
 
-    # Recompute from source reports
-    computed_123 = _extract_contrasts_from_reports(
-        postfix_reports_123["AXS-003"],
-        postfix_reports_123["AXS-009"],
-        postfix_reports_123["AXS-004c"],
-        "123",
-    )
-    computed_55555 = _extract_contrasts_from_reports(
-        postfix_reports_critic["AXS-003"],
-        postfix_reports_critic["AXS-009"],
-        postfix_reports_critic["AXS-004c"],
-        "55555",
-    )
-
-    assert delta_imp_pf.get("123") == computed_123["delta_imp"], (
-        f"deltaImpPerFamily[123] 불일치: "
-        f"저장됨={delta_imp_pf.get('123')!r}, 계산됨={computed_123['delta_imp']!r}"
-    )
-    assert delta_imp_pf.get("55555") == computed_55555["delta_imp"], (
-        f"deltaImpPerFamily[55555] 불일치: "
-        f"저장됨={delta_imp_pf.get('55555')!r}, 계산됨={computed_55555['delta_imp']!r}"
-    )
-    assert delta_noise_pf.get("123") == computed_123["delta_noise"], (
-        f"deltaNoisePerFamily[123] 불일치: "
-        f"저장됨={delta_noise_pf.get('123')!r}, 계산됨={computed_123['delta_noise']!r}"
-    )
-    assert delta_noise_pf.get("55555") == computed_55555["delta_noise"], (
-        f"deltaNoisePerFamily[55555] 불일치: "
-        f"저장됨={delta_noise_pf.get('55555')!r}, 계산됨={computed_55555['delta_noise']!r}"
-    )
+    for family in ["123", "124", "777", "55555"]:
+        computed = _extract_contrasts_from_reports(
+            pilot_v3_reports[family]["AXS-003"],
+            pilot_v3_reports[family]["AXS-009"],
+            pilot_v3_reports[family]["AXS-004c"],
+            family,
+        )
+        assert delta_imp_pf.get(family) == computed["delta_imp"], (
+            f"deltaImpPerFamily[{family}] 불일치: "
+            f"저장됨={delta_imp_pf.get(family)!r}, 계산됨={computed['delta_imp']!r}"
+        )
+        assert delta_noise_pf.get(family) == computed["delta_noise"], (
+            f"deltaNoisePerFamily[{family}] 불일치: "
+            f"저장됨={delta_noise_pf.get(family)!r}, 계산됨={computed['delta_noise']!r}"
+        )
