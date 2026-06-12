@@ -1,0 +1,23 @@
+{
+  "H": 8,
+  "configHash": "2ae6954717d661d9a02c6337d8db0b60d2ec9dba8d486a8a08141811fe2e2609",
+  "derivation": "deterministic from pilot config + seed: mean per-round slate bonus of axs_ucb_default over EXPANDED_PROBE_SET on pilot family 999",
+  "k": 4,
+  "perRoundBonus": [
+    2.00377143399275,
+    1.1608630583247859,
+    1.2243306405014642,
+    0.7492536328180001,
+    0.6587351501199287,
+    0.61755447996375,
+    0.5797926195987143,
+    0.5774673674993572
+  ],
+  "pilotFamily": "999",
+  "pool_size": 64,
+  "preregId": "axs-mechanism",
+  "preregVersion": 1,
+  "referenceArm": "axs_ucb_default",
+  "scheduleHash": "07e8d902dea4f8a98ec0d354157a7f17636c1fe4ef2a50b4655fc9d1202aa354",
+  "scheduleId": "axs-004c-yoked-v1"
+}
