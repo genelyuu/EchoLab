@@ -171,7 +171,17 @@ def _check_prereg_status(prereg: Dict[str, Any]) -> Dict[str, Any]:
                 "v2 이상은 status='registered' 가 명시되어야 함 (fail closed)"
             ),
         }
-    # version 1: 하위 호환 허용
+    # version 1 + status 없음: v3 실험 ID 가 있으면 버전 위장 우회 차단
+    if _is_v3_prereg(prereg):
+        return {
+            "check": "prereg_status",
+            "ok": False,
+            "detail": (
+                "v3 실험 구조 prereg는 명시적 status=='registered' 필수 — "
+                "버전 위장 우회 차단 (version=1 + status 없음으로 grandfather 조항 우회 불가)"
+            ),
+        }
+    # version 1, v3 아님: 하위 호환 허용
     return {
         "check": "prereg_status",
         "ok": True,
@@ -762,10 +772,18 @@ def _check_acceptance_recomputed_v3(
             # 이차 대비 (M2 비차단, 정보 공개용)
             for sec_name, arm_id_sec in [("delta_q", "freeze_at_quarter"), ("delta_h", "freeze_at_half")]:
                 arm_sec = arms_imp.get(arm_id_sec) or {}
-                sec_delta, sec_err = _compute_delta_from_arms(
-                    arm_sec, arm_freeze_none, metric, eval_fams
-                )
-                if sec_err is None and sec_delta is not None:
+                try:
+                    sec_delta, sec_err = _compute_delta_from_arms(
+                        arm_sec, arm_freeze_none, metric, eval_fams
+                    )
+                except Exception as exc:
+                    sec_err = str(exc)
+                    sec_delta = None
+                if sec_err is not None:
+                    details.append(
+                        f"AXS-IMP-001 {sec_name} 재계산 불가: {sec_err} (정보 공개, M2 비차단)"
+                    )
+                elif sec_delta is not None:
                     sec_pos = sum(1 for v in sec_delta.values() if v > 0)
                     details.append(
                         f"AXS-IMP-001 {sec_name} 이차 부호: {sec_pos}/{len(sec_delta)} 양수 (정보 공개, M2 비차단)"
@@ -808,14 +826,25 @@ def _check_acceptance_recomputed_v3(
                 )
 
             # yokedAbsence 이차 공개 (M2 비차단)
-            yoked_pos = sum(1 for v in delta_noise_vals.values() if v < 0)  # yoked > default
-            agg_noise = aggregate_values(
-                [delta_noise_vals[k] for k in sorted(delta_noise_vals.keys())],
-                key="delta_noise",
+            # yokedAbsence: yoked arm 자체의 분리성이 없음
+            # = axs_yoked_bonus perFamily[metric] > 0 인 패밀리 수 < min_consistent
+            #   OR yoked bootstrap[metric].ciLower <= ci_bound
+            pf_yoked = arm_yoked.get("perFamily") or {}
+            yoked_sep_pos = sum(
+                1 for fam in eval_fams
+                if _strict_number((pf_yoked.get(fam) or {}).get(metric))
+                and (pf_yoked.get(fam) or {}).get(metric, 0) > 0
             )
-            # yokedAbsence: axs_yoked_bonus sep NOT >0 in >=4/5 OR ciLower<=0
-            # i.e. delta_noise < 0 이거나 ci_low <= 0 → yoked_absence
-            yoked_absence = (yoked_pos >= min_consistent) or (agg_noise["ci_low"] <= ci_bound)
+            yoked_ci_lower = (
+                (arm_yoked.get("bootstrap") or {})
+                .get(metric, {})
+                .get("ciLower")
+            )
+            yoked_absence = (yoked_sep_pos < min_consistent) or (
+                yoked_ci_lower is None
+                or not _strict_number(yoked_ci_lower)
+                or yoked_ci_lower <= ci_bound
+            )
             details.append(
                 f"AXS-NOISE-001 yokedAbsence 이차: {'확인' if yoked_absence else '미확인'} (정보 공개, M2 비차단)"
             )
@@ -1437,7 +1466,16 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     print(f"\n모든 검사 통과 ({len(checks)}건)")
     print(f"라이선스 감사 로그 작성 완료: {out_path}")
-    print("ladder_gate 심사 완료: 증거 충분")
+    branch = result.get("branch")
+    if branch is not None:
+        m2_val = rungs["M2"]
+        print(f"심사 완료: branch={branch!r}, M2={m2_val}")
+        if m2_val:
+            print("ladder_gate 심사 완료: 증거 충분")
+        else:
+            print("ladder_gate 심사 완료: M2 미충족 (branch 참조)")
+    else:
+        print("ladder_gate 심사 완료: 증거 충분")
     return 0
 
 
