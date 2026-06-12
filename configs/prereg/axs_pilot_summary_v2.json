@@ -1,0 +1,128 @@
+{
+  "summaryId": "axs-pilot-summary-v2",
+  "supersedesSummary": {
+    "summaryId": "axs-p0-pilot-summary-v1",
+    "path": "configs/prereg/axs_p0_pilot_summary_v1.json",
+    "reason": "Measurements in v1 summary were taken through a harness path that silently dropped policy config (alpha/freeze/tie-break manipulations never applied); v1 summary parity counts are therefore artifacts and its interpretive value is void; the file is retained unmodified for audit."
+  },
+  "bugRecord": {
+    "description": "run_round passes per-call {\"k\": k} and AxsUcbPolicy/AxsYokedBonusPolicy.select resolved effective = config if config is not None else self.config, replacing the constructor config with the bare per-call dict, so alpha/freeze_round/ctx_freeze_round/tie_break_order manipulations were never applied through the harness.",
+    "detectedBy": "adversarial spec-review probe of commit 6217c6a",
+    "fixCommit": "b7b64b42350bb424999569138b373b189c8704b1",
+    "fix": "merge semantics {**self.config, **(config or {})} + 9 run_episode integration regression tests + mutant verification",
+    "frozenPoliciesUnaffected": "E2/E3 frozen policies yaml configs equal code defaults, so the config-drop was behaviorally inert for frozen evidence"
+  },
+  "postFixStructuralProbe": {
+    "families": ["124", "777", "55555"],
+    "variants": ["alpha0", "alpha5", "freeze_at_1"],
+    "probesPerFamily": 7,
+    "variantEpisodes": 63,
+    "discordantWithDefault": 63,
+    "note": "After the fix every variant episode differs from default (was 3/63 before the fix)."
+  },
+  "postFixPilot": {
+    "123": {
+      "AXS-003": {
+        "reportHash": "79412f35844a592341ba350112f334373c36686bfe4465b796b9d3a9584e5d23",
+        "reportPath": "outputs/reports/pilot_123_postfix/axs_003_d61d7a9deb3a.json",
+        "axs_ucb_default_bootstrap_slate_excess_nmi_mean": 0.03449752763878505,
+        "axs_ucb_alpha0_bootstrap_slate_excess_nmi_mean": 0.10738573603488366
+      },
+      "AXS-009": {
+        "reportHash": "66cdc3ecfc32724c86d50d4c2a2968e77f33bd931d1f196bbd0d08478b32a963",
+        "reportPath": "outputs/reports/pilot_123_postfix/axs_009_8ad25bd9d213.json",
+        "freeze_at_1_slate_excess_nmi_mean": 0.48111728771693374,
+        "freeze_at_quarter_slate_excess_nmi_mean": 0.06393951874337278,
+        "freeze_at_half_slate_excess_nmi_mean": 0.060144589776150725,
+        "freeze_none_slate_excess_nmi_mean": 0.03449752763878505,
+        "freeze_at_1_post_freeze_incremental_divergence_mean": 0.48111728771693374,
+        "freeze_at_quarter_post_freeze_incremental_divergence_mean": 0.10739983438591116,
+        "freeze_at_half_post_freeze_incremental_divergence_mean": 0.12011024704209022,
+        "freeze_none_post_freeze_incremental_divergence_mean": 0.0
+      },
+      "AXS-004c": {
+        "reportHash": "7d1254a6eec4f689f9e029af19c4f8eebc21c4ec2ef42e07fa716e9f44596cc0",
+        "reportPath": "outputs/reports/pilot_123_postfix/axs_004c_1409ca86d2cb.json",
+        "axs_ucb_default_bootstrap_slate_excess_nmi_mean": 0.03449752763878505,
+        "axs_yoked_bonus_bootstrap_slate_excess_nmi_mean": -0.08011227889140626
+      },
+      "AXS-010": {
+        "reportHash": "ea644759bca787119126456988c65513734829234a70443ce460dd8cbe11694c",
+        "reportPath": "outputs/reports/pilot_123_postfix/axs_010_dc2f37503f35.json",
+        "baseline_estimate": 0.03449752763878505,
+        "canonical_estimate": 0.03449752763878505,
+        "reverse_estimate": 0.03449752763878505,
+        "hash_seeded_estimate": 0.03449752763878505,
+        "feature_lexicographic_estimate": 0.03449752763878505
+      },
+      "delta_imp": 0.4466197600781487,
+      "delta_q": 0.029441991104587728,
+      "delta_h": 0.025647062137365673,
+      "delta_noise": 0.11460980653019132,
+      "delta_alpha": 0.07288820839609861
+    },
+    "55555": {
+      "AXS-003": {
+        "reportHash": "b81c839c9ecc662e071c50edac592c99e8b9e51da1d8f5bf8a19d761e68d0570",
+        "reportPath": "outputs/reports/pilot_critic_postfix/axs_003_d61d7a9deb3a.json",
+        "axs_ucb_default_bootstrap_slate_excess_nmi_mean": 0.07125540720015039,
+        "axs_ucb_alpha0_bootstrap_slate_excess_nmi_mean": 0.18490546583583994
+      },
+      "AXS-009": {
+        "reportHash": "26670de7aff7104155922d3668460ae4bc98964749c956b7771990d1a6c5c4ab",
+        "reportPath": "outputs/reports/pilot_critic_postfix/axs_009_8ad25bd9d213.json",
+        "freeze_at_1_slate_excess_nmi_mean": 0.31638628049343465,
+        "freeze_at_quarter_slate_excess_nmi_mean": 0.17518584383453845,
+        "freeze_at_half_slate_excess_nmi_mean": 0.13862559062066898,
+        "freeze_none_slate_excess_nmi_mean": 0.07125540720015039,
+        "freeze_at_1_post_freeze_incremental_divergence_mean": 0.31638628049343465,
+        "freeze_at_quarter_post_freeze_incremental_divergence_mean": 0.29839079491433956,
+        "freeze_at_half_post_freeze_incremental_divergence_mean": 0.18076746347355338,
+        "freeze_none_post_freeze_incremental_divergence_mean": 0.0
+      },
+      "AXS-004c": {
+        "reportHash": "0ba8ecc076922b7b7d542864a41bbe16e044c07722e7ffb941245b28ac3e85fc",
+        "reportPath": "outputs/reports/pilot_critic_postfix/axs_004c_1409ca86d2cb.json",
+        "axs_ucb_default_bootstrap_slate_excess_nmi_mean": 0.07125540720015039,
+        "axs_yoked_bonus_bootstrap_slate_excess_nmi_mean": -0.1388306254191778
+      },
+      "AXS-010": {
+        "reportHash": "7e1c10610b1d3247c2570a45bc0fd1e31255976b07a0fee3c493112fba37809e",
+        "reportPath": "outputs/reports/pilot_critic_postfix/axs_010_dc2f37503f35.json",
+        "baseline_estimate": 0.07125540720015039,
+        "canonical_estimate": 0.07125540720015039,
+        "reverse_estimate": 0.07125540720015039,
+        "hash_seeded_estimate": 0.07125540720015039,
+        "feature_lexicographic_estimate": 0.07125540720015039
+      },
+      "delta_imp": 0.24513087329328426,
+      "delta_q": 0.10393043663438806,
+      "delta_h": 0.06737018342051859,
+      "delta_noise": 0.21008603261932818,
+      "delta_alpha": 0.11365005863568955
+    }
+  },
+  "stabilityAssessment": {
+    "delta_imp": "positive 4/4",
+    "delta_q": "positive 4/4",
+    "delta_h": "positive 4/4",
+    "strictMonotoneChain": "violated in family 124 (quarter > freeze_at_1) — 3/4; excluded from confirmatory rules",
+    "delta_noise": "positive 4/4; yoked negative 4/4",
+    "tieBreakInvariance": "identical estimates across 4 orders in 4/4 families",
+    "delta_alpha": "heterogeneous 3/4 positive, reversed in family 124 — excluded from confirmatory claims"
+  },
+  "reproduction": {
+    "note": "Post-fix re-pilot: run each experiment with base seed 123 for family 123, then loop over critic families (124, 777, 55555). replay-mode none skips inline recompute for diagnostic runs.",
+    "runCommit": "b7b64b42350bb424999569138b373b189c8704b1",
+    "commands": [
+      "python -m echo_bench.experiments.axs_003_alpha_kill --base-seeds 123 --replay-mode none --reports-dir outputs/reports/pilot_123_postfix",
+      "python -m echo_bench.experiments.axs_009_freeze --base-seeds 123 --replay-mode none --reports-dir outputs/reports/pilot_123_postfix",
+      "python -m echo_bench.experiments.axs_004c_yoked --base-seeds 123 --replay-mode none --reports-dir outputs/reports/pilot_123_postfix",
+      "python -m echo_bench.experiments.axs_010_tiebreak --base-seeds 123 --replay-mode none --reports-dir outputs/reports/pilot_123_postfix",
+      "for seed in 124 777 55555; do python -m echo_bench.experiments.axs_003_alpha_kill --base-seeds $seed --replay-mode none --reports-dir outputs/reports/pilot_critic_postfix; done",
+      "for seed in 124 777 55555; do python -m echo_bench.experiments.axs_009_freeze --base-seeds $seed --replay-mode none --reports-dir outputs/reports/pilot_critic_postfix; done",
+      "for seed in 124 777 55555; do python -m echo_bench.experiments.axs_004c_yoked --base-seeds $seed --replay-mode none --reports-dir outputs/reports/pilot_critic_postfix; done",
+      "for seed in 124 777 55555; do python -m echo_bench.experiments.axs_010_tiebreak --base-seeds $seed --replay-mode none --reports-dir outputs/reports/pilot_critic_postfix; done"
+    ]
+  }
+}

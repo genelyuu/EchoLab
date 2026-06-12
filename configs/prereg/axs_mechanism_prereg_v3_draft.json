@@ -1,0 +1,196 @@
+{
+  "preregId": "axs-mechanism",
+  "version": 3,
+  "title": "AXS mechanism preregistration v3 draft — imprint-washout",
+  "status": "design-draft",
+  "bindingNote": "DESIGN DRAFT — not a registered preregistration. The evidence gate must refuse any prereg whose status is not 'registered'. Committed only to hash-pin the design and liveness criteria.",
+  "supersedes": "axs-mechanism v1 (registered, never consumed) and v2 design-draft (never registered)",
+  "changeJustification": [
+    "The v1 pilot that motivated the v2 entry-point-ablation draft was invalidated by a config-drop harness bug: run_round passed per-call {\"k\": k} and AxsUcbPolicy/AxsYokedBonusPolicy.select resolved effective = config if config is not None else self.config, replacing constructor config; alpha/freeze/tie-break manipulations were therefore never applied; fixed in b7b64b42350bb424999569138b373b189c8704b1.",
+    "Post-fix re-pilot on 4 non-evaluation critic families (123, 124, 777, 55555) shows all v1 contrasts are behaviorally live after the fix.",
+    "The robust cross-family phenomena confirmed in the post-fix pilot are: early-freeze imprint amplification (delta_imp positive 4/4, large), trace-independent-noise destruction (delta_noise positive 4/4, yoked negative 4/4), tie-break invariance (4/4).",
+    "The alpha contrast is family-heterogeneous (3/4 positive, reversed in one family) and is therefore registered as exploratory-only with no claim license.",
+    "Strict monotone freeze ordering is violated in one critic family (family 124: quarter > freeze_at_1) and is deliberately NOT registered as a confirmatory rule.",
+    "v3 reframes the central hypothesis as imprint-washout; evaluation families remain untouched."
+  ],
+  "scope": {
+    "testbed": "ECHO-Bench controlled procedural k-slate testbed",
+    "policyFamilies": ["AXS UCB variants (new IDs; C-011 frozen set untouched)"],
+    "requiredScopeMarkers": ["within the tested policy families", "in this controlled testbed"]
+  },
+  "primaryEndpoint": {
+    "metric": "slate_excess_nmi",
+    "aggregation": "cross_family_paired_delta"
+  },
+  "confirmatoryEndpoints": ["selection_excess_nmi", "combined_excess_nmi"],
+  "utilityGuard": {
+    "metric": "coordinate_coverage",
+    "rule": "arm_mean >= RANDOM_mean"
+  },
+  "pairedUnit": "seed_family",
+  "evaluationFamilies": ["42", "7", "101", "2025", "31337"],
+  "signRule": {
+    "minConsistentFamilies": 4,
+    "totalFamilies": 5
+  },
+  "ciRule": {
+    "method": "cross_family_seeded_bootstrap",
+    "lowerBoundMustExceed": 0.0
+  },
+  "noPValues": true,
+  "minSufficientFamilies": 3,
+  "tieBreakCaveatMarker": "subject to a tie-breaking sensitivity caveat (AXS-010 soft_pass)",
+  "yokedSchedule": {
+    "pilotFamily": "999",
+    "referenceArm": "axs_ucb_default",
+    "derivation": "deterministic from pilot config + seed",
+    "scheduleArtifactPath": "configs/prereg/axs_004c_yoked_schedule_v1.json",
+    "v3Note": "reused by AXS-NOISE-001; derived from held-out pilot family 999; evaluation families untouched by its derivation"
+  },
+  "designContaminatedFamilies": ["123", "124", "777", "55555"],
+  "pilotSummaryRef": {
+    "path": "configs/prereg/axs_pilot_summary_v2.json",
+    "summaryHash": "ddcce0beb70d244a60689f0014bd66f647a417e2846fa0f5022f421bef939a6b"
+  },
+  "experiments": {
+    "AXS-IMP-001": {
+      "arms": ["freeze_at_1", "freeze_at_quarter", "freeze_at_half", "freeze_none"],
+      "armConfigs": {
+        "freeze_at_1": {"freeze_round": 1},
+        "freeze_at_quarter": {"freeze_round": "max(1, H//4)"},
+        "freeze_at_half": {"freeze_round": "max(1, H//2)"},
+        "freeze_none": {"freeze_round": null}
+      },
+      "primaryContrast": {
+        "name": "delta_imp",
+        "definition": "per-family sep(freeze_at_1) minus sep(freeze_none)",
+        "acceptance": "sign positive in >=4/5 families AND cross_family_seeded_bootstrap ciLower > 0",
+        "gateComputes": true,
+        "reportDeltasIgnored": true
+      },
+      "secondaryContrasts": [
+        {
+          "name": "delta_q",
+          "definition": "per-family sep(freeze_at_quarter) minus sep(freeze_none)",
+          "rule": "sign positive in >=4/5 families"
+        },
+        {
+          "name": "delta_h",
+          "definition": "per-family sep(freeze_at_half) minus sep(freeze_none)",
+          "rule": "sign positive in >=4/5 families"
+        }
+      ],
+      "strictMonotoneChainNote": "NOT registered: violated in critic family 124 (quarter > freeze_at_1; see pilot summary v2); registering a rule already known to fail one critic family would be dishonest.",
+      "utilityGuard": {
+        "metric": "coordinate_coverage",
+        "rule": "arm_mean >= RANDOM_mean",
+        "degenerateTripleObligation": "must report degenerate, degenerateReason, includedInMechanismClaim for each arm"
+      }
+    },
+    "AXS-NOISE-001": {
+      "arms": ["axs_ucb_default", "axs_yoked_bonus"],
+      "primaryContrast": {
+        "name": "delta_noise",
+        "definition": "per-family sep(axs_ucb_default) minus sep(axs_yoked_bonus)",
+        "acceptance": "sign positive in >=4/5 families AND cross_family_seeded_bootstrap ciLower > 0"
+      },
+      "secondaryContrast": {
+        "yokedAbsence": "axs_yoked_bonus sep not >0 in >=4/5 families OR ciLower <= 0"
+      }
+    },
+    "AXS-TB-001": {
+      "target": "delta_imp conclusion invariance over tie-break order",
+      "pair": ["freeze_at_1", "freeze_none"],
+      "baselineScheme": "canonical",
+      "variants": ["reverse", "hash_seeded", "feature_lexicographic"],
+      "decision": {
+        "strict_pass": "sign unchanged AND within baseline 95% CI",
+        "soft_pass": "sign+track unchanged, outside CI -> caveat",
+        "fail": "sign flip or track change"
+      }
+    },
+    "AXS-ALPHA-EXP": {
+      "arms": ["axs_ucb_default", "axs_ucb_alpha0"],
+      "exploratory": true,
+      "noClaimLicense": true,
+      "note": "Family-heterogeneous in critic pilot (reversed in 124); reported for the record, licenses no claim at any rung; ledger registration still required (no silent burial)."
+    }
+  },
+  "branches": [
+    {
+      "name": "imprint_washout_supported",
+      "condition": "delta_imp pass AND delta_noise pass AND freeze_at_1 and axs_ucb_default non-degenerate",
+      "licensedClaim": "Within the tested policy families in this controlled testbed, above-null slate separability is amplified when trace-conditioned policy state is frozen early in the horizon and is eliminated by trace-independent bonus randomization; continual trace-conditioned updates attenuate but do not eliminate it."
+    },
+    {
+      "name": "imprint_only",
+      "condition": "delta_imp pass AND delta_noise fail",
+      "licensedClaim": "Within the tested policy families in this controlled testbed, above-null slate separability is amplified when trace-conditioned policy state is frozen early in the horizon; the noise washout contrast was not confirmed."
+    },
+    {
+      "name": "noise_only",
+      "condition": "delta_imp fail AND delta_noise pass",
+      "licensedClaim": "Within the tested policy families in this controlled testbed, above-null slate separability is eliminated by trace-independent bonus randomization; the freeze-imprint contrast was not confirmed."
+    },
+    {
+      "name": "degenerate_qualified",
+      "condition": "primary contrast passes but a required arm is degenerate",
+      "licensedClaim": "Contrast passes under the utility guard but a required arm is degenerate; claim is jointly qualified and weakened to the non-degenerate subset within the tested policy families in this controlled testbed."
+    },
+    {
+      "name": "no_claim_m1_only",
+      "condition": "sign consistency <=3/5 families or other acceptance criteria unmet",
+      "licensedClaim": "No claim at any rung above M1 within the tested policy families in this controlled testbed."
+    },
+    {
+      "name": "integrity_fail",
+      "condition": "any gate check failure",
+      "licensedClaim": "All claims blocked; gate check failure detected — no mechanism claim may be issued."
+    }
+  ],
+  "branchCountFrozen": true,
+  "claimTransitions": {
+    "M2": {
+      "requiresPass": ["AXS-IMP-001", "AXS-NOISE-001"],
+      "requiredBranch": ["imprint_washout_supported"],
+      "requiresInvariance": "AXS-TB-001 >= soft_pass",
+      "softPassRequiresCaveatMarker": true,
+      "scopeMarkersRequired": true,
+      "exploratoryExclusion": "AXS-ALPHA-EXP licenses no claim"
+    },
+    "M3": {
+      "requires": "M2 + AXS-001 full alpha sweep + anchor validation"
+    }
+  },
+  "contrastLivenessEvidence": {
+    "source": "post-fix critic re-pilot (families 123 and 55555 with report data) = pilot summary v2",
+    "deltaImpPerFamily": {
+      "123": 0.4466197600781487,
+      "55555": 0.24513087329328426
+    },
+    "deltaNoisePerFamily": {
+      "123": 0.11460980653019132,
+      "55555": 0.21008603261932818
+    },
+    "allConfirmatoryContrastsDifferentiated": true,
+    "criterionNote": "Every confirmatory contrast differentiates in available critic families with paired deltas far exceeding measurement granularity."
+  },
+  "livenessCriteria": {
+    "residualChecksBeforeRegistration": [
+      "H=16 spot check on one critic family preserves delta_imp and delta_noise signs",
+      "branch reachability: extract coverage/degenerate flags from post-fix reports to confirm strong branch is reachable"
+    ],
+    "criticFamilies": ["123", "124", "777", "55555"],
+    "ledgerRegistration": false
+  },
+  "degenerateArmPolicy": {
+    "mustReport": true,
+    "requiredFields": ["degenerate", "degenerateReason", "includedInMechanismClaim"],
+    "silentOmissionFails": true
+  },
+  "amendmentPolicy": {
+    "supersedesRequired": true,
+    "changeJustificationRequired": true,
+    "retroactiveApplication": false
+  }
+}
