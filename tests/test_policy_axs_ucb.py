@@ -1874,3 +1874,222 @@ class TestV2GoldenSlateRegression:
         assert s == ["c15", "c14", "c13", "c12"], (
             f"Golden a5 (trace_free+ctx0+fr0): expected ['c15','c14','c13','c12'], got {s}"
         )
+
+
+# ---------------------------------------------------------------------------
+# 23. Integration through run_episode — config-drop 봉쇄 회귀 테스트 (AXS-V2 수정)
+# ---------------------------------------------------------------------------
+# run_round 는 policy.select(pool, trace, seed, {"k": k}) 형태로 호출한다.
+# config-drop 버그: per-call config 가 self.config 를 완전히 대체하면 alpha·
+# freeze_round·ctx_freeze_round·tie_break_order 실험 심이 모두 코드 기본값으로
+# 폴백된다. 수정 후에는 {**self.config, **per_call} 병합 방식으로 심이 보존된다.
+#
+# 각 하위 테스트는 서로 다른 seam 이 하네스를 통해 실제로 작동하는지를 검증한다.
+# pool: _make_pool(16), k=4, H=3, seed=42 (별도 명시 없으면)
+#
+# PINNED post-fix 값 (이 값을 변경하려면 명시적 재기준화 + 설명 필요):
+#   alpha=0.0 traceHash: 1d3341d8da122f48a4f4ebe44d2f657a20b87b36077fcd1c636a923811f1d915
+#   alpha=1.0 traceHash: 12539debf3ebc8891993373a792a154c07e2dd910d9c37d7ab7520a200b400cd
+# ---------------------------------------------------------------------------
+
+from echo_bench.env.round_runner import run_episode  # noqa: E402 — needed here for class-level import
+
+
+class TestRunEpisodeConfigDropRegression:
+    """Integration tests that prove each experimental seam reaches run_episode."""
+
+    _POOL = _make_pool(16)
+    _SEED = 42
+
+    def _pool(self):
+        return _make_pool(16)
+
+    # ------------------------------------------------------------------
+    # (a) alpha seam: alpha=0.0 vs alpha=1.0 through run_episode → traces DIFFER
+    # ------------------------------------------------------------------
+    def test_alpha_seam_through_run_episode(self):
+        """alpha seam reaches run_episode: alpha=0.0 and alpha=1.0 must produce
+        different traceHashes. Before the fix all alpha values collapsed to
+        DEFAULT_ALPHA=1.0 so traces were identical.
+        """
+        pool = self._pool()
+        p_a0 = AxsUcbPolicy({"k": 4, "alpha": 0.0})
+        p_a1 = AxsUcbPolicy({"k": 4, "alpha": 1.0})
+        tr0 = run_episode(pool, p_a0, seed=self._SEED, H=3, k=4, bases_cfg={})
+        tr1 = run_episode(pool, p_a1, seed=self._SEED, H=3, k=4, bases_cfg={})
+        assert tr0.trace_hash() != tr1.trace_hash(), (
+            "alpha=0.0 vs alpha=1.0 must produce different traceHashes through "
+            f"run_episode; both got {tr0.trace_hash()[:16]!r}"
+        )
+        # Pinned regression values (fail if these change without re-baseline).
+        assert tr0.trace_hash() == "1d3341d8da122f48a4f4ebe44d2f657a20b87b36077fcd1c636a923811f1d915", (
+            f"alpha=0.0 traceHash pin failed: got {tr0.trace_hash()!r}"
+        )
+        assert tr1.trace_hash() == "12539debf3ebc8891993373a792a154c07e2dd910d9c37d7ab7520a200b400cd", (
+            f"alpha=1.0 traceHash pin failed: got {tr1.trace_hash()!r}"
+        )
+
+    # ------------------------------------------------------------------
+    # (b) tie_break_order seam: trace_free vs canonical on a tied pool
+    # ------------------------------------------------------------------
+    def test_tie_break_order_seam_through_run_episode(self):
+        """tie_break_order seam reaches run_episode: trace_free and canonical
+        must produce different traceHashes on a tied pool.
+        """
+        tied_pool = _make_tied_pool()
+        p_tf = AxsUcbPolicy({"k": 4, "tie_break_order": "trace_free"})
+        p_can = AxsUcbPolicy({"k": 4, "tie_break_order": "canonical"})
+        tr_tf = run_episode(tied_pool, p_tf, seed=7, H=3, k=4, bases_cfg={})
+        tr_can = run_episode(tied_pool, p_can, seed=7, H=3, k=4, bases_cfg={})
+        assert tr_tf.trace_hash() != tr_can.trace_hash(), (
+            "tie_break_order seam must differentiate traces through run_episode; "
+            f"trace_free={tr_tf.trace_hash()[:16]!r}, canonical={tr_can.trace_hash()[:16]!r}"
+        )
+
+    # ------------------------------------------------------------------
+    # (c) ctx_freeze_round seam: A5 trace-blindness through run_episode
+    # Two different select_fns → identical slate sequences (trace-blind)
+    # ------------------------------------------------------------------
+    def test_ctx_freeze_a5_trace_blindness_through_run_episode(self):
+        """A5 (ctx_freeze_round=0 + freeze_round=0 + trace_free) is trace-blind
+        through run_episode: two different select_fns produce identical slate
+        sequences regardless of which card is selected (slate composition depends
+        only on pool+seed+roundIndex, not on the accumulated selection history).
+        """
+        pool = self._pool()
+        cfg_a5 = {
+            "k": 4,
+            "tie_break_order": "trace_free",
+            "ctx_freeze_round": 0,
+            "freeze_round": 0,
+        }
+        p_first = AxsUcbPolicy(cfg_a5)
+        p_last = AxsUcbPolicy(cfg_a5)
+
+        # Two instrumented select_fns that always pick different slots.
+        def select_first(slate_dicts, trace, seed):
+            return slate_dicts[0]["cardId"]
+
+        def select_last(slate_dicts, trace, seed):
+            return slate_dicts[-1]["cardId"]
+
+        tr_first = run_episode(pool, p_first, seed=7, H=3, k=4, bases_cfg={},
+                               select_fn=select_first)
+        tr_last = run_episode(pool, p_last, seed=7, H=3, k=4, bases_cfg={},
+                              select_fn=select_last)
+
+        slates_first = [r["slate"] for r in tr_first.rounds()]
+        slates_last = [r["slate"] for r in tr_last.rounds()]
+        assert slates_first == slates_last, (
+            "A5 slate sequences must be identical regardless of select_fn; "
+            f"first={slates_first}, last={slates_last}"
+        )
+
+    # ------------------------------------------------------------------
+    # (d) freeze_round seam: freeze_round=0 vs None through run_episode
+    # ------------------------------------------------------------------
+    def test_freeze_round_seam_through_run_episode(self):
+        """freeze_round seam reaches run_episode: freeze_round=0 and
+        freeze_round=None must produce different traceHashes.
+        """
+        pool = self._pool()
+        p_fr0 = AxsUcbPolicy({"k": 4, "freeze_round": 0})
+        p_frN = AxsUcbPolicy({"k": 4, "freeze_round": None})
+        tr_fr0 = run_episode(pool, p_fr0, seed=self._SEED, H=3, k=4, bases_cfg={})
+        tr_frN = run_episode(pool, p_frN, seed=self._SEED, H=3, k=4, bases_cfg={})
+        assert tr_fr0.trace_hash() != tr_frN.trace_hash(), (
+            "freeze_round=0 vs None must produce different traceHashes through "
+            f"run_episode; fr0={tr_fr0.trace_hash()[:16]!r}, "
+            f"frN={tr_frN.trace_hash()[:16]!r}"
+        )
+
+    # ------------------------------------------------------------------
+    # (e) per-call k still overrides: policy with k=4, direct select with k=2
+    # ------------------------------------------------------------------
+    def test_per_call_k_overrides_constructor_k(self):
+        """per-call {'k': 2} must override constructor k=4 (merge semantics:
+        per-call keys win). This is the intended run_round usage pattern.
+        """
+        pool = self._pool()
+        p = AxsUcbPolicy({"k": 4})
+        # Need ≥2 distinct bases in pool[:8] — guaranteed by _make_pool (4 bases).
+        slate = p.select(pool[:8], TraceState(), 42, config={"k": 2})
+        assert len(slate) == 2, (
+            f"per-call k=2 must override constructor k=4; got slate length {len(slate)}"
+        )
+
+    # ------------------------------------------------------------------
+    # Yoked guards preserved: identical per-call values accepted; changed rejected
+    # ------------------------------------------------------------------
+    def test_yoked_guard_identical_per_call_values_accepted(self, tmp_path):
+        """After merge fix: per-call keys with IDENTICAL values to self.config
+        must be accepted (they are harmless).
+        """
+        sched_path = _make_yoked_schedule(tmp_path)
+        body = json.loads(sched_path.read_text())
+        cfg = {
+            "k": 4,
+            "schedule_path": str(sched_path),
+            "schedule_hash": body["scheduleHash"],
+        }
+        policy = AxsYokedBonusPolicy(cfg)
+        pool = _make_pool()
+        # Same schedule_path and schedule_hash as self.config → must NOT raise.
+        s = policy.select(pool, TraceState(), 7, config=dict(cfg))
+        assert len(s) == 4
+
+    def test_yoked_guard_changed_schedule_path_raises(self, tmp_path):
+        """After merge fix: per-call schedule_path differing from self.config → raises."""
+        sched_path = _make_yoked_schedule(tmp_path)
+        body = json.loads(sched_path.read_text())
+        cfg = {
+            "k": 4,
+            "schedule_path": str(sched_path),
+            "schedule_hash": body["scheduleHash"],
+        }
+        policy = AxsYokedBonusPolicy(cfg)
+        pool = _make_pool()
+        with pytest.raises(ValueError) as exc_info:
+            policy.select(pool, TraceState(), 7,
+                          config={**cfg, "schedule_path": "/different/path.json"})
+        msg = str(exc_info.value)
+        assert any(ord(c) > 127 for c in msg), f"Expected Korean error, got: {msg!r}"
+
+    def test_yoked_guard_changed_schedule_hash_raises(self, tmp_path):
+        """After merge fix: per-call schedule_hash differing from self.config → raises."""
+        sched_path = _make_yoked_schedule(tmp_path)
+        body = json.loads(sched_path.read_text())
+        cfg = {
+            "k": 4,
+            "schedule_path": str(sched_path),
+            "schedule_hash": body["scheduleHash"],
+        }
+        policy = AxsYokedBonusPolicy(cfg)
+        pool = _make_pool()
+        with pytest.raises(ValueError) as exc_info:
+            policy.select(pool, TraceState(), 7,
+                          config={**cfg, "schedule_hash": "different_hash_value"})
+        msg = str(exc_info.value)
+        assert any(ord(c) > 127 for c in msg), f"Expected Korean error, got: {msg!r}"
+
+    def test_yoked_guard_changed_tie_break_order_raises(self, tmp_path):
+        """After merge fix: per-call tie_break_order differing from self.config
+        (default 'canonical') → raises Korean ValueError.
+        """
+        sched_path = _make_yoked_schedule(tmp_path)
+        body = json.loads(sched_path.read_text())
+        cfg = {
+            "k": 4,
+            "schedule_path": str(sched_path),
+            "schedule_hash": body["scheduleHash"],
+        }
+        policy = AxsYokedBonusPolicy(cfg)
+        pool = _make_pool()
+        for bad_tbo in ["reverse", "hash_seeded", "trace_free"]:
+            with pytest.raises(ValueError) as exc_info:
+                policy.select(pool, TraceState(), 7,
+                              config={"k": 4, "tie_break_order": bad_tbo})
+            msg = str(exc_info.value)
+            assert any(ord(c) > 127 for c in msg), (
+                f"Expected Korean ValueError for changed tbo={bad_tbo!r}, got: {msg!r}"
+            )

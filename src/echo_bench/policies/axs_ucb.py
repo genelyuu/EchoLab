@@ -199,7 +199,11 @@ class AxsUcbPolicy(TraceLinUcbPolicy):
         TraceLinUcbPolicy.select() 사본, 기준 커밋 a1a8b6f
         """
         # SEAM 1: effective config resolution
-        effective = config if config is not None else self.config
+        # run_round (round_runner.py:96) 는 policy.select(pool, trace, seed, {"k": k}) 형태로
+        # 호출한다. per-call config 를 그대로 대입하면 생성자 config 의 alpha/freeze_round 등
+        # 실험 심(seam) 값이 모두 소실되어 코드 기본값으로 폴백된다(config-drop 버그).
+        # 수정: 생성자 config 를 베이스로 두고 per-call 키만 덮어써서 심을 보존한다.
+        effective = {**self.config, **(config or {})}
         k = int(effective["k"])
         alpha = float(effective.get("alpha", DEFAULT_ALPHA))
         lambda_reg = float(effective.get("lambda_reg", DEFAULT_LAMBDA))
@@ -681,20 +685,28 @@ class AxsYokedBonusPolicy(AxsUcbPolicy):
         TraceLinUcbPolicy.select() 사본, 기준 커밋 a1a8b6f
         """
         # SEAM 1: effective config resolution + per-call consistency check
-        effective = config if config is not None else self.config
+        # run_round (round_runner.py:96) 는 policy.select(pool, trace, seed, {"k": k}) 형태로
+        # 호출한다. per-call config 를 그대로 대입하면 생성자 config 의 alpha/freeze_round 등
+        # 실험 심(seam) 값이 모두 소실되어 코드 기본값으로 폴백된다(config-drop 버그).
+        # 수정: 생성자 config 를 베이스로 두고 per-call 키만 덮어써서 심을 보존한다.
+        effective = {**self.config, **(config or {})}
 
         # Explicit rejection of per-call config keys that would silently alter
         # preregistered yoked-arm behavior.
+        # 수정(merge 이후): per-call 에 동일 값이 들어오면 무해하므로 허용;
+        # self.config 값과 다른 경우에만 거부한다(의도 변경 봉쇄).
         if config is not None:
             for forbidden_key in ("schedule_path", "schedule_hash"):
                 if forbidden_key in config:
-                    raise ValueError(
-                        f"AXS_YOKED 정책: per-call config 에 '{forbidden_key}' 키가 "
-                        "포함되어 있습니다. yoked arm은 생성자 config에서만 "
-                        "스케줄을 읽습니다."
-                    )
+                    # per-call 값이 생성자 값과 다르면 거부.
+                    if config[forbidden_key] != self.config.get(forbidden_key):
+                        raise ValueError(
+                            f"AXS_YOKED 정책: per-call config 에 '{forbidden_key}' 키가 "
+                            "포함되어 있습니다. yoked arm은 생성자 config에서만 "
+                            "스케줄을 읽습니다."
+                        )
             per_call_tbo = config.get("tie_break_order")
-            if per_call_tbo is not None and per_call_tbo != "canonical":
+            if per_call_tbo is not None and per_call_tbo != self.config.get("tie_break_order", "canonical"):
                 raise ValueError(
                     f"AXS_YOKED 정책: per-call config의 tie_break_order="
                     f"{per_call_tbo!r} 는 허용되지 않습니다. "
