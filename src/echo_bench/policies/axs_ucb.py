@@ -37,12 +37,10 @@ from echo_bench.env.constraints import check_slate
 from echo_bench.logging import get_logger, log_ko
 from echo_bench.policies.trace_lin_ucb import (
     BAND_ORDER,
-    COORD_DIMS,
     DEFAULT_ALPHA,
     DEFAULT_FEATURES,
     DEFAULT_LAMBDA,
     TraceLinUcbPolicy,
-    _band_index,
     _load_bases_cfg,
 )
 from echo_bench.utils.hash import canonical_hash
@@ -168,19 +166,21 @@ class AxsUcbPolicy(TraceLinUcbPolicy):
 
         # Tiebreak RNG — seed material includes traceHash (live), poolHash, seed,
         # and policyVersion. For hash_seeded mode, add a fixed salt.
+        # feature_lexicographic uses (feat_key, cid) instead, so RNG is not needed.
         pool_hash = canonical_hash([c["cardId"] for c in pool])
-        base_seed_material: Dict[str, Any] = {
-            "poolHash": pool_hash,
-            "traceHash": trace.trace_hash(),
-            "seed": seed,
-            "policyVersion": self.policy_version(),
-        }
-        if tie_break_order == "hash_seeded":
-            base_seed_material["salt"] = "axs010-hash-seeded-v1"
-
-        seed_hex = canonical_hash(base_seed_material)
-        rng = random.Random(int(seed_hex, 16))
-        tiebreak = {c["cardId"]: rng.random() for c in pool}
+        tiebreak: Dict[str, float] = {}
+        if tie_break_order != "feature_lexicographic":
+            base_seed_material: Dict[str, Any] = {
+                "poolHash": pool_hash,
+                "traceHash": trace.trace_hash(),
+                "seed": seed,
+                "policyVersion": self.policy_version(),
+            }
+            if tie_break_order == "hash_seeded":
+                base_seed_material["salt"] = "axs010-hash-seeded-v1"
+            seed_hex = canonical_hash(base_seed_material)
+            rng = random.Random(int(seed_hex, 16))
+            tiebreak = {c["cardId"]: rng.random() for c in pool}
 
         bases_cfg = _load_bases_cfg()
 
@@ -372,6 +372,12 @@ class AxsYokedBonusPolicy(AxsUcbPolicy):
     def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
         self._schedule: Optional[dict] = None  # loaded lazily
+        tbo = config.get("tie_break_order", "canonical")
+        if tbo not in (None, "canonical"):
+            raise ValueError(
+                f"AXS_YOKED 정책: tie_break_order='{tbo}' 은 허용되지 않습니다. "
+                "사전등록된 yoked arm은 'canonical' 만 지원합니다."
+            )
 
     def _load_and_verify_schedule(self) -> dict:
         """Load, verify, and cache the yoked schedule JSON.

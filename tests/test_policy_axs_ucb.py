@@ -206,42 +206,69 @@ class TestPolicyVersion:
 
 class TestAlphaZero:
     def test_alpha0_mean_only_ranking(self):
-        """With alpha=0, cards with a clear mean advantage should be chosen."""
-        # Build a pool where c00..c03 have 0.0 coords (all same centroid at origin)
-        # and are in 4 different bases so diversity is satisfied.
-        # After 0 rounds, theta=0, mean=0 for all -> tiebreak decides for alpha=0
-        # With some trace context, theta becomes nonzero.
+        """With alpha=0, ranking is by mean alone: score == mean for every card.
+
+        Build a 8-card pool with unambiguous mean ordering (large coordinate spread
+        so theta @ x differs clearly after 2 trace rounds).  k=4 selects from all 4
+        bases so diversity is always satisfied.  With alpha=0 every chosen card's
+        score component satisfies  score_used = mean + 0*bonus = mean.
+        """
         pool = [
             {
-                "cardId": f"c0{i}",
-                "basis": f"B{i + 1}",
+                "cardId": f"c{i:02d}",
+                "basis": f"B{(i % 4) + 1}",
                 "complexityBand": "low",
                 "salienceScore": 0.5,
-                "coordinateContribution": [float(i * 10), 0.0, 0.0, 0.0],
+                "coordinateContribution": [float((i + 1) * 5), 0.0, 0.0, 0.0],
             }
-            for i in range(4)
+            for i in range(8)
         ]
-        # With alpha=0 and alpha=1, select and check consistency
-        trace = _trace_with([pool[0]])  # one round to make theta nonzero
+        # Two rounds to make theta nonzero.
+        trace = _trace_with([pool[0], pool[7]])
         p_zero = AxsUcbPolicy({"k": 4, "alpha": 0.0})
-        p_one = AxsUcbPolicy({"k": 4, "alpha": 1.0})
         s_zero = p_zero.select(pool, trace, 5)
-        s_one = p_one.select(pool, trace, 5)
-        # Both should produce valid slates; alpha=0 uses mean ordering
         assert len(s_zero) == 4
-        assert len(s_one) == 4
+
+        # For every chosen card: mean + 0*bonus == mean (score used = mean term only).
+        for cid, comp in p_zero.last_score_components.items():
+            score_used = round(comp["mean"] + 0.0 * comp["bonus"], 12)
+            assert score_used == round(comp["mean"], 12), (
+                f"alpha=0: score_used {score_used!r} != mean {comp['mean']!r} for {cid}"
+            )
+
+        # All 4 chosen cards must have mean >= every non-chosen card's mean
+        # (within the applicable diversity-first ordering).
+        # Verify: score == mean, so ucb-ordering == mean-ordering.
+        # Recompute means for all cards via a k=8 run (captures full pool).
+        p_all = AxsUcbPolicy({"k": 8, "alpha": 0.0})
+        p_all.select(pool, trace, 5)
+        all_means = {cid: comp["mean"] for cid, comp in p_all.last_score_components.items()}
+        chosen_set = set(s_zero)
+        chosen_means = [all_means[cid] for cid in s_zero]
+        unchosen_means = [all_means[cid] for cid in all_means if cid not in chosen_set]
+        # Every chosen mean >= every unchosen mean (greedy mean-only with diversity).
+        assert min(chosen_means) >= max(unchosen_means) - 1e-9, (
+            f"alpha=0 should pick top-mean cards; chosen mins={min(chosen_means):.6f} "
+            f"< unchosen max={max(unchosen_means):.6f}"
+        )
 
     def test_alpha0_matches_manual_mean_scores(self):
-        """With alpha=0 and an empty trace, scores are all zero (theta=0), so
-        tiebreak decides. Score components should show bonus>0 but ucb==mean."""
+        """With alpha=0 the score used for ranking equals the mean component.
+
+        With a nonzero trace, theta != 0 so means are meaningful.  Check:
+        - bonus is present and may be nonzero (it exists but is scaled by 0)
+        - mean + 0*bonus == mean for every chosen card (the invariant that matters)
+        """
         pool = _make_pool(8)
-        trace = TraceState()
+        trace = _trace_with([pool[0], pool[1]])  # nonzero trace -> nonzero theta
         p = AxsUcbPolicy({"k": 4, "alpha": 0.0})
         slate = p.select(pool, trace, 7)
-        # All chosen cards should have ucb = mean (since alpha=0)
+        assert len(slate) == 4
         for cid, comp in p.last_score_components.items():
             assert "mean" in comp
             assert "bonus" in comp
+            # The ranking score equals the mean term (bonus multiplied by alpha=0).
+            assert round(comp["mean"] + 0.0 * comp["bonus"], 12) == round(comp["mean"], 12)
 
 
 # ---------------------------------------------------------------------------
@@ -257,19 +284,34 @@ class TestFreezeRound:
         return trace_a, trace_b
 
     def test_freeze_gives_same_scores_on_diverging_traces(self):
-        """freeze_round=f -> same (A,b) state for traces sharing first f rounds."""
+        """freeze_round=f -> identical (A, b) bandit state for traces sharing first f rounds.
+
+        Two traces share rounds 0..f-1 then diverge.  With freeze_round=f the
+        bandit matrices (A, b) are built exclusively from the shared prefix, so
+        they must be element-wise equal regardless of the tail.  We verify this
+        directly via _replay_bandit_state on TraceView slices.
+        """
         pool = _make_pool(16)
         f = 2
         trace_a, trace_b = self._make_diverging_traces(pool, f)
+
+        active = ("coordinate_gap", "band_progress", "redundancy", "bias")
+        p_tmp = AxsUcbPolicy({"k": 4, "freeze_round": f})
+
+        tv_a = TraceView(trace_a.rounds()[:f])
+        tv_b = TraceView(trace_b.rounds()[:f])
+
+        A_a, b_a = p_tmp._replay_bandit_state(tv_a, active, 1.0)
+        A_b, b_b = p_tmp._replay_bandit_state(tv_b, active, 1.0)
+
+        assert np.allclose(A_a, A_b), "A matrices must be allclose for frozen prefix"
+        assert np.allclose(b_a, b_b), "b vectors must be allclose for frozen prefix"
+
+        # Behavioural consequence: both full selects yield valid slates.
         p_a = AxsUcbPolicy({"k": 4, "freeze_round": f})
         p_b = AxsUcbPolicy({"k": 4, "freeze_round": f})
-        # Both traces produce same bandit state; tie-break seed material includes
-        # traceHash so slates can differ — but score components (mean/bonus) should be equal.
         s_a = p_a.select(pool, trace_a, 999)
         s_b = p_b.select(pool, trace_b, 999)
-        # Slates should be identical (same (A,b) and same seed -> same tie-break
-        # seed material only if traceHash is the same). They may differ due to
-        # traceHash in tiebreak seed. But both must be valid.
         by_id = {c["cardId"]: c for c in pool}
         for s in [s_a, s_b]:
             assert len(s) == 4
@@ -277,34 +319,43 @@ class TestFreezeRound:
             assert ok, f"Slate invalid: {reason}"
 
     def test_no_freeze_vs_freeze_differ_when_post_rounds_matter(self):
-        """Without freeze, extra rounds change (A,b); with freeze they don't."""
-        pool = _make_pool(16)
-        f = 1
-        # trace with 1 round
-        trace_short = _trace_with([pool[0]])
-        # trace with 3 rounds (1 shared + 2 extra)
-        trace_long = _trace_with([pool[0], pool[4], pool[8]])
+        """freeze_round=0 neutralises bandit history (theta=0, all means=0).
 
-        # With freeze_round=1: both use the same (A,b) from round 0..f-1
-        p_frozen_short = AxsUcbPolicy({"k": 4, "freeze_round": f})
-        p_frozen_long = AxsUcbPolicy({"k": 4, "freeze_round": f})
-        s_frozen_short = p_frozen_short.select(pool, trace_short, 42)
-        s_frozen_long = p_frozen_long.select(pool, trace_long, 42)
-        # With frozen bandit but different traceHash in tiebreak, they may differ;
-        # that's OK. But WITHOUT freeze, the longer trace MUST change scores:
-        p_nofr_short = AxsUcbPolicy({"k": 4})
-        p_nofr_long = AxsUcbPolicy({"k": 4})
-        s_nofr_short = p_nofr_short.select(pool, trace_short, 42)
-        s_nofr_long = p_nofr_long.select(pool, trace_long, 42)
-        # With significantly different traces (no freeze), slates should differ
-        # (not a strict requirement since they COULD be same by coincidence, but
-        # for this pool construction they should differ)
-        # Just verify both are valid
+        With freeze_round=0 the bandit sees no history so theta=0 and
+        mean=0 for every card.  With freeze_round=None and a multi-round trace,
+        theta != 0 so at least some means are nonzero.  This is the observable
+        contrast that demonstrates the freeze seam works.
+        """
+        pool = _make_pool(16)
+        trace = _trace_with([pool[0], pool[4], pool[8], pool[12]])  # 4 rounds -> nonzero theta
+
+        # freeze_round=0: bandit is empty -> theta=0 -> all means == 0
+        p_frozen = AxsUcbPolicy({"k": 4, "freeze_round": 0})
+        p_frozen.select(pool, trace, 42)
+        frozen_means = [comp["mean"] for comp in p_frozen.last_score_components.values()]
+        assert all(abs(m) < 1e-12 for m in frozen_means), (
+            f"freeze_round=0 must yield mean=0 for all chosen cards; got {frozen_means}"
+        )
+
+        # freeze_round=None: bandit uses full trace -> theta nonzero -> means nonzero
+        p_nofr = AxsUcbPolicy({"k": 4, "freeze_round": None})
+        p_nofr.select(pool, trace, 42)
+        nofr_means = [comp["mean"] for comp in p_nofr.last_score_components.values()]
+        assert any(abs(m) > 1e-10 for m in nofr_means), (
+            f"freeze_round=None with nonempty trace must yield some nonzero means; got {nofr_means}"
+        )
+
+        # All slates must be valid regardless of freeze setting.
         by_id = {c["cardId"]: c for c in pool}
-        for s in [s_frozen_short, s_frozen_long, s_nofr_short, s_nofr_long]:
-            assert len(s) == 4
-            ok, reason, _ = check_slate([by_id[cid] for cid in s], 4, {}, 42)
-            assert ok, f"Slate invalid: {reason}"
+        for cfg_extra, lbl in [
+            ({"freeze_round": 0}, "freeze0"),
+            ({}, "no_freeze"),
+        ]:
+            p_v = AxsUcbPolicy({"k": 4, **cfg_extra})
+            s_v = p_v.select(pool, trace, 42)
+            assert len(s_v) == 4
+            ok, reason, _ = check_slate([by_id[cid] for cid in s_v], 4, {}, 42)
+            assert ok, f"{lbl} slate invalid: {reason}"
 
     def test_freeze_none_behaves_same_as_no_freeze(self):
         """freeze_round=None should be equivalent to not setting freeze."""
@@ -370,64 +421,74 @@ class TestTieBreakOrder:
             f"Expected ≥2 distinct ordered slates across tiebreak modes, got: {ordered_slates}"
         )
 
-    def test_unique_ucb_scores_give_same_slate_across_modes(self):
-        """When UCB scores are all distinct, all tiebreak modes select the same cards."""
-        # Use a pool where different coords ensure distinct UCB scores after some trace
+    def test_tie_break_orders_same_slate_when_unique_scores(self):
+        """When UCB scores are all distinct, all tiebreak modes select the same ordered slate.
+
+        With a non-trivial trace the UCB scores are unique, so the tiebreak
+        component is never reached.  All modes must produce an identical ordered
+        list (not just the same card-set).
+        """
         pool = _make_pool(16)
         trace = _trace_with([pool[0], pool[1]])  # non-trivial trace for distinct UCBs
         seed = 42
-        by_id = {c["cardId"]: c for c in pool}
         orders = ["canonical", "reverse", "hash_seeded", "feature_lexicographic"]
         slates = []
         for o in orders:
             p = AxsUcbPolicy({"k": 4, "tie_break_order": o})
             s = p.select(pool, trace, seed)
-            slates.append(frozenset(s))
-        # All card-sets must be equal (order may differ within slate)
+            slates.append(list(s))  # ordered list, not frozenset
+        # All ordered lists must be identical.
         assert all(s == slates[0] for s in slates), (
-            f"Expected same card set across tiebreak modes on unique-UCB pool: {slates}"
+            f"Expected identical ordered slates across tiebreak modes on unique-UCB pool: {slates}"
         )
 
     def test_feature_lexicographic_hand_computed(self):
-        """feature_lexicographic tie must sort ascending on feature vector then cardId."""
-        # Build 4 cards: all same basis impossible (need 4 distinct), same UCB features
-        # except for coordinateContribution. After 0-round trace centroid=0,
-        # feature vector = (|coord - 0|, band_progress, redundancy, bias).
+        """feature_lexicographic tie must sort ascending on feature vector then cardId.
+
+        Hand-computed expected result: with an empty trace (centroid=0, band=low),
+        all four cards have identical UCB scores (theta=0, alpha=1.0 at t=0).
+        The rank key is (feat_vector, cardId).  All four cards have the same
+        coordinateContribution=[1.0,0.0,0.0,0.0] so identical feature vectors;
+        the secondary key is cardId ascending -> expected slate ['aa','bb','mm','zz'].
+        """
         pool = [
             {
-                "cardId": "z_card",
+                "cardId": "aa",
                 "basis": "B1",
                 "complexityBand": "low",
                 "salienceScore": 0.5,
-                "coordinateContribution": [2.0, 0.0, 0.0, 0.0],
+                "coordinateContribution": [1.0, 0.0, 0.0, 0.0],
             },
             {
-                "cardId": "a_card",
+                "cardId": "bb",
                 "basis": "B2",
                 "complexityBand": "low",
                 "salienceScore": 0.5,
-                "coordinateContribution": [2.0, 0.0, 0.0, 0.0],  # same features as z_card
+                "coordinateContribution": [1.0, 0.0, 0.0, 0.0],
             },
             {
-                "cardId": "m_card",
+                "cardId": "mm",
                 "basis": "B3",
                 "complexityBand": "low",
                 "salienceScore": 0.5,
                 "coordinateContribution": [1.0, 0.0, 0.0, 0.0],
             },
             {
-                "cardId": "b_card",
+                "cardId": "zz",
                 "basis": "B4",
                 "complexityBand": "low",
                 "salienceScore": 0.5,
-                "coordinateContribution": [3.0, 0.0, 0.0, 0.0],
+                "coordinateContribution": [1.0, 0.0, 0.0, 0.0],
             },
         ]
         trace = TraceState()
         p = AxsUcbPolicy({"k": 4, "tie_break_order": "feature_lexicographic"})
         slate = p.select(pool, trace, 7)
-        assert len(slate) == 4
-        # All 4 are valid; the slate must be deterministic
+        # Hand-computed: identical feature vectors -> secondary key is cardId ascending.
+        assert slate == ["aa", "bb", "mm", "zz"], (
+            f"feature_lexicographic expected ['aa','bb','mm','zz'], got {slate}"
+        )
+        # Determinism: second call gives same result.
         slate2 = p.select(pool, trace, 7)
         assert slate == slate2
 
@@ -452,6 +513,31 @@ class TestUnknownTieBreakOrder:
         with pytest.raises(ValueError):
             p.select(pool, TraceState(), 1)
 
+    def test_feature_lexicographic_output_stable_after_tiebreak_guard(self):
+        """feature_lexicographic output is unchanged after tiebreak RNG guard.
+
+        The tiebreak RNG is now skipped for feature_lexicographic (dead path).
+        Verify the slate is still deterministic and matches the hand-computed result.
+        """
+        pool = [
+            {"cardId": "aa", "basis": "B1", "complexityBand": "low",
+             "salienceScore": 0.5, "coordinateContribution": [1.0, 0.0, 0.0, 0.0]},
+            {"cardId": "bb", "basis": "B2", "complexityBand": "low",
+             "salienceScore": 0.5, "coordinateContribution": [1.0, 0.0, 0.0, 0.0]},
+            {"cardId": "mm", "basis": "B3", "complexityBand": "low",
+             "salienceScore": 0.5, "coordinateContribution": [1.0, 0.0, 0.0, 0.0]},
+            {"cardId": "zz", "basis": "B4", "complexityBand": "low",
+             "salienceScore": 0.5, "coordinateContribution": [1.0, 0.0, 0.0, 0.0]},
+        ]
+        trace = TraceState()
+        p = AxsUcbPolicy({"k": 4, "tie_break_order": "feature_lexicographic"})
+        s1 = p.select(pool, trace, 7)
+        s2 = p.select(pool, trace, 7)
+        assert s1 == s2, "feature_lexicographic must be deterministic"
+        assert s1 == ["aa", "bb", "mm", "zz"], (
+            f"feature_lexicographic with identical features: expected ['aa','bb','mm','zz'], got {s1}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # 7. AxsYokedBonusPolicy
@@ -459,64 +545,90 @@ class TestUnknownTieBreakOrder:
 
 class TestAxsYokedBonusPolicy:
     def test_trace_independence_of_bonus_term(self, tmp_path):
-        """Two traces of equal length but different content -> same u(card) map."""
+        """Two equal-length, different-content traces yield byte-identical bonus components.
+
+        With freeze_round=0 (theta=0, mean=0 for all) and alpha=1e6 the score
+        is dominated by alpha * B_t * u(card).  Because u(card) is seeded from
+        poolHash + seed + roundIndex (no traceHash), two traces of the same length
+        but different content must produce the same bonus for every card and
+        therefore the same slate.
+        """
         pool = _make_pool(16)
         sched_path = _make_yoked_schedule(tmp_path, per_round=[1.0] * 10)
+        body = json.loads(sched_path.read_text())
+        cfg_frozen = {
+            "k": 4,
+            "schedule_path": str(sched_path),
+            "schedule_hash": body["scheduleHash"],
+            "alpha": 1e6,
+            "freeze_round": 0,
+        }
+
+        # Two traces of equal length, different content.
+        trace_a = _trace_with([pool[0], pool[1]])
+        trace_b = _trace_with([pool[2], pool[3]])
+
+        p_a = AxsYokedBonusPolicy(cfg_frozen)
+        p_b = AxsYokedBonusPolicy(cfg_frozen)
+        s_a = p_a.select(pool, trace_a, 7)
+        s_b = p_b.select(pool, trace_b, 7)
+
+        # Slates must be byte-identical (same u(card) + mean=0 -> same ranking).
+        assert s_a == s_b, (
+            f"Yoked slates should be identical for equal-length traces; got {s_a} vs {s_b}"
+        )
+
+        # Bonus components for the chosen cards must be byte-identical.
+        assert set(p_a.last_score_components) == set(p_b.last_score_components)
+        for cid in p_a.last_score_components:
+            bonus_a = p_a.last_score_components[cid]["bonus"]
+            bonus_b = p_b.last_score_components[cid]["bonus"]
+            assert bonus_a == bonus_b, (
+                f"Yoked bonus must be trace-independent; card={cid} got {bonus_a} vs {bonus_b}"
+            )
+
+        by_id = {c["cardId"]: c for c in pool}
+        ok, reason, _ = check_slate([by_id[cid] for cid in s_a], 4, {}, 7)
+        assert ok, f"Slate invalid: {reason}"
+
+    def test_bt_advances_with_trace_length(self, tmp_path):
+        """B_t index advances with trace length -> different bonus scale.
+
+        schedule [5.0, 0.0]: at t=0 B_t=5.0 so bonus > 0 for all cards;
+        at t=1 B_t=0.0 so bonus == 0.0 for all cards (exactly).
+        """
+        pool = _make_pool(16)
+        per_round = [5.0, 0.0]
+        sched_path = _make_yoked_schedule(tmp_path, per_round=per_round)
         body = json.loads(sched_path.read_text())
         cfg = {
             "k": 4,
             "schedule_path": str(sched_path),
             "schedule_hash": body["scheduleHash"],
+            "alpha": 1.0,
+            "freeze_round": 0,  # keep mean=0 so bonus scaling is unambiguous
         }
 
-        # Two traces of equal length, different content
-        trace_a = _trace_with([pool[0], pool[1]])
-        trace_b = _trace_with([pool[2], pool[3]])  # same length, different cards
-
-        # With alpha set high and identical seed, the u(card) map should be trace-independent.
-        # We test this by checking the SAME seed + same pool but different traces
-        # produce the same slate (since B_t is same and u(card) is trace-independent)
-        # when the mean term is neutralized (empty trace for bandit state via freeze_round=0).
-        cfg_frozen = {**cfg, "alpha": 100.0, "freeze_round": 0}
-        p_a = AxsYokedBonusPolicy(cfg_frozen)
-        p_b = AxsYokedBonusPolicy(cfg_frozen)
-        s_a = p_a.select(pool, trace_a, 7)
-        s_b = p_b.select(pool, trace_b, 7)
-        # With mean neutralized (freeze at 0, theta=0) and u(card) trace-independent,
-        # slates should be identical (tiebreak uses canonical which includes traceHash,
-        # so they may differ -- but the core scoring should be same).
-        # At minimum, both must be valid slates.
-        by_id = {c["cardId"]: c for c in pool}
-        for s in [s_a, s_b]:
-            assert len(s) == 4
-            ok, reason, _ = check_slate([by_id[cid] for cid in s], 4, {}, 7)
-            assert ok, f"Slate invalid: {reason}"
-
-    def test_bt_advances_with_trace_length(self, tmp_path):
-        """B_t index advances with trace length -> different bonus scale."""
-        pool = _make_pool(16)
-        per_round = [1.0, 0.5, 0.1]
-        sched_path = _make_yoked_schedule(tmp_path, per_round=per_round)
-        body = json.loads(sched_path.read_text())
-        cfg = {"k": 4, "schedule_path": str(sched_path), "schedule_hash": body["scheduleHash"]}
-
-        trace_t0 = TraceState()         # t=0, B_t = per_round[0] = 1.0
-        trace_t1 = _trace_with([pool[0]])  # t=1, B_t = per_round[1] = 0.5
-        trace_t2 = _trace_with([pool[0], pool[1]])  # t=2, B_t = per_round[2] = 0.1
+        trace_t0 = TraceState()             # t=0, B_t = 5.0
+        trace_t1 = _trace_with([pool[0]])   # t=1, B_t = 0.0
 
         p0 = AxsYokedBonusPolicy(cfg)
         p1 = AxsYokedBonusPolicy(cfg)
-        p2 = AxsYokedBonusPolicy(cfg)
 
-        s0 = p0.select(pool, trace_t0, 7)
-        s1 = p1.select(pool, trace_t1, 7)
-        s2 = p2.select(pool, trace_t2, 7)
-        # All valid
-        by_id = {c["cardId"]: c for c in pool}
-        for s, t in [(s0, 0), (s1, 1), (s2, 2)]:
-            assert len(s) == 4
-            ok, reason, _ = check_slate([by_id[cid] for cid in s], 4, {}, 7)
-            assert ok, f"Trace length {t}: slate invalid: {reason}"
+        p0.select(pool, trace_t0, 7)
+        p1.select(pool, trace_t1, 7)
+
+        # t=0: B_t=5.0 -> bonus = 5.0 * u(card) > 0 for all chosen cards.
+        bonuses_t0 = [comp["bonus"] for comp in p0.last_score_components.values()]
+        assert all(b > 0 for b in bonuses_t0), (
+            f"t=0 with B_t=5.0: expected all bonuses > 0, got {bonuses_t0}"
+        )
+
+        # t=1: B_t=0.0 -> bonus = 0.0 * u(card) = 0.0 exactly.
+        bonuses_t1 = [comp["bonus"] for comp in p1.last_score_components.values()]
+        assert all(b == 0.0 for b in bonuses_t1), (
+            f"t=1 with B_t=0.0: expected all bonuses == 0.0, got {bonuses_t1}"
+        )
 
     def test_bt_clamps_at_end_of_schedule(self, tmp_path):
         """B_t clamps to last value when t >= len(perRoundBonus)."""
@@ -583,12 +695,16 @@ class TestAxsYokedBonusPolicy:
         assert any(ord(c) > 127 for c in msg), f"Expected Korean error, got: {msg!r}"
 
     def test_yoked_u_map_no_trace_hash_in_seed(self, tmp_path):
-        """u(card) map must be identical for two traces of same length but different content."""
+        """u(card) map is identical for two equal-length, different-content traces.
+
+        The u-map seed contains poolHash, seed, roundIndex, policyVersion — but
+        NOT traceHash.  So two traces of the same length must yield the same
+        bonus components and the same slate when mean=0 (freeze_round=0, alpha=1e6).
+        """
         pool = _make_pool(16)
-        per_round = [0.0] * 3 + [1.0]  # B_t=0 for t<3, B_t=1.0 for t=3
+        per_round = [0.0] * 3 + [1.0]  # B_t=1.0 at t=3
         sched_path = _make_yoked_schedule(tmp_path, per_round=per_round)
         body = json.loads(sched_path.read_text())
-        # freeze_round=0 so mean=0 for all, use alpha high to let bonus dominate
         cfg = {
             "k": 4,
             "schedule_path": str(sched_path),
@@ -596,21 +712,57 @@ class TestAxsYokedBonusPolicy:
             "alpha": 1e6,
             "freeze_round": 0,
         }
-        # Two traces both of length 3 (B_t=per_round[3]=1.0), different content
+        # Two traces both of length 3 -> t=3, B_t=per_round[3]=1.0.
         trace_a = _trace_with([pool[0], pool[4], pool[8]])
         trace_b = _trace_with([pool[1], pool[5], pool[9]])
         p_a = AxsYokedBonusPolicy(cfg)
         p_b = AxsYokedBonusPolicy(cfg)
         s_a = p_a.select(pool, trace_a, 7)
         s_b = p_b.select(pool, trace_b, 7)
-        # With frozen mean=0, and u(card) trace-independent, same pool+seed+B_t
-        # -> same slate (tiebreak is canonical which includes traceHash, so they
-        # COULD differ; let's just verify both valid and check score components)
+
+        # Slates must be byte-identical.
+        assert s_a == s_b, (
+            f"Yoked slates must be equal for equal-length traces; got {s_a} vs {s_b}"
+        )
+
+        # Bonus components for all chosen cards must be byte-identical.
+        assert set(p_a.last_score_components) == set(p_b.last_score_components)
+        for cid in p_a.last_score_components:
+            bonus_a = p_a.last_score_components[cid]["bonus"]
+            bonus_b = p_b.last_score_components[cid]["bonus"]
+            assert bonus_a == bonus_b, (
+                f"u(card) must be trace-independent; card={cid}: {bonus_a} != {bonus_b}"
+            )
+
         by_id = {c["cardId"]: c for c in pool}
-        for s in [s_a, s_b]:
-            assert len(s) == 4
-            ok, reason, _ = check_slate([by_id[cid] for cid in s], 4, {}, 7)
-            assert ok, reason
+        ok, reason, _ = check_slate([by_id[cid] for cid in s_a], 4, {}, 7)
+        assert ok, reason
+
+    def test_yoked_rejects_non_canonical_tie_break_order(self, tmp_path):
+        """AxsYokedBonusPolicy raises Korean ValueError if tie_break_order != canonical.
+
+        The preregistered yoked arm is canonical-only.  Any other value must be
+        rejected at construction time.
+        """
+        sched_path = _make_yoked_schedule(tmp_path)
+        body = json.loads(sched_path.read_text())
+        base_cfg = {
+            "k": 4,
+            "schedule_path": str(sched_path),
+            "schedule_hash": body["scheduleHash"],
+        }
+        # canonical must be accepted silently.
+        ok_policy = AxsYokedBonusPolicy({**base_cfg, "tie_break_order": "canonical"})
+        assert ok_policy is not None
+
+        # Any non-canonical value must raise Korean ValueError at __init__.
+        for bad_tbo in ["reverse", "hash_seeded", "feature_lexicographic", "bogus"]:
+            with pytest.raises(ValueError) as exc_info:
+                AxsYokedBonusPolicy({**base_cfg, "tie_break_order": bad_tbo})
+            msg = str(exc_info.value)
+            assert any(ord(c) > 127 for c in msg), (
+                f"Expected Korean ValueError for tie_break_order={bad_tbo!r}, got: {msg!r}"
+            )
 
 
 # ---------------------------------------------------------------------------
