@@ -137,6 +137,7 @@ __all__ = [
     "FORBIDDEN_PHRASES",
     "FORBIDDEN_CLAIM_PATTERNS",
     "MECHANISM_CLAIM_PATTERNS",
+    "MECHANISM_CLAIM_PATTERNS_V3",
     "MECHANISM_HYPOTHESIS_MARKERS",
     "MECHANISM_SCOPE_MARKERS",
     "DEFAULT_TIE_BREAK_CAVEAT_MARKER",
@@ -231,7 +232,7 @@ MECHANISM_CLAIM_PATTERNS: tuple[str, ...] = (
 
 # Compiled forms with the same whole-token boundary guards as
 # _FORBIDDEN_PATTERN_RES.
-_MECHANISM_PATTERN_RES: tuple[tuple[str, "re.Pattern[str]"], ...] = tuple(
+_MECHANISM_PATTERN_RES_V1: tuple[tuple[str, "re.Pattern[str]"], ...] = tuple(
     (
         pattern,
         re.compile(
@@ -240,6 +241,69 @@ _MECHANISM_PATTERN_RES: tuple[tuple[str, "re.Pattern[str]"], ...] = tuple(
         ),
     )
     for pattern in MECHANISM_CLAIM_PATTERNS
+)
+
+# G-022a-v3 (N2): Track M v3 "imprint-washout" vocabulary patterns. Added as
+# a NEW tuple so that MECHANISM_CLAIM_PATTERNS remains BYTE-IDENTICAL (existing
+# tests pin it exactly). All patterns use bounded gaps [^.\n]{0,N} only; causal
+# verb + mechanism noun coupling only; plain technical prose must pass.
+MECHANISM_CLAIM_PATTERNS_V3: tuple[str, ...] = (
+    # amplification coupling: amplify verb ↔ trace-conditioned / frozen state / imprint
+    # (verb-first)
+    r"amplif(?:y|ies|ied)[^.\n]{0,80}"
+    r"(?:trace[-\s]conditioned|frozen\s+.{0,40}state|freez(?:e|ing)|imprint(?:ing)?)",
+    # (noun-first)
+    r"(?:trace[-\s]conditioned|frozen\s+.{0,40}state|freez(?:e|ing)|imprint(?:ing)?)"
+    r"[^.\n]{0,80}amplif(?:y|ies|ied)",
+    # elimination coupling: eliminate ↔ trace-independent bonus/score/randomization
+    # (verb-first)
+    r"eliminat(?:e|es|ed|ion)[^.\n]{0,80}"
+    r"trace[-\s]independent[^.\n]{0,40}(?:bonus|score|randomi[sz]ation)",
+    # (noun-first)
+    r"trace[-\s]independent[^.\n]{0,40}(?:bonus|score|randomi[sz]ation)"
+    r"[^.\n]{0,80}eliminat(?:e|es|ed|ion)",
+    # attenuation coupling: attenuate ↔ separability / imprint / trace-conditioned updates
+    # (verb-first)
+    r"attenuat(?:e|es|ed)[^.\n]{0,80}"
+    r"(?:separability|imprint|trace[-\s]conditioned\s+updates?)",
+    # (noun-first)
+    r"(?:separability|imprint|trace[-\s]conditioned\s+updates?)"
+    r"[^.\n]{0,80}attenuat(?:e|es|ed)",
+    # imprint/washout as mechanism nouns with v1 causal verbs (verb-first)
+    r"(?:requires|driven\s+by|attributable\s+to|caus(?:ed|es|ing))"
+    r"[^.\n]{0,80}(?:imprint(?:ing)?|washout)",
+    # (noun-first)
+    r"(?:imprint(?:ing)?|washout)"
+    r"[^.\n]{0,80}(?:requires|driven\s+by|attributable\s+to|caus(?:ed|es|ing))",
+    # v2-era vocabulary hole — context-feature path/channel/pathway/entry,
+    # entry-point, mean-value path, learned-weight path/channel, selection pathway
+    # (verb-first)
+    r"(?:requires|driven\s+by|attributable\s+to|caus(?:ed|es|ing))"
+    r"[^.\n]{0,80}"
+    r"(?:context[-\s]feature\s+(?:path|channel|pathway|entry)"
+    r"|entry[-\s]point|mean[-\s]value\s+path"
+    r"|learned[-\s]weight\s+(?:path|channel)|selection\s+pathway)",
+    # (noun-first)
+    r"(?:context[-\s]feature\s+(?:path|channel|pathway|entry)"
+    r"|entry[-\s]point|mean[-\s]value\s+path"
+    r"|learned[-\s]weight\s+(?:path|channel)|selection\s+pathway)"
+    r"[^.\n]{0,80}(?:requires|driven\s+by|attributable\s+to|caus(?:ed|es|ing))",
+)
+
+_MECHANISM_PATTERN_RES_V3: tuple[tuple[str, "re.Pattern[str]"], ...] = tuple(
+    (
+        pattern,
+        re.compile(
+            r"(?<![A-Za-z0-9])(?:" + pattern + r")(?![A-Za-z0-9])",
+            re.IGNORECASE,
+        ),
+    )
+    for pattern in MECHANISM_CLAIM_PATTERNS_V3
+)
+
+# Union of v1 + v3 compiled patterns — used by _scan_mechanism_claims.
+_MECHANISM_PATTERN_RES: tuple[tuple[str, "re.Pattern[str]"], ...] = (
+    _MECHANISM_PATTERN_RES_V1 + _MECHANISM_PATTERN_RES_V3
 )
 
 # M1 hypothesis markers: any ONE licenses the sentence as hypothesis-form
@@ -493,10 +557,18 @@ def _label_order(label: str) -> int:
             + len(FORBIDDEN_CLAIM_PATTERNS)
             + MECHANISM_CLAIM_PATTERNS.index(label)
         )
+    if label in MECHANISM_CLAIM_PATTERNS_V3:
+        return (
+            len(FORBIDDEN_PHRASES)
+            + len(FORBIDDEN_CLAIM_PATTERNS)
+            + len(MECHANISM_CLAIM_PATTERNS)
+            + MECHANISM_CLAIM_PATTERNS_V3.index(label)
+        )
     return (
         len(FORBIDDEN_PHRASES)
         + len(FORBIDDEN_CLAIM_PATTERNS)
         + len(MECHANISM_CLAIM_PATTERNS)
+        + len(MECHANISM_CLAIM_PATTERNS_V3)
     )
 
 
@@ -1160,9 +1232,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             for sentence in _G010_APPROVED_REPLACEMENTS:
                 print(f"  - {sentence}")
-        # G-022a: Korean guidance for Track M mechanism-claim hits.
+        # G-022a: Korean guidance for Track M mechanism-claim hits (v1 + v3).
+        _all_mechanism_patterns = set(MECHANISM_CLAIM_PATTERNS) | set(
+            MECHANISM_CLAIM_PATTERNS_V3
+        )
         track_m_hits = [
-            f for f in findings if f.phrase in MECHANISM_CLAIM_PATTERNS
+            f for f in findings if f.phrase in _all_mechanism_patterns
         ]
         if track_m_hits:
             for f in track_m_hits:

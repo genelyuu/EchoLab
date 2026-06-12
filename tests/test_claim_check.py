@@ -1095,3 +1095,287 @@ def test_live_tree_clean_with_mechanism_layer():
         f"(report as a concern, do not weaken the regex): {mech}"
     )
     assert warnings == [], f"live tree produced Track M warnings: {warnings}"
+
+
+# ---------------------------------------------------------------------------
+# G-022a-v3 (N2): Track M v3 "imprint-washout" vocabulary patterns.
+# ---------------------------------------------------------------------------
+
+from echo_bench.tools.claim_check import (  # noqa: E402
+    MECHANISM_CLAIM_PATTERNS_V3,
+)
+
+# Canonical v3 M2 sentence from axs_mechanism_prereg_v3_draft.json
+# branches[0].licensedClaim:
+_V3_M2_CANONICAL = (
+    "Within the tested policy families in this controlled testbed, above-null "
+    "slate separability is amplified when trace-conditioned policy state is "
+    "frozen early in the horizon and is eliminated by trace-independent bonus "
+    "randomization; continual trace-conditioned updates attenuate but do not "
+    "eliminate it."
+)
+
+# Same sentence with caveat marker spliced in before the final period.
+_V3_M2_WITH_CAVEAT = _V3_M2_CANONICAL[:-1] + ", " + _CAVEAT + "."
+
+# Paraphrased (wrong) caveat.
+_V3_M2_PARAPHRASED_CAVEAT = (
+    _V3_M2_CANONICAL[:-1] + ", subject to minor ordering sensitivity."
+)
+
+# ---------------------------------------------------------------------------
+# v3 pattern constants (for assert-on-pattern tests)
+# ---------------------------------------------------------------------------
+
+_PAT_V3_AMPLIFY = (
+    r"amplif(?:y|ies|ied)[^.\n]{0,80}"
+    r"(?:trace[-\s]conditioned|frozen\s+.{0,40}state|freez(?:e|ing)|imprint(?:ing)?)"
+)
+_PAT_V3_AMPLIFY_REV = (
+    r"(?:trace[-\s]conditioned|frozen\s+.{0,40}state|freez(?:e|ing)|imprint(?:ing)?)"
+    r"[^.\n]{0,80}amplif(?:y|ies|ied)"
+)
+_PAT_V3_ELIM = (
+    r"eliminat(?:e|es|ed|ion)[^.\n]{0,80}"
+    r"trace[-\s]independent[^.\n]{0,40}(?:bonus|score|randomi[sz]ation)"
+)
+_PAT_V3_ELIM_REV = (
+    r"trace[-\s]independent[^.\n]{0,40}(?:bonus|score|randomi[sz]ation)"
+    r"[^.\n]{0,80}eliminat(?:e|es|ed|ion)"
+)
+_PAT_V3_ATTEN = (
+    r"attenuat(?:e|es|ed)[^.\n]{0,80}"
+    r"(?:separability|imprint|trace[-\s]conditioned\s+updates?)"
+)
+_PAT_V3_ATTEN_REV = (
+    r"(?:separability|imprint|trace[-\s]conditioned\s+updates?)"
+    r"[^.\n]{0,80}attenuat(?:e|es|ed)"
+)
+_PAT_V3_IMPRINT_CAUSAL = (
+    r"(?:requires|driven\s+by|attributable\s+to|caus(?:ed|es|ing))"
+    r"[^.\n]{0,80}(?:imprint(?:ing)?|washout)"
+)
+_PAT_V3_IMPRINT_CAUSAL_REV = (
+    r"(?:imprint(?:ing)?|washout)"
+    r"[^.\n]{0,80}(?:requires|driven\s+by|attributable\s+to|caus(?:ed|es|ing))"
+)
+_PAT_V2_ENTRY = (
+    r"(?:requires|driven\s+by|attributable\s+to|caus(?:ed|es|ing))"
+    r"[^.\n]{0,80}"
+    r"(?:context[-\s]feature\s+(?:path|channel|pathway|entry)"
+    r"|entry[-\s]point|mean[-\s]value\s+path"
+    r"|learned[-\s]weight\s+(?:path|channel)|selection\s+pathway)"
+)
+_PAT_V2_ENTRY_REV = (
+    r"(?:context[-\s]feature\s+(?:path|channel|pathway|entry)"
+    r"|entry[-\s]point|mean[-\s]value\s+path"
+    r"|learned[-\s]weight\s+(?:path|channel)|selection\s+pathway)"
+    r"[^.\n]{0,80}(?:requires|driven\s+by|attributable\s+to|caus(?:ed|es|ing))"
+)
+
+
+def test_v3_pattern_tuple_exists():
+    """MECHANISM_CLAIM_PATTERNS_V3 must be a non-empty tuple of strings."""
+    assert isinstance(MECHANISM_CLAIM_PATTERNS_V3, tuple)
+    assert len(MECHANISM_CLAIM_PATTERNS_V3) > 0
+    for p in MECHANISM_CLAIM_PATTERNS_V3:
+        assert isinstance(p, str), f"pattern must be str: {p!r}"
+
+
+def test_v3_patterns_contain_required_patterns():
+    """v3 pattern tuple must contain all required vocabulary patterns."""
+    for required in (
+        _PAT_V3_AMPLIFY,
+        _PAT_V3_AMPLIFY_REV,
+        _PAT_V3_ELIM,
+        _PAT_V3_ELIM_REV,
+        _PAT_V3_ATTEN,
+        _PAT_V3_ATTEN_REV,
+        _PAT_V3_IMPRINT_CAUSAL,
+        _PAT_V3_IMPRINT_CAUSAL_REV,
+        _PAT_V2_ENTRY,
+        _PAT_V2_ENTRY_REV,
+    ):
+        assert required in MECHANISM_CLAIM_PATTERNS_V3, (
+            f"v3 pattern missing from MECHANISM_CLAIM_PATTERNS_V3: {required!r}"
+        )
+
+
+def test_v1_patterns_byte_identical():
+    """MECHANISM_CLAIM_PATTERNS (v1) must not be modified — byte-identical."""
+    assert MECHANISM_CLAIM_PATTERNS == (
+        _PAT_REQUIRES,
+        _PAT_ATTRIBUTABLE,
+        _PAT_DRIVEN,
+        _PAT_CAUSES,
+        _PAT_NOT_ADAPTIVITY,
+    )
+
+
+# ---------------------------------------------------------------------------
+# FAIL fixtures (no marker/license → finding)
+# ---------------------------------------------------------------------------
+
+
+def test_v3_canonical_m2_unlicensed_flagged():
+    """Canonical v3 M2 sentence as plain prose must be a finding (no license)."""
+    findings = scan_text(_V3_M2_CANONICAL)
+    assert findings, (
+        f"v3 M2 canonical sentence must be flagged without license: {_V3_M2_CANONICAL!r}"
+    )
+    # The phrase on each finding must be a v3 pattern.
+    for f in findings:
+        assert f.phrase in MECHANISM_CLAIM_PATTERNS_V3, (
+            f"finding phrase {f.phrase!r} not in MECHANISM_CLAIM_PATTERNS_V3"
+        )
+
+
+def test_v3_amplify_fragment_flagged():
+    """Amplification + trace-conditioned fragment must be flagged."""
+    text = (
+        "Above-null slate separability is amplified when "
+        "trace-conditioned policy state is frozen early in the horizon."
+    )
+    findings = scan_text(text)
+    assert findings, f"amplify+trace-conditioned fragment must be flagged: {text!r}"
+
+
+def test_v3_elimination_flagged():
+    """Elimination + trace-independent bonus randomization must be flagged."""
+    text = "Separability is eliminated by trace-independent bonus randomization."
+    findings = scan_text(text)
+    assert findings, f"elimination pattern must be flagged: {text!r}"
+
+
+def test_v3_imprint_causal_verb_flagged():
+    """Slate separability driven by imprinting must be flagged."""
+    text = "Slate separability is driven by early imprinting of the learned state."
+    findings = scan_text(text)
+    assert findings, f"imprint/washout causal pattern must be flagged: {text!r}"
+
+
+def test_v2_era_context_feature_pathway_flagged():
+    """v2-era hole: context-feature pathway as mechanism must be flagged."""
+    text = "Probe separability is attributable to the context-feature pathway."
+    findings = scan_text(text)
+    assert findings, f"v2-era context-feature pathway pattern must be flagged: {text!r}"
+
+
+def test_v1_m2_canonical_still_flagged():
+    """Regression: v1 M2 canonical sentence must still be caught by v1 patterns."""
+    findings = scan_text(_M2_CANONICAL)
+    assert findings, f"v1 M2 canonical sentence must still be flagged: {_M2_CANONICAL!r}"
+    v1_phrases = {f.phrase for f in findings}
+    assert any(p in MECHANISM_CLAIM_PATTERNS for p in v1_phrases), (
+        f"v1 canonical must trip at least one v1 pattern; got: {v1_phrases}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# PASS fixtures (allowed: license, hypothesis marker, technical prose, code span)
+# ---------------------------------------------------------------------------
+
+
+def test_v3_canonical_m2_licensed_no_caveat_passes():
+    """v3 M2 sentence with active M2 license (caveatRequired=False) → clean."""
+    findings = scan_text(
+        _V3_M2_CANONICAL,
+        mechanism_license={"m2": True, "caveatRequired": False},
+    )
+    assert findings == [], f"licensed v3 M2 sentence (no caveat) wrongly flagged: {findings}"
+
+
+def test_v3_canonical_m2_licensed_with_caveat_passes():
+    """v3 M2 sentence + M2 license + canonical caveat marker → clean."""
+    findings = scan_text(
+        _V3_M2_WITH_CAVEAT,
+        mechanism_license={"m2": True, "caveatRequired": True, "caveatMarker": _CAVEAT},
+    )
+    assert findings == [], (
+        f"licensed v3 M2 sentence with caveat wrongly flagged: {findings}"
+    )
+
+
+def test_v3_canonical_m2_licensed_caveat_required_absent_flagged():
+    """v3 M2 sentence + license + caveatRequired=True but caveat absent → finding."""
+    findings = scan_text(
+        _V3_M2_CANONICAL,
+        mechanism_license={"m2": True, "caveatRequired": True, "caveatMarker": _CAVEAT},
+    )
+    assert findings, (
+        "caveatRequired=True without the caveat in v3 M2 sentence must be a finding"
+    )
+
+
+def test_v3_canonical_m2_paraphrased_caveat_flagged():
+    """v3 M2 sentence + license + paraphrased caveat → finding."""
+    findings = scan_text(
+        _V3_M2_PARAPHRASED_CAVEAT,
+        mechanism_license={"m2": True, "caveatRequired": True, "caveatMarker": _CAVEAT},
+    )
+    assert findings, "paraphrased caveat must NOT satisfy the v3 M2 caveat rule"
+
+
+def test_v3_m1_early_freezing_hypothesis_passes():
+    """M1 hypothesis marker with v3 vocabulary → clean."""
+    text = (
+        "We hypothesize that early freezing of trace-conditioned state "
+        "may amplify probe separability."
+    )
+    findings = scan_text(text)
+    assert findings == [], f"M1 hypothesis form (v3 vocab) wrongly flagged: {text!r}"
+
+
+def test_v3_m1_consistent_with_imprint_washout_passes():
+    """'is consistent with' is an M1 marker → v3 vocabulary allowed."""
+    text = "Pilot evidence is consistent with an imprint-washout account."
+    findings = scan_text(text)
+    assert findings == [], f"'is consistent with' M1 form wrongly flagged: {text!r}"
+
+
+def test_v3_technical_freeze_round_passes():
+    """Technical descriptor prose with 'freeze' but no mechanism coupling → clean."""
+    text = "The freeze_round seam truncates the bandit replay view."
+    findings = scan_text(text)
+    assert findings == [], f"technical freeze_round descriptor wrongly flagged: {text!r}"
+
+
+def test_v3_renderer_eliminates_degenerate_rasters_passes():
+    """'eliminates' with a non-mechanism noun (rasters) must not fire."""
+    text = "The renderer eliminates degenerate rasters before pooling."
+    findings = scan_text(text)
+    assert findings == [], (
+        f"'eliminates degenerate rasters' (non-mechanism noun) wrongly flagged: {text!r}"
+    )
+
+
+def test_v3_amplifier_gain_identifier_passes():
+    """'amplifier gain parameter' style prose must not fire the amplify pattern."""
+    text = "Set the amplifier gain parameter to 1.0 before the sweep."
+    findings = scan_text(text)
+    assert findings == [], f"amplifier gain parameter identifier wrongly flagged: {text!r}"
+
+
+def test_v3_code_span_mention_passes():
+    """Backtick code-span mention of the v3 canonical sentence → clean (mention, not assertion)."""
+    text = (
+        "The registered claim form is: `above-null slate separability is amplified "
+        "when trace-conditioned policy state is frozen early in the horizon and is "
+        "eliminated by trace-independent bonus randomization`."
+    )
+    findings = scan_text(text)
+    assert findings == [], f"code-span mention of v3 sentence wrongly flagged: {text!r}"
+
+
+def test_v3_user_vocab_warning_triggered():
+    """v3-pattern sentence + 'users' co-occurrence triggers the WARNING path."""
+    text = (
+        "Within the tested policy families in this controlled testbed, "
+        "separability is amplified when trace-conditioned state is frozen "
+        "and users observe the effect."
+    )
+    warnings: list = []
+    scan_text(text, warnings=warnings)
+    assert any("[경고]" in w for w in warnings), (
+        f"mechanism+user co-occurrence must trigger Korean WARNING: {warnings!r}"
+    )
