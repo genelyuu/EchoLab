@@ -268,3 +268,125 @@ def test_tieBreakCaveatMarker_identical_to_v1(v1: dict, v2: dict) -> None:
         f"v2={v2['tieBreakCaveatMarker']!r}, "
         f"v1={v1['tieBreakCaveatMarker']!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 소스 리포트 대비 요약 수치 회귀 테스트 (pilot_123 존재 시만 실행)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def pilot_reports() -> dict[str, dict]:
+    """pilot_123 디렉터리의 4개 리포트를 키(실험 ID)별로 반환한다."""
+    if not PILOT_REPORTS_EXIST:
+        return {}
+    reports: dict[str, dict] = {}
+    for exp_id, glob_prefix in [
+        ("AXS-003", "axs_003_"),
+        ("AXS-004c", "axs_004c_"),
+        ("AXS-009", "axs_009_"),
+        ("AXS-010", "axs_010_"),
+    ]:
+        matches = list(PILOT_REPORTS_DIR.glob(f"{glob_prefix}*.json"))
+        assert matches, f"{exp_id} 리포트 파일을 찾을 수 없음"
+        with open(matches[0], encoding="utf-8") as f:
+            reports[exp_id] = json.load(f)
+    return reports
+
+
+def test_pilotReportHashes_match_source(summary: dict, pilot_reports: dict) -> None:
+    """pilotReportHashes의 4개 해시가 소스 리포트의 reportHash와 일치해야 한다."""
+    if not PILOT_REPORTS_EXIST:
+        pytest.skip("outputs/reports/pilot_123 디렉터리 없음 — CI 안전 스킵")
+
+    stored_hashes = summary.get("pilotReportHashes", {})
+    for exp_id, report in pilot_reports.items():
+        source_hash = report.get("reportHash")
+        assert source_hash is not None, f"{exp_id} 리포트에 reportHash 키 없음"
+        assert stored_hashes.get(exp_id) == source_hash, (
+            f"pilotReportHashes[{exp_id!r}] 불일치: "
+            f"저장됨={stored_hashes.get(exp_id)!r}, "
+            f"소스 리포트={source_hash!r}"
+        )
+
+
+def test_runCommit_matches_reports(summary: dict, pilot_reports: dict) -> None:
+    """summary.runCommit이 각 소스 리포트의 preregStamp.runCommit과 일치해야 한다."""
+    if not PILOT_REPORTS_EXIST:
+        pytest.skip("outputs/reports/pilot_123 디렉터리 없음 — CI 안전 스킵")
+
+    summary_commit = summary.get("runCommit")
+    for exp_id, report in pilot_reports.items():
+        report_commit = report.get("preregStamp", {}).get("runCommit")
+        assert report_commit is not None, f"{exp_id} 리포트에 preregStamp.runCommit 없음"
+        assert summary_commit == report_commit, (
+            f"runCommit 불일치 ({exp_id}): "
+            f"summary={summary_commit!r}, 리포트={report_commit!r}"
+        )
+
+
+def test_scheduleEmbeddedHash_matches_artifact(summary: dict) -> None:
+    """scheduleEmbeddedHash가 axs_004c_yoked_schedule_v1.json 아티팩트의 scheduleHash와 일치해야 한다."""
+    if not PILOT_REPORTS_EXIST:
+        pytest.skip("outputs/reports/pilot_123 디렉터리 없음 — CI 안전 스킵")
+
+    schedule_path = REPO / "configs/prereg/axs_004c_yoked_schedule_v1.json"
+    assert schedule_path.exists(), f"스케줄 아티팩트 파일 없음: {schedule_path}"
+    with open(schedule_path, encoding="utf-8") as f:
+        schedule = json.load(f)
+
+    artifact_embedded = schedule.get("scheduleHash")
+    assert artifact_embedded is not None, "스케줄 아티팩트에 scheduleHash 키 없음"
+    summary_embedded = summary.get("scheduleEmbeddedHash")
+    assert summary.get("scheduleEmbeddedHash") is not None, "summary에 scheduleEmbeddedHash 키 없음"
+    assert summary_embedded == artifact_embedded, (
+        f"scheduleEmbeddedHash 불일치: "
+        f"summary={summary_embedded!r}, 아티팩트={artifact_embedded!r}"
+    )
+
+
+def test_axs_004c_yoked_mean_matches_source(summary: dict, pilot_reports: dict) -> None:
+    """summary AXS-004c axs_yoked_bonus mean이 소스 리포트의 값과 일치해야 한다."""
+    if not PILOT_REPORTS_EXIST:
+        pytest.skip("outputs/reports/pilot_123 디렉터리 없음 — CI 안전 스킵")
+
+    # 소스 리포트에서 axs_yoked_bonus perFamily["123"] slate_excess_nmi 추출
+    report_004c = pilot_reports["AXS-004c"]
+    source_value = (
+        report_004c["arms"]["axs_yoked_bonus"]["perFamily"]["123"]["slate_excess_nmi"]
+    )
+    summary_value = (
+        summary.get("headlineNumbers", {})
+        .get("AXS-004c", {})
+        .get("axs_yoked_bonus_bootstrap_slate_excess_nmi_mean")
+    )
+    assert summary_value is not None, "summary AXS-004c axs_yoked_bonus_bootstrap_slate_excess_nmi_mean 키 없음"
+    assert summary_value == source_value, (
+        f"AXS-004c yoked mean 불일치: "
+        f"summary={summary_value!r}, 소스 리포트={source_value!r}"
+    )
+
+
+def test_axs_009_freeze_divergence_headline_matches_source(summary: dict, pilot_reports: dict) -> None:
+    """summary AXS-009 freeze_at_half_post_freeze_incremental_divergence_mean이 소스 리포트 값과 일치해야 한다."""
+    if not PILOT_REPORTS_EXIST:
+        pytest.skip("outputs/reports/pilot_123 디렉터리 없음 — CI 안전 스킵")
+
+    report_009 = pilot_reports["AXS-009"]
+    source_value = (
+        report_009["arms"]["freeze_at_half"]["perFamily"]["123"][
+            "post_freeze_incremental_divergence"
+        ]
+    )
+    summary_value = (
+        summary.get("headlineNumbers", {})
+        .get("AXS-009", {})
+        .get("freeze_at_half_post_freeze_incremental_divergence_mean")
+    )
+    assert summary_value is not None, (
+        "summary AXS-009 freeze_at_half_post_freeze_incremental_divergence_mean 키 없음"
+    )
+    assert summary_value == source_value, (
+        f"AXS-009 freeze_at_half divergence 불일치: "
+        f"summary={summary_value!r}, 소스 리포트={source_value!r}"
+    )

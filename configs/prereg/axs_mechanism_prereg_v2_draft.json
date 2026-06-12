@@ -7,7 +7,7 @@
   "supersedes": "axs-mechanism v1 (axs_mechanism_prereg_v1.json)",
   "changeJustification": [
     "v1 terminated at design stage with zero evaluation-family evidence.",
-    "Pilot on non-evaluation families: of 63 variant episodes (alpha 0/5, freeze_at_1 across 3 families x 7 probes), 60 were trace-identical to the alpha=1 default; the 3 discordant episodes share a single probe slot in family 777 — the preregistered exploration-pressure contrast is behaviorally degenerate.",
+    "Pilot on non-evaluation families: of 63 variant episodes (alpha 0/5, freeze_at_1 across 3 families x 7 probes), 60 were trace-identical to the alpha=1 default; the 3 discordant episodes share a single probe slot in family 777 — the preregistered exploration-pressure contrast was behaviorally degenerate in the pilot under the current implementation.",
     "Because freeze_at_1 also freezes post-round-1 theta/A updates while preserving live context features, post-round-1 learned-weight updates were also behaviorally inert UNDER LIVE-CONTEXT PILOT CONDITIONS and may re-emerge when E1/E4 are cut.",
     "v2 reframes the program as entry-point ablation over E1 (context-to-feature), E2/E3 (A/b accumulation), E4 (tie-break seed); evaluation families remain untouched."
   ],
@@ -48,7 +48,7 @@
   "designContaminatedFamilies": ["123", "124", "777", "55555"],
   "pilotSummaryRef": {
     "path": "configs/prereg/axs_p0_pilot_summary_v1.json",
-    "summaryHash": "b3ce4318e6dcbbd9d2ff9285ab6ca70ff6ffc3754f12b2f7bf7c946421e686dd"
+    "summaryHash": "286a2e79861ea497821d6de4f1c2f843d1a42b4ebabf82747d2c9b4519227753"
   },
   "traceFreeTieBreakSpec": {
     "seedMaterial": ["poolHash", "seed", "roundIndex", "policyVersion", "salt"],

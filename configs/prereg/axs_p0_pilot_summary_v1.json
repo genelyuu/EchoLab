@@ -50,7 +50,9 @@
       "baseline_estimate": 0.03449752763878505,
       "canonical_estimate": 0.03449752763878505,
       "reverse_estimate": 0.03449752763878505,
-      "feature_lexicographic_estimate": 0.03449752763878505
+      "feature_lexicographic_estimate": 0.03449752763878505,
+      "hash_seeded_estimate": 0.03449752763878505,
+      "baselineSource": "tieBreak.baseline.estimate (equals perFamilyValues.canonical for family 123)"
     }
   },
   "calibrationAnchor": {
@@ -59,13 +61,15 @@
     "metric": "slate_excess_nmi",
     "value": 0.03449752763878505
   },
-  "scheduleHash": "cc7f8348870739c1831be997c36b2b5eedd3317c900ab5309f2c2a2fafd34cf1",
+  "scheduleArtifactHash": "cc7f8348870739c1831be997c36b2b5eedd3317c900ab5309f2c2a2fafd34cf1",
+  "scheduleEmbeddedHash": "07e8d902dea4f8a98ec0d354157a7f17636c1fe4ef2a50b4655fc9d1202aa354",
+  "hashSemantics": "scheduleArtifactHash = canonical_hash(full artifact dict including embedded scheduleHash key); scheduleEmbeddedHash = the self-referential hash stored inside the artifact (minus-selfhash convention, computed before the scheduleHash field was inserted).",
   "reproduction": {
     "note": "Replay each experiment by passing its base seed and reports directory; replay-mode none skips inline recompute for diagnostic runs.",
     "commands": [
       "python -m echo_bench.experiments.axs_003_alpha_kill --base-seeds 123 --replay-mode none --reports-dir <dir>",
       "python -m echo_bench.experiments.axs_004c_yoked --base-seeds 123 --replay-mode none --reports-dir <dir>",
-      "python -m echo_bench.experiments.axs_009_freeze_sweep --base-seeds 123 --replay-mode none --reports-dir <dir>",
+      "python -m echo_bench.experiments.axs_009_freeze --base-seeds 123 --replay-mode none --reports-dir <dir>",
       "python -m echo_bench.experiments.axs_010_tiebreak --base-seeds 123 --replay-mode none --reports-dir <dir>"
     ]
   }
