@@ -3,8 +3,17 @@
   "version": 3,
   "title": "AXS mechanism preregistration v3 draft — imprint-washout",
   "status": "design-draft",
+  "draftRevision": 2,
   "bindingNote": "DESIGN DRAFT — not a registered preregistration. The evidence gate must refuse any prereg whose status is not 'registered'. Committed only to hash-pin the design and liveness criteria.",
   "supersedes": "axs-mechanism v1 (registered, never consumed) and v2 design-draft (never registered)",
+  "revisionJustification": [
+    "Draft revision 2 (pre-registration, procedurally free): the v3 utility guard is redesigned from RANDOM-parity to a role-specific guard following the branch-reachability analysis and advisor review.",
+    "A single rho=0.70 parity guard would exclude freeze_at_1 in 4/4 critic families, whose measured live-default coverage ratios are 0.38/0.69/0.59/0.59 (families 123/124/777/55555).",
+    "Coverage contraction under early freezing is the registered mechanism signature (imprint), not degenerate behavior, so a parity guard on the key manipulation arm would fail the program on the very phenomenon under study.",
+    "The dead-arm calibration artifact (configs/prereg/axs_dead_calibration_v1.json) grounds an absolute coverage floor empirically, between a provably dead constant policy and the minimum measured live key-arm coverage.",
+    "The advisor approved a role-specific guard: control and intermediate arms keep rho=0.70 live-default parity, while key manipulation arms carry a different guard (dead-calibrated absolute floor plus probe-responsiveness), which is not an exemption.",
+    "M2 is split into M2-IMP and M2-NOISE tracks under a strong-or-M1 binary: any guard failure demotes the affected track to unsupported (M1 only); no weak or caveated M2 band exists."
+  ],
   "changeJustification": [
     "The v1 pilot that motivated the v2 entry-point-ablation draft was invalidated by a config-drop harness bug: run_round passed per-call {\"k\": k} and AxsUcbPolicy/AxsYokedBonusPolicy.select resolved effective = config if config is not None else self.config, replacing constructor config; alpha/freeze/tie-break manipulations were therefore never applied; fixed in b7b64b42350bb424999569138b373b189c8704b1.",
     "Post-fix re-pilot on 4 non-evaluation critic families (123, 124, 777, 55555) shows all v1 contrasts are behaviorally live after the fix; initial summary v2 was built from a collided-filename run (seedBatchId lacked base_seeds, so 12 reports overwrote to 4 files), falsely asserting 4/4 stability from 2 families' data — fixed in 89a8f4832cbca7be80acf0a1f1cb52b4a0855e33; complete re-pilot (pilot_v3, 16 distinct reports) is the evidence base.",
@@ -32,8 +41,97 @@
     "combined_excess_nmi"
   ],
   "utilityGuard": {
-    "metric": "coordinate_coverage",
-    "rule": "arm_mean >= RANDOM_mean"
+    "guardVersion": 2,
+    "metric": "utility.coordinate_coverage_mean",
+    "appliesTo": "cross_family_mean",
+    "appliesToNote": "Every guard rule evaluates the cross-family MEAN of the arm-level utility.coordinate_coverage_mean over the experiment's families, never single-family values. Coverage is discrete in cells of 1/56 (~0.017857), so per-family values are coarse; the mean is the registered guard quantity.",
+    "randomReference": {
+      "referenceOnly": true,
+      "declaration": "RANDOM is retained as a reference policy, but not used as the primary degeneracy guard for within-policy mechanism contrasts, because the mechanism tests evaluate perturbations of focused adaptive policies rather than coverage parity with random exploration."
+    },
+    "armRoles": {
+      "AXS-IMP-001": {
+        "freeze_none": "live_default",
+        "freeze_at_quarter": "intermediate",
+        "freeze_at_half": "intermediate",
+        "freeze_at_1": "key_manipulation"
+      },
+      "AXS-NOISE-001": {
+        "axs_ucb_default": "live_default",
+        "axs_yoked_bonus": "key_manipulation"
+      },
+      "AXS-ALPHA-EXP": {
+        "axs_ucb_default": "live_default",
+        "axs_ucb_alpha0": "intermediate"
+      }
+    },
+    "controlIntermediateRule": {
+      "appliesToRoles": [
+        "live_default",
+        "intermediate"
+      ],
+      "rho": 0.7,
+      "comparisonArm": "the same experiment's live_default arm",
+      "rule": "arm cross-family mean coordinate_coverage_mean >= rho * live_default arm cross-family mean, within the same experiment (mean-level parity; pilot critic ratios: quarter/half 0.73-1.05, alpha0 0.69-1.05)"
+    },
+    "keyManipulationRule": {
+      "appliesToRoles": [
+        "key_manipulation"
+      ],
+      "notAnExemption": "Key manipulation arms carry a different guard, not an exemption: a dead-calibrated absolute coverage floor AND a probe-responsiveness check, both calibrated against a provably dead constant policy; rho-parity is replaced because the registered mechanism signature on these arms is itself a coverage change.",
+      "absoluteFloor": 0.16964285714285715,
+      "floorCalibration": {
+        "artifactPath": "configs/prereg/axs_dead_calibration_v1.json",
+        "summaryHash": "12b4875cefe0fafd9d0e383c000d04b733091c41f7a5ff5cc651ca4c8fd6818e",
+        "calibrationFamilies": [
+          "123",
+          "124",
+          "777",
+          "55555"
+        ],
+        "deadReportHashes": {
+          "123": "c5e61828af60eb0994e057b8a71bf6b4a74c9b12e10a676147464563874405bb",
+          "124": "c1380d6b96efe281f60a58964f2d241c8b518dfa0cbf5a1f55900bb4edd4c5aa",
+          "55555": "4cfda8cecfbe4dd2730f5afa1beb7c2652b515c0a1525bd651b8e26bb05c5f5c",
+          "777": "7f56e3b50dfe6cebef3e2221e3f3919f3af648d3ef2a3b736af489dc2fe2bec6"
+        },
+        "formula": "midpoint(max(coverage_dead), min(live key-arm coverage))",
+        "granularityNote": "Coverage is discrete in cells of 1/56 (~0.017857). Max dead-arm coverage = 9 cells (0.16071...), min measured live key-arm coverage = 10 cells (0.17857..., freeze_at_1, family 123); the floor is their midpoint. The guard applies to the cross-family MEAN (pilot freeze_at_1 4-family mean ~0.259, comfortably above the floor)."
+      },
+      "probeResponsiveness": {
+        "reportField": "slateSequenceHashes",
+        "structure": "Every arm's report entry carries slateSequenceHashes: {family: {probe: hash}} where hash = canonical_hash of the ordered (round-order) list of selected cardId lists for that family x probe episode.",
+        "minDistinctHashesPerFamily": 2,
+        "probeCount": 7,
+        "requiredInEveryFamily": true,
+        "requirement": "For key_manipulation arms the gate requires >= 2 distinct hash values across the 7 probes within EVERY family.",
+        "rationale": "Per-probe traceHash distinctness is NOT valid non-constancy evidence because probe responses differ even under identical slates; the dead-arm calibration measured slate_excess_nmi exactly 0.0 in 4/4 families for a probe-constant policy.",
+        "implementationNote": "Runner emission of slateSequenceHashes and gate enforcement are implemented in the follow-up task; the contract is defined and frozen here, and the prereg leads."
+      }
+    },
+    "expectedSignatures": {
+      "freeze_at_1": {
+        "experiment": "AXS-IMP-001",
+        "registeredPrediction": "coverage_contraction",
+        "measuredCriticRatios": {
+          "123": 0.38,
+          "124": 0.69,
+          "777": 0.59,
+          "55555": 0.59
+        },
+        "note": "Coverage contraction is the registered imprint signature, not degeneracy. Measured live-default coverage ratios in critic families 123/124/777/55555 are the reason rho=0.70 parity was rejected for key manipulation arms (it would exclude freeze_at_1 4/4)."
+      },
+      "axs_yoked_bonus": {
+        "experiment": "AXS-NOISE-001",
+        "registeredPrediction": "coverage_dispersion",
+        "measuredCriticRatioRange": [
+          1.19,
+          1.42
+        ],
+        "note": "Yoked trace-independent bonus disperses selection; measured live-default coverage ratios 1.19-1.42 in the critic families."
+      }
+    },
+    "degenerateTripleObligation": "must report degenerate, degenerateReason, includedInMechanismClaim for each arm"
   },
   "pairedUnit": "seed_family",
   "evaluationFamilies": [
@@ -114,8 +212,7 @@
       ],
       "strictMonotoneChainNote": "NOT registered: violated in critic family 124 (quarter > freeze_at_1; see pilot summary v2); registering a rule already known to fail one critic family would be dishonest.",
       "utilityGuard": {
-        "metric": "coordinate_coverage",
-        "rule": "arm_mean >= RANDOM_mean",
+        "rule": "role-specific (see top-level utilityGuard): freeze_none / freeze_at_quarter / freeze_at_half -> rho=0.70 live-default parity; freeze_at_1 (key_manipulation) -> dead-calibrated absolute floor + probe-responsiveness check",
         "degenerateTripleObligation": "must report degenerate, degenerateReason, includedInMechanismClaim for each arm"
       }
     },
@@ -160,58 +257,97 @@
       ],
       "exploratory": true,
       "noClaimLicense": true,
+      "m2Prohibited": true,
+      "m2ProhibitionNote": "PERMANENT: this experiment can never contribute to or license any M2-track claim; it is reportable at M1/exploratory only.",
       "note": "Family-heterogeneous in critic pilot (reversed in 124); reported for the record, licenses no claim at any rung; ledger registration still required (no silent burial)."
     }
   },
   "branches": [
     {
-      "name": "imprint_washout_supported",
-      "condition": "delta_imp pass AND delta_noise pass AND freeze_at_1 and axs_ucb_default non-degenerate",
-      "licensedClaim": "Within the tested policy families in this controlled testbed, above-null slate separability is amplified when trace-conditioned policy state is frozen early in the horizon and is eliminated by trace-independent bonus randomization; continual trace-conditioned updates attenuate but do not eliminate it."
-    },
-    {
-      "name": "imprint_only",
-      "condition": "delta_imp pass AND delta_noise fail",
-      "licensedClaim": "Within the tested policy families in this controlled testbed, above-null slate separability is amplified when trace-conditioned policy state is frozen early in the horizon; the noise washout contrast was not confirmed."
-    },
-    {
-      "name": "noise_only",
-      "condition": "delta_imp fail AND delta_noise pass",
-      "licensedClaim": "Within the tested policy families in this controlled testbed, above-null slate separability is eliminated by trace-independent bonus randomization; the freeze-imprint contrast was not confirmed."
-    },
-    {
-      "name": "degenerate_qualified",
-      "condition": "primary contrast passes but a required arm is degenerate",
-      "licensedClaim": "Contrast passes under the utility guard but a required arm is degenerate; claim is jointly qualified and weakened to the non-degenerate subset within the tested policy families in this controlled testbed."
-    },
-    {
-      "name": "no_claim_m1_only",
-      "condition": "sign consistency <=3/5 families or other acceptance criteria unmet",
-      "licensedClaim": "No claim at any rung above M1 within the tested policy families in this controlled testbed."
-    },
-    {
       "name": "integrity_fail",
       "condition": "any gate check failure",
       "licensedClaim": "All claims blocked; gate check failure detected — no mechanism claim may be issued."
+    },
+    {
+      "name": "both_supported",
+      "condition": "M2-IMP track licensed AND M2-NOISE track licensed (each track: primary contrast pass AND role-specific utility guard pass within that experiment AND AXS-TB-001 >= soft_pass)",
+      "licensedClaim": "Within the tested policy families in this controlled testbed, above-null slate separability is amplified when trace-conditioned policy state is frozen early in the horizon and is eliminated by trace-independent bonus randomization; continual trace-conditioned updates attenuate but do not eliminate it."
+    },
+    {
+      "name": "imprint_only_supported",
+      "condition": "M2-IMP track licensed AND M2-NOISE track not licensed",
+      "licensedClaim": "Within the tested policy family and controlled testbed, one-step trace imprinting amplifies above-null slate separability."
+    },
+    {
+      "name": "noise_only_supported",
+      "condition": "M2-NOISE track licensed AND M2-IMP track not licensed",
+      "licensedClaim": "Within the tested policy family and controlled testbed, schedule-yoked perturbation disrupts the structured separability pattern."
+    },
+    {
+      "name": "no_claim_m1_only",
+      "condition": "neither track licensed: sign consistency <=3/5 families, ciLower <= 0, or ANY role-specific guard failure (control/intermediate live-default parity fail, key-arm absolute-floor fail, key-arm probe-responsiveness fail) demotes the affected track to unsupported — strong-or-M1 binary, no weak/caveated-M2 band",
+      "licensedClaim": "No claim at any rung above M1 within the tested policy families in this controlled testbed."
     }
   ],
   "branchCountFrozen": true,
+  "canonicalSentences": {
+    "M-IMP": "Within the tested policy family and controlled testbed, one-step trace imprinting amplifies above-null slate separability.",
+    "M-NOISE": "Within the tested policy family and controlled testbed, schedule-yoked perturbation disrupts the structured separability pattern.",
+    "M2-COMBINED": "Within the tested policy families in this controlled testbed, above-null slate separability is amplified when trace-conditioned policy state is frozen early in the horizon and is eliminated by trace-independent bonus randomization; continual trace-conditioned updates attenuate but do not eliminate it.",
+    "ALPHA-EXPLORATORY": "Alpha effects were heterogeneous across critic families and are treated as exploratory."
+  },
+  "canonicalSentencesNote": "M-IMP / M-NOISE are the per-track canonical sentences (advisor verbatim). M2-COMBINED is the pre-existing v3 composite sentence, unaltered, licensed only by the both_supported branch. ALPHA-EXPLORATORY is M1/exploratory wording only — M2 use is permanently prohibited.",
   "claimTransitions": {
+    "M2-IMP": {
+      "requiresPass": [
+        "AXS-IMP-001"
+      ],
+      "requiresUtilityGuard": "role-specific utility guard pass within AXS-IMP-001 (control/intermediate rho=0.70 live-default parity + freeze_at_1 absolute floor + freeze_at_1 probe-responsiveness)",
+      "requiredBranch": [
+        "both_supported",
+        "imprint_only_supported"
+      ],
+      "requiresInvariance": "AXS-TB-001 >= soft_pass",
+      "softPassRequiresCaveatMarker": true,
+      "scopeMarkersRequired": true,
+      "canonicalSentence": "M-IMP"
+    },
+    "M2-NOISE": {
+      "requiresPass": [
+        "AXS-NOISE-001"
+      ],
+      "requiresUtilityGuard": "role-specific utility guard pass within AXS-NOISE-001 (axs_ucb_default rho=0.70 self-parity as live_default + axs_yoked_bonus absolute floor + axs_yoked_bonus probe-responsiveness)",
+      "requiredBranch": [
+        "both_supported",
+        "noise_only_supported"
+      ],
+      "requiresInvariance": "AXS-TB-001 >= soft_pass",
+      "softPassRequiresCaveatMarker": true,
+      "scopeMarkersRequired": true,
+      "canonicalSentence": "M-NOISE"
+    },
     "M2": {
+      "combined": true,
+      "rule": "the combined composite claim is licensed only when BOTH M2-IMP and M2-NOISE are licensed",
+      "requiresTracks": [
+        "M2-IMP",
+        "M2-NOISE"
+      ],
       "requiresPass": [
         "AXS-IMP-001",
         "AXS-NOISE-001"
       ],
       "requiredBranch": [
-        "imprint_washout_supported"
+        "both_supported"
       ],
       "requiresInvariance": "AXS-TB-001 >= soft_pass",
       "softPassRequiresCaveatMarker": true,
       "scopeMarkersRequired": true,
-      "exploratoryExclusion": "AXS-ALPHA-EXP licenses no claim"
+      "canonicalSentence": "M2-COMBINED",
+      "exploratoryExclusion": "AXS-ALPHA-EXP licenses no claim and is permanently prohibited from any M2 track (m2Prohibited)"
     },
     "M3": {
-      "requires": "M2 + AXS-001 full alpha sweep + anchor validation"
+      "requires": "M2 (combined) + AXS-001 full alpha sweep + anchor validation"
     }
   },
   "contrastLivenessEvidence": {
