@@ -739,13 +739,13 @@ class TestFilenameDistinctness:
 
 GATE_EVAL_FAMILIES = ["42", "7", "101", "2025", "31337"]
 
+# v3.1 5-브랜치 트리
 VALID_BRANCHES = {
-    "imprint_washout_supported",
-    "imprint_only",
-    "noise_only",
-    "degenerate_qualified",
-    "no_claim_m1_only",
     "integrity_fail",
+    "both_supported",
+    "imprint_only_supported",
+    "noise_only_supported",
+    "no_claim_m1_only",
 }
 
 STRUCTURAL_CHECKS = [
@@ -754,6 +754,9 @@ STRUCTURAL_CHECKS = [
     "report_hash_integrity",
     "replayable",
     "arms_complete",
+    "role_specific_guard",
+    "alpha_m2_prohibition",
+    "canonical_sentences",
     "ledger_registered",
     "ancestry",
     "pilot_disjoint",
@@ -972,3 +975,218 @@ class TestDraftRefusal:
         assert not ps_check["ok"], (
             "design-draft prereg 이 prereg_status 를 통과해서는 안 됨"
         )
+
+
+# ---------------------------------------------------------------------------
+# N7-3 Part 1 — slateSequenceHashes 방출 + 역할별 degenerate 마킹 (v3.1)
+# ---------------------------------------------------------------------------
+
+from echo_bench.experiments.e_leakage_diagnostic import EXPANDED_PROBE_SET
+
+
+def _load_v3_guard_params():
+    """커밋된 v3 draft 에서 roles/rho/floor 추출 (게이트와 동일한 출처)."""
+    with open(_V3_DRAFT, "r", encoding="utf-8") as fh:
+        prereg = json.load(fh)
+    guard = prereg["utilityGuard"]
+    return (
+        guard["armRoles"],
+        float(guard["controlIntermediateRule"]["rho"]),
+        float(guard["keyManipulationRule"]["absoluteFloor"]),
+    )
+
+
+class TestSlateSequenceEmission:
+    """모든 v3 arm 엔트리는 slateSequenceHashes: {family: {probe: hash}} 를 싣는다."""
+
+    def _check_arm_hashes(self, report, exp_name):
+        arms = report.get("arms", {})
+        assert arms, f"{exp_name}: arms 없음"
+        fam = str(SMOKE_SEEDS[0])
+        for arm_id, arm in arms.items():
+            ssh = arm.get("slateSequenceHashes")
+            assert isinstance(ssh, dict), (
+                f"{exp_name} arm {arm_id}: slateSequenceHashes 누락"
+            )
+            assert set(ssh.keys()) == {fam}, (
+                f"{exp_name} arm {arm_id}: 패밀리 키 오류 {sorted(ssh.keys())}"
+            )
+            probes = ssh[fam]
+            assert set(probes.keys()) == set(EXPANDED_PROBE_SET), (
+                f"{exp_name} arm {arm_id}: probe 키 집합 오류"
+            )
+            assert len(probes) == 7
+            for h in probes.values():
+                assert isinstance(h, str) and len(h) == 64, (
+                    f"{exp_name} arm {arm_id}: 해시 형식 오류 {h!r}"
+                )
+
+    def test_imp_arms_have_slate_sequence_hashes(self, smoke_imp_report):
+        self._check_arm_hashes(smoke_imp_report, "IMP")
+
+    def test_noise_arms_have_slate_sequence_hashes(self, smoke_noise_report):
+        self._check_arm_hashes(smoke_noise_report, "NOISE")
+
+    def test_alpha_arms_have_slate_sequence_hashes(self, smoke_alpha_report):
+        self._check_arm_hashes(smoke_alpha_report, "ALPHA")
+
+    def test_tb_untouched_no_arms(self, smoke_tb_report):
+        """AXS-TB-001 은 tieBreak 구조 그대로 — arms/slateSequenceHashes 없음."""
+        assert "arms" not in smoke_tb_report
+        assert "slateSequenceHashes" not in smoke_tb_report
+
+    def test_imp_hash_matches_contract(self, smoke_imp_report):
+        """해시 = canonical_hash(라운드 순서 selected-cardId 리스트들) — run_arm_family 재계산과 일치."""
+        from echo_bench.policies.axs_ucb import AxsUcbPolicy
+
+        base_cfg = _load_axs_ucb_base_cfg()
+        bases, archive_cfg = load_default_configs()
+        cfg = dict(base_cfg)
+        cfg["k"] = _MANIP_K
+        cfg["freeze_round"] = None
+        raw = run_arm_family(
+            lambda c=cfg: AxsUcbPolicy(dict(c)),
+            SMOKE_SEEDS[0],
+            H=SMOKE_H, k=_MANIP_K, pool_size=SMOKE_POOL,
+            n_permutations=SMOKE_PERM,
+            bases=bases, archive_cfg=archive_cfg,
+        )
+        expected = {}
+        for probe_name in EXPANDED_PROBE_SET:
+            rounds = raw["roundsByProbe"][probe_name]
+            expected[probe_name] = canonical_hash([r["slate"] for r in rounds])
+        fam = str(SMOKE_SEEDS[0])
+        actual = smoke_imp_report["arms"]["freeze_none"]["slateSequenceHashes"][fam]
+        assert actual == expected, "freeze_none slateSequenceHashes 가 재계산과 불일치"
+
+
+class TestRoleSpecificMarking:
+    """러너의 degenerate 마킹이 prereg 역할별 가드 재계산과 정확히 일치해야 함."""
+
+    def _expected_key_degenerate(self, arm, floor):
+        cov = arm["utility"]["coordinate_coverage_mean"]
+        ssh = arm["slateSequenceHashes"]
+        collapsed = any(len(set(probes.values())) < 2 for probes in ssh.values())
+        return cov < floor or collapsed
+
+    def _assert_triple(self, arm, exp_name, arm_id, expected):
+        if expected:
+            assert arm.get("degenerate") is True, (
+                f"{exp_name} {arm_id}: 가드 실패인데 degenerate 미마킹"
+            )
+            reason = arm.get("degenerateReason")
+            assert isinstance(reason, str) and reason.strip()
+            assert any("가" <= ch <= "힣" for ch in reason), (
+                f"{exp_name} {arm_id}: degenerateReason 한국어 아님: {reason!r}"
+            )
+            assert arm.get("includedInMechanismClaim") is False
+        else:
+            assert arm.get("degenerate") is not True, (
+                f"{exp_name} {arm_id}: 가드 통과인데 degenerate 마킹됨"
+            )
+
+    def test_imp_live_default_never_degenerate(self, smoke_imp_report):
+        arm = smoke_imp_report["arms"]["freeze_none"]
+        assert arm.get("degenerate") is not True, (
+            "live_default(freeze_none)가 degenerate 로 마킹됨 — 기준 arm 은 parity 비대상"
+        )
+        # coverage 는 여전히 strict 숫자여야 함
+        cov = arm["utility"]["coordinate_coverage_mean"]
+        assert isinstance(cov, float) and not isinstance(cov, bool)
+
+    def test_imp_key_arm_marking_consistent(self, smoke_imp_report):
+        _, _, floor = _load_v3_guard_params()
+        arm = smoke_imp_report["arms"]["freeze_at_1"]
+        expected = self._expected_key_degenerate(arm, floor)
+        self._assert_triple(arm, "IMP", "freeze_at_1", expected)
+
+    def test_imp_intermediate_marking_consistent(self, smoke_imp_report):
+        _, rho, _ = _load_v3_guard_params()
+        live_cov = smoke_imp_report["arms"]["freeze_none"]["utility"][
+            "coordinate_coverage_mean"
+        ]
+        for arm_id in ["freeze_at_quarter", "freeze_at_half"]:
+            arm = smoke_imp_report["arms"][arm_id]
+            cov = arm["utility"]["coordinate_coverage_mean"]
+            expected = cov < rho * live_cov
+            self._assert_triple(arm, "IMP", arm_id, expected)
+
+    def test_noise_key_arm_marking_consistent(self, smoke_noise_report):
+        _, _, floor = _load_v3_guard_params()
+        arm = smoke_noise_report["arms"]["axs_yoked_bonus"]
+        expected = self._expected_key_degenerate(arm, floor)
+        self._assert_triple(arm, "NOISE", "axs_yoked_bonus", expected)
+
+    def test_noise_live_default_never_degenerate(self, smoke_noise_report):
+        arm = smoke_noise_report["arms"]["axs_ucb_default"]
+        assert arm.get("degenerate") is not True
+
+    def test_alpha_intermediate_marking_consistent(self, smoke_alpha_report):
+        _, rho, _ = _load_v3_guard_params()
+        live_cov = smoke_alpha_report["arms"]["axs_ucb_default"]["utility"][
+            "coordinate_coverage_mean"
+        ]
+        arm = smoke_alpha_report["arms"]["axs_ucb_alpha0"]
+        cov = arm["utility"]["coordinate_coverage_mean"]
+        expected = cov < rho * live_cov
+        self._assert_triple(arm, "ALPHA", "axs_ucb_alpha0", expected)
+
+
+class TestRunnerFailClosed:
+    """utilityGuard / armRoles 누락 prereg → 러너가 한국어 ValueError 로 즉시 실패."""
+
+    def _make_stripped_prereg(self, tmp_path, strip):
+        with open(_V3_DRAFT, "r", encoding="utf-8") as fh:
+            prereg = json.load(fh)
+        if strip == "utilityGuard":
+            prereg.pop("utilityGuard", None)
+        elif strip == "armRoles":
+            prereg["utilityGuard"].pop("armRoles", None)
+        p = tmp_path / f"prereg_stripped_{strip}.json"
+        p.write_text(json.dumps(prereg, indent=2, ensure_ascii=False), encoding="utf-8")
+        return p
+
+    def test_imp_missing_utility_guard_raises(self, tmp_path):
+        run_fn = _import_imp()
+        prereg_path = self._make_stripped_prereg(tmp_path, "utilityGuard")
+        with pytest.raises(ValueError) as exc:
+            run_fn(
+                SMOKE_SEEDS, H=SMOKE_H, pool_size=SMOKE_POOL,
+                n_permutations=SMOKE_PERM, reports_dir=tmp_path,
+                dry_run=False, git_runner=_good_git_runner,
+                prereg_path=prereg_path,
+            )
+        assert any("가" <= ch <= "힣" for ch in str(exc.value))
+
+    def test_imp_missing_arm_roles_raises(self, tmp_path):
+        run_fn = _import_imp()
+        prereg_path = self._make_stripped_prereg(tmp_path, "armRoles")
+        with pytest.raises(ValueError):
+            run_fn(
+                SMOKE_SEEDS, H=SMOKE_H, pool_size=SMOKE_POOL,
+                n_permutations=SMOKE_PERM, reports_dir=tmp_path,
+                dry_run=False, git_runner=_good_git_runner,
+                prereg_path=prereg_path,
+            )
+
+    def test_noise_missing_utility_guard_raises(self, tmp_path):
+        run_fn = _import_noise()
+        prereg_path = self._make_stripped_prereg(tmp_path, "utilityGuard")
+        with pytest.raises(ValueError):
+            run_fn(
+                SMOKE_SEEDS, H=SMOKE_H, pool_size=SMOKE_POOL,
+                n_permutations=SMOKE_PERM, reports_dir=tmp_path,
+                dry_run=False, git_runner=_good_git_runner,
+                prereg_path=prereg_path,
+            )
+
+    def test_alpha_missing_arm_roles_raises(self, tmp_path):
+        run_fn = _import_alpha()
+        prereg_path = self._make_stripped_prereg(tmp_path, "armRoles")
+        with pytest.raises(ValueError):
+            run_fn(
+                SMOKE_SEEDS, H=SMOKE_H, pool_size=SMOKE_POOL,
+                n_permutations=SMOKE_PERM, reports_dir=tmp_path,
+                dry_run=False, git_runner=_good_git_runner,
+                prereg_path=prereg_path,
+            )

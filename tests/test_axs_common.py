@@ -820,3 +820,266 @@ def test_make_axs_arg_parser_base_seeds_custom():
     parser = make_axs_arg_parser("테스트")
     args = parser.parse_args(["--base-seeds", "42,7,101"])
     assert args.base_seeds == "42,7,101"
+
+
+# ===========================================================================
+# N7-3 Part 1 — slateSequenceHashes + role-specific degenerate marking (v3.1)
+# ===========================================================================
+#
+# 계약 (prereg v3 draftRevision 2, utilityGuard.keyManipulationRule.probeResponsiveness):
+#   slateSequenceHashes: {family: {probe: hash}}
+#   hash = canonical_hash(라운드 순서대로 정렬된 selected-cardId 리스트들의 리스트)
+#   (per-probe traceHash 구별성은 유효한 비상수성 증거가 아님 — 슬레이트 시퀀스 기준)
+
+
+def _smoke_raw(policy_factory, smoke_bases, smoke_archive_cfg, *, base_seed=42, H=2):
+    from echo_bench.experiments.axs_common import run_arm_family
+
+    return run_arm_family(
+        policy_factory, base_seed=base_seed, H=H, k=4, pool_size=8,
+        n_permutations=3, bases=smoke_bases, archive_cfg=smoke_archive_cfg,
+    )
+
+
+def test_slate_sequence_hashes_keys_and_determinism(
+    smoke_bases, smoke_archive_cfg, smoke_policy_factory
+):
+    """동일 에피소드 → 동일 slateSequenceHashes (probe 키 7종, 결정론적)."""
+    from echo_bench.experiments.axs_common import slate_sequence_hashes_from_block
+    from echo_bench.experiments.e_leakage_diagnostic import EXPANDED_PROBE_SET
+
+    raw1 = _smoke_raw(smoke_policy_factory, smoke_bases, smoke_archive_cfg)
+    raw2 = _smoke_raw(smoke_policy_factory, smoke_bases, smoke_archive_cfg)
+
+    h1 = slate_sequence_hashes_from_block(raw1)
+    h2 = slate_sequence_hashes_from_block(raw2)
+
+    assert set(h1.keys()) == set(EXPANDED_PROBE_SET), (
+        f"probe 키 집합 불일치: {sorted(h1.keys())}"
+    )
+    assert len(h1) == 7
+    assert h1 == h2, "동일 에피소드의 slateSequenceHashes 가 결정론적이지 않음"
+    for v in h1.values():
+        assert isinstance(v, str) and len(v) == 64, f"해시 형식 오류: {v!r}"
+
+
+def test_slate_sequence_hashes_sensitivity_different_sequences(
+    smoke_bases, smoke_archive_cfg, smoke_policy_factory
+):
+    """다른 슬레이트 시퀀스 → 다른 해시 (정책 변경으로 시퀀스 변화)."""
+    from echo_bench.experiments.axs_common import slate_sequence_hashes_from_block
+    from echo_bench.experiments.axs_dead_calibration import DeadConstantPolicy
+
+    raw_live = _smoke_raw(smoke_policy_factory, smoke_bases, smoke_archive_cfg)
+    raw_dead = _smoke_raw(
+        lambda: DeadConstantPolicy({"k": 4}), smoke_bases, smoke_archive_cfg
+    )
+
+    h_live = slate_sequence_hashes_from_block(raw_live)
+    h_dead = slate_sequence_hashes_from_block(raw_dead)
+    assert h_live != h_dead, (
+        "다른 정책(다른 슬레이트 시퀀스)인데 slateSequenceHashes 가 동일 — 민감도 결여"
+    )
+
+
+def test_slate_sequence_hashes_probe_constant_policy_identical(
+    smoke_bases, smoke_archive_cfg
+):
+    """프로브-상수 정책(DeadConstantPolicy) → 모든 프로브에서 동일한 해시.
+
+    프로브 응답(selectedCardId)은 슬레이트가 동일해도 달라질 수 있으므로,
+    슬레이트 시퀀스 해시는 프로브-상수 정책에서 정확히 1개의 고유값이어야 한다.
+    """
+    from echo_bench.experiments.axs_common import slate_sequence_hashes_from_block
+    from echo_bench.experiments.axs_dead_calibration import DeadConstantPolicy
+
+    raw = _smoke_raw(
+        lambda: DeadConstantPolicy({"k": 4}), smoke_bases, smoke_archive_cfg
+    )
+    hashes = slate_sequence_hashes_from_block(raw)
+    assert len(set(hashes.values())) == 1, (
+        f"프로브-상수 정책의 슬레이트 해시가 프로브별로 다름: {hashes}"
+    )
+
+
+def test_slate_sequence_hashes_from_block_fail_closed():
+    """slateHashes 누락/길이 불일치 블록 → 한국어 ValueError (fail-closed)."""
+    from echo_bench.experiments.axs_common import slate_sequence_hashes_from_block
+
+    with pytest.raises(ValueError) as exc1:
+        slate_sequence_hashes_from_block({})
+    assert any("가" <= ch <= "힣" for ch in str(exc1.value)), (
+        "오류 메시지가 한국어가 아님"
+    )
+
+    with pytest.raises(ValueError):
+        slate_sequence_hashes_from_block({"slateHashes": ["a", "b"]})  # 7개 아님
+
+
+# ---------------------------------------------------------------------------
+# build_arm_entry_v3 — 역할별 degenerate 마킹
+# ---------------------------------------------------------------------------
+
+_FLOOR = 0.16964285714285715
+_RHO = 0.7
+_FAMS = ["42", "7", "101", "2025", "31337"]
+_PROBE_NAMES = [
+    "PREFER_COORD_NOVELTY", "PREFER_COORD_RESIDUE", "PREFER_HIGH_COMPLEXITY",
+    "PREFER_HIGH_EDGE_DENSITY", "PREFER_HIGH_SPATIAL_FREQUENCY",
+    "PREFER_LOW_COORD_MAGNITUDE", "PREFER_LOW_SALIENCE",
+]
+
+
+def _mini_v3_prereg() -> dict:
+    """utilityGuard 만 있는 최소 합성 prereg (역할 마킹 단위 테스트용)."""
+    return {
+        "utilityGuard": {
+            "armRoles": {
+                "AXS-IMP-001": {
+                    "freeze_none": "live_default",
+                    "freeze_at_quarter": "intermediate",
+                    "freeze_at_half": "intermediate",
+                    "freeze_at_1": "key_manipulation",
+                },
+            },
+            "controlIntermediateRule": {"rho": _RHO},
+            "keyManipulationRule": {"absoluteFloor": _FLOOR},
+        },
+    }
+
+
+def _seq_hashes(distinct: bool = True, collapse_family=None) -> dict:
+    """{family: {probe: hash}} 합성 생성."""
+    out = {}
+    for fam in _FAMS:
+        if (not distinct) or fam == collapse_family:
+            out[fam] = {p: f"hash-{fam}-const" for p in _PROBE_NAMES}
+        else:
+            out[fam] = {p: f"hash-{fam}-{p}" for p in _PROBE_NAMES}
+    return out
+
+
+def _v3_entry(arm_id, coverage_mean, live_cov=0.65, hashes=None, prereg=None):
+    from echo_bench.experiments.axs_common import build_arm_entry_v3
+
+    per_family = {fam: 0.05 for fam in _FAMS}
+    return build_arm_entry_v3(
+        "slate_excess_nmi",
+        per_family,
+        coverage_mean,
+        prereg=prereg if prereg is not None else _mini_v3_prereg(),
+        experiment_id="AXS-IMP-001",
+        arm_id=arm_id,
+        live_default_coverage_mean=live_cov,
+        slate_sequence_hashes=hashes if hashes is not None else _seq_hashes(),
+        degenerate_reason_prefix=arm_id,
+    )
+
+
+def test_v3_entry_live_default_never_parity_degenerate():
+    """live_default: coverage 가 아무리 낮아도 parity 로 degenerate 마킹 금지."""
+    entry = _v3_entry("freeze_none", 0.01, live_cov=0.01)
+    assert entry.get("degenerate") is not True, "live_default 가 degenerate 로 마킹됨"
+    assert "degenerateReason" not in entry
+    assert entry["utility"]["coordinate_coverage_mean"] == 0.01
+
+
+def test_v3_entry_intermediate_below_rho_degenerate():
+    """intermediate: coverage < rho × live_default → degenerate 트리플."""
+    live = 0.65
+    below = _RHO * live - 0.01
+    entry = _v3_entry("freeze_at_quarter", below, live_cov=live)
+    assert entry["degenerate"] is True
+    assert entry["includedInMechanismClaim"] is False
+    reason = entry["degenerateReason"]
+    assert isinstance(reason, str) and reason.strip()
+    assert any("가" <= ch <= "힣" for ch in reason), (
+        f"degenerateReason 이 한국어가 아님: {reason!r}"
+    )
+
+
+def test_v3_entry_intermediate_boundary_and_above_not_degenerate():
+    """intermediate: coverage == rho × live (경계) 또는 초과 → 비퇴화."""
+    live = 0.65
+    at_boundary = _RHO * live
+    entry_eq = _v3_entry("freeze_at_quarter", at_boundary, live_cov=live)
+    assert entry_eq.get("degenerate") is not True, "경계값이 degenerate 로 마킹됨"
+    entry_above = _v3_entry("freeze_at_half", at_boundary + 0.01, live_cov=live)
+    assert entry_above.get("degenerate") is not True
+
+
+def test_v3_entry_key_below_floor_degenerate():
+    """key_manipulation: coverage < absoluteFloor → degenerate."""
+    entry = _v3_entry("freeze_at_1", _FLOOR - 0.001)
+    assert entry["degenerate"] is True
+    assert entry["includedInMechanismClaim"] is False
+    assert entry["degenerateReason"].strip()
+
+
+def test_v3_entry_key_at_or_above_floor_not_degenerate():
+    """key_manipulation: coverage ≥ floor + 프로브 응답성 충족 → 비퇴화.
+
+    parity 기준(rho × live_default)에 크게 미달해도 무관 — 역할별 가드.
+    """
+    entry_at = _v3_entry("freeze_at_1", _FLOOR, live_cov=0.65)
+    assert entry_at.get("degenerate") is not True, "floor 경계값이 degenerate 로 마킹됨"
+    # parity-equivalent 0.5×live (=0.325) — parity 미달이지만 floor 초과 → 비퇴화
+    entry_half_parity = _v3_entry("freeze_at_1", 0.5 * 0.65, live_cov=0.65)
+    assert entry_half_parity.get("degenerate") is not True
+
+
+def test_v3_entry_key_collapsed_family_degenerate():
+    """key_manipulation: 한 패밀리라도 고유 해시 <2 → degenerate (프로브 비응답)."""
+    entry = _v3_entry(
+        "freeze_at_1", 0.40, hashes=_seq_hashes(collapse_family="101")
+    )
+    assert entry["degenerate"] is True
+    assert entry["includedInMechanismClaim"] is False
+    assert "101" in entry["degenerateReason"]
+
+
+def test_v3_entry_carries_slate_sequence_hashes():
+    """arm 엔트리에 slateSequenceHashes 가 그대로 실려야 함."""
+    hashes = _seq_hashes()
+    entry = _v3_entry("freeze_at_1", 0.40, hashes=hashes)
+    assert entry["slateSequenceHashes"] == hashes
+
+
+def test_v3_entry_fail_closed_missing_utility_guard():
+    """utilityGuard 누락 prereg → 한국어 ValueError."""
+    with pytest.raises(ValueError) as exc:
+        _v3_entry("freeze_at_1", 0.40, prereg={})
+    assert any("가" <= ch <= "힣" for ch in str(exc.value))
+
+
+def test_v3_entry_fail_closed_missing_arm_roles_entry():
+    """armRoles 에 해당 실험 항목 없음 → 한국어 ValueError."""
+    prereg = _mini_v3_prereg()
+    del prereg["utilityGuard"]["armRoles"]["AXS-IMP-001"]
+    with pytest.raises(ValueError) as exc:
+        _v3_entry("freeze_at_1", 0.40, prereg=prereg)
+    assert any("가" <= ch <= "힣" for ch in str(exc.value))
+
+
+def test_v3_entry_fail_closed_unknown_arm_role():
+    """armRoles 에 등재되지 않은 arm → 한국어 ValueError."""
+    with pytest.raises(ValueError):
+        _v3_entry("phantom_arm", 0.40)
+
+
+def test_v3_entry_fail_closed_missing_rho_or_floor():
+    """rho 또는 absoluteFloor 누락/비숫자 → 한국어 ValueError."""
+    prereg_no_rho = _mini_v3_prereg()
+    del prereg_no_rho["utilityGuard"]["controlIntermediateRule"]["rho"]
+    with pytest.raises(ValueError):
+        _v3_entry("freeze_at_quarter", 0.40, prereg=prereg_no_rho)
+
+    prereg_no_floor = _mini_v3_prereg()
+    del prereg_no_floor["utilityGuard"]["keyManipulationRule"]["absoluteFloor"]
+    with pytest.raises(ValueError):
+        _v3_entry("freeze_at_1", 0.40, prereg=prereg_no_floor)
+
+    prereg_bool_floor = _mini_v3_prereg()
+    prereg_bool_floor["utilityGuard"]["keyManipulationRule"]["absoluteFloor"] = True
+    with pytest.raises(ValueError):
+        _v3_entry("freeze_at_1", 0.40, prereg=prereg_bool_floor)

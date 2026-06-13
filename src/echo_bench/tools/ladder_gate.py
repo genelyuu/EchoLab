@@ -58,6 +58,40 @@ _V3_ALPHA_ARMS = ["axs_ucb_default", "axs_ucb_alpha0"]
 # AXS-TB-001 변형
 _V3_TB_VARIANTS = {"reverse", "hash_seeded", "feature_lexicographic"}
 
+# ---------------------------------------------------------------------------
+# v3.1 역할별 가드 — 하드코딩 (제네릭 결정 규칙 인터프리터 금지).
+# prereg.utilityGuard 와 교차 검증되며, 불일치는 검사 실패 (fail-closed).
+# ---------------------------------------------------------------------------
+_V31_ARM_ROLES = {
+    "AXS-IMP-001": {
+        "freeze_none": "live_default",
+        "freeze_at_quarter": "intermediate",
+        "freeze_at_half": "intermediate",
+        "freeze_at_1": "key_manipulation",
+    },
+    "AXS-NOISE-001": {
+        "axs_ucb_default": "live_default",
+        "axs_yoked_bonus": "key_manipulation",
+    },
+    "AXS-ALPHA-EXP": {
+        "axs_ucb_default": "live_default",
+        "axs_ucb_alpha0": "intermediate",
+    },
+}
+_V31_RHO = 0.70
+_V31_PROBE_COUNT = 7
+_V31_MIN_DISTINCT_HASHES = 2
+# 트랙 평가 대상 실험 (AXS-ALPHA-EXP 는 영구 제외 — m2Prohibited)
+_V31_GUARDED_EXPERIMENTS = ("AXS-IMP-001", "AXS-NOISE-001")
+# v3.1 5-브랜치
+_V31_BRANCHES = (
+    "integrity_fail",
+    "both_supported",
+    "imprint_only_supported",
+    "noise_only_supported",
+    "no_claim_m1_only",
+)
+
 
 # ---------------------------------------------------------------------------
 # Strict numeric type guard (ITEM 3)
@@ -416,6 +450,12 @@ def _check_arms_complete(
             )
             continue
 
+        # v3.1 confirmatory(IMP/NOISE): RANDOM 은 reference-only —
+        # RANDOM-parity 기반 degenerate 트리플 검증은 role_specific_guard 의
+        # 역할별 재계산으로 대체된다 (v1 경로는 아래 parity 검증 유지).
+        if exp_id in _V31_GUARDED_EXPERIMENTS:
+            continue
+
         ok_ref = [ok]
         for arm_id, arm_data in (r.get("arms") or {}).items():
             if arm_id not in prereg_arms:
@@ -663,29 +703,6 @@ def _delta_primary_pass(
     return sign_pass, ci_pass, ci_low
 
 
-def _is_arm_degenerate_gate_computed(
-    report: Dict[str, Any],
-    arm_id: str,
-) -> bool:
-    """arm 의 degenerate 여부를 게이트가 직접 계산 (자가증명 무시).
-
-    report 의 baselines.RANDOM.coordinate_coverage_mean 과
-    arms[arm_id].utility.coordinate_coverage_mean 을 비교.
-    RANDOM 또는 arm coverage 누락 → 안전하게 True 반환 (degenerate 취급).
-    """
-    random_cov = (report.get("baselines") or {}).get("RANDOM", {}).get(
-        "coordinate_coverage_mean"
-    )
-    if not _strict_number(random_cov):
-        return True
-    arms = report.get("arms") or {}
-    arm_data = arms.get(arm_id) or {}
-    arm_cov = (arm_data.get("utility") or {}).get("coordinate_coverage_mean")
-    if not _strict_number(arm_cov):
-        return True
-    return float(arm_cov) < float(random_cov)
-
-
 def _check_acceptance_recomputed_v3(
     prereg: Dict[str, Any],
     reports: List[Dict[str, Any]],
@@ -693,16 +710,16 @@ def _check_acceptance_recomputed_v3(
     Dict[str, Any],  # check result
     bool,  # delta_imp_pass
     bool,  # delta_noise_pass
-    bool,  # imp_key_arm_degenerate (freeze_at_1)
-    bool,  # noise_key_arm_degenerate (axs_ucb_default)
 ]:
-    """검사 5-v3: acceptance_recomputed_v3.
+    """검사 5-v3: acceptance_recomputed_v3 (v3.1).
 
     v3 사전등록(AXS-IMP-001/AXS-NOISE-001/AXS-ALPHA-EXP)에 대한 판정 재계산.
 
     - 리포트에 내장된 delta 블록은 전적으로 무시 (재계산).
-    - AXS-ALPHA-EXP 는 구조만 확인, 판정 계산 없음.
-    - requiresPass: ["AXS-IMP-001", "AXS-NOISE-001"] 강제.
+    - AXS-ALPHA-EXP 는 구조만 확인, 판정 계산 없음 (트랙 평가 영구 제외).
+    - requiresPass: 트랙별 claimTransitions(M2-IMP/M2-NOISE/M2) 강제 +
+      AXS-TB-001 리포트 필수 (누락 → 즉시 실패, fail-open 방지).
+    - degenerate 여부는 여기서 계산하지 않음 — role_specific_guard 가 담당.
     """
     ok = True
     details = []
@@ -716,28 +733,30 @@ def _check_acceptance_recomputed_v3(
     ci_bound = prereg.get("ciRule", {}).get("lowerBoundMustExceed", 0.0)
     metric = "slate_excess_nmi"
 
-    # requiresPass 강제 (fail-open 방지)
-    requires_pass_exps = list(
-        prereg.get("claimTransitions", {}).get("M2", {}).get("requiresPass", [])
-    )
-    if not requires_pass_exps:
-        ok = False
-        details.append(
-            "claimTransitions.M2.requiresPass 가 비어 있거나 누락됨 — "
-            "M2 라이선스 발급 조건 미충족 (fail-open 방지)"
-        )
-    else:
-        missing_exps = [exp for exp in requires_pass_exps if exp not in reports_by_exp]
-        if missing_exps:
+    # 트랙별 requiresPass 강제 (fail-open 방지)
+    transitions = prereg.get("claimTransitions", {}) or {}
+    required_exps: set = set()
+    for track in ("M2-IMP", "M2-NOISE", "M2"):
+        track_rp = list((transitions.get(track) or {}).get("requiresPass", []) or [])
+        if not track_rp:
             ok = False
             details.append(
-                f"requiresPass 실험 리포트 누락: {sorted(missing_exps)} — "
-                "해당 실험 리포트 없이는 M2 라이선스 발급 불가"
+                f"claimTransitions['{track}'].requiresPass 가 비어 있거나 누락됨 — "
+                "라이선스 발급 조건 미충족 (fail-open 방지)"
             )
+        required_exps.update(track_rp)
+    # AXS-TB-001 은 모든 트랙의 requiresInvariance 대상 — 리포트 필수
+    required_exps.add("AXS-TB-001")
+    missing_exps = sorted(exp for exp in required_exps if exp not in reports_by_exp)
+    if missing_exps:
+        ok = False
+        details.append(
+            f"requiresPass/필수 실험 리포트 누락: {missing_exps} — "
+            "해당 실험 리포트 없이는 트랙 라이선스 발급 불가"
+        )
 
     # AXS-IMP-001 delta_imp
     delta_imp_pass = False
-    imp_key_arm_degenerate = True  # 기본값: 안전하게 True
 
     r_imp = reports_by_exp.get("AXS-IMP-001")
     if r_imp is not None:
@@ -789,12 +808,8 @@ def _check_acceptance_recomputed_v3(
                         f"AXS-IMP-001 {sec_name} 이차 부호: {sec_pos}/{len(sec_delta)} 양수 (정보 공개, M2 비차단)"
                     )
 
-        # imp 핵심 arm degenerate 여부 (게이트 재계산)
-        imp_key_arm_degenerate = _is_arm_degenerate_gate_computed(r_imp, "freeze_at_1")
-
     # AXS-NOISE-001 delta_noise
     delta_noise_pass = False
-    noise_key_arm_degenerate = True  # 기본값: 안전하게 True
 
     r_noise = reports_by_exp.get("AXS-NOISE-001")
     if r_noise is not None:
@@ -849,19 +864,454 @@ def _check_acceptance_recomputed_v3(
                 f"AXS-NOISE-001 yokedAbsence 이차: {'확인' if yoked_absence else '미확인'} (정보 공개, M2 비차단)"
             )
 
-        # noise 핵심 arm degenerate 여부 (게이트 재계산)
-        noise_key_arm_degenerate = _is_arm_degenerate_gate_computed(
-            r_noise, "axs_ucb_default"
-        )
-
     detail = "; ".join(details) if details else "v3 모든 실험 판정 재계산 통과"
     return (
         {"check": "acceptance_recomputed", "ok": ok, "detail": detail},
         delta_imp_pass,
         delta_noise_pass,
-        imp_key_arm_degenerate,
-        noise_key_arm_degenerate,
     )
+
+
+# ---------------------------------------------------------------------------
+# v3.1 — 역할별 가드 재계산 + 알파 M2 금지 + canonical sentences
+# ---------------------------------------------------------------------------
+
+
+# 캘리브레이션 산출물 고정 경로 (저장소 루트 기준 — 유일하게 허용되는 인용 위치).
+# 절대 경로·우회 상대 경로(../)·임의 위치 산출물은 모두 거부 (fail-closed).
+_CALIBRATION_ARTIFACT_RELPATH = "configs/prereg/axs_dead_calibration_v1.json"
+
+
+def _verify_floor_calibration(
+    key_rule: Dict[str, Any],
+    floor: float,
+    details: List[str],
+) -> bool:
+    """absoluteFloor 를 커밋된 dead-arm 캘리브레이션 산출물과 대조 검증.
+
+    - prereg 인용 artifactPath 는 고정 저장소 상대 경로
+      (_CALIBRATION_ARTIFACT_RELPATH) 와 정확히 일치해야 함 — 절대 경로,
+      경로 우회(../), 다른 위치의 산출물은 거부 (위조 산출물 인용 차단).
+    - 고정 경로(저장소 루트 기준) 산출물 로드
+    - 산출물 summaryHash 자기 검증 (canonical_hash(doc - {summaryHash}))
+    - 인용 summaryHash 일치 + floor 동등성 요구
+    실패 시 details 에 한국어 사유 추가 후 False (fail-closed).
+    """
+    calib = key_rule.get("floorCalibration") or {}
+    artifact_path = calib.get("artifactPath")
+    cited_hash = calib.get("summaryHash")
+    if not isinstance(artifact_path, str) or not artifact_path:
+        details.append(
+            "keyManipulationRule.floorCalibration.artifactPath 누락 — "
+            "floor 캘리브레이션 검증 불가 (fail-closed)"
+        )
+        return False
+    if not isinstance(cited_hash, str) or not cited_hash:
+        details.append(
+            "keyManipulationRule.floorCalibration.summaryHash 누락 — "
+            "floor 캘리브레이션 검증 불가 (fail-closed)"
+        )
+        return False
+
+    if artifact_path != _CALIBRATION_ARTIFACT_RELPATH:
+        details.append(
+            f"floorCalibration.artifactPath={artifact_path!r} 가 고정 캘리브레이션 "
+            f"경로 {_CALIBRATION_ARTIFACT_RELPATH!r} 와 불일치 — 절대 경로·경로 "
+            "우회·임의 위치 산출물 인용 금지 (fail-closed)"
+        )
+        return False
+
+    p = _REPO_ROOT / _CALIBRATION_ARTIFACT_RELPATH
+    try:
+        with open(p, "r", encoding="utf-8") as fh:
+            artifact = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        details.append(
+            f"캘리브레이션 산출물 로드 실패: {p} — {exc} (fail-closed)"
+        )
+        return False
+    if not isinstance(artifact, dict):
+        details.append(
+            f"캘리브레이션 산출물이 JSON 객체가 아님: {p} (fail-closed)"
+        )
+        return False
+
+    embedded_hash = artifact.get("summaryHash")
+    body = {k: v for k, v in artifact.items() if k != "summaryHash"}
+    computed_hash = canonical_hash(body)
+    if computed_hash != embedded_hash:
+        details.append(
+            f"캘리브레이션 산출물 summaryHash 자기 검증 실패: "
+            f"내장={str(embedded_hash)[:12]}, 재계산={computed_hash[:12]} — 본문 변조 의심"
+        )
+        return False
+    if embedded_hash != cited_hash:
+        details.append(
+            f"prereg 인용 summaryHash({cited_hash[:12]}) 가 산출물 "
+            f"summaryHash({str(embedded_hash)[:12]}) 와 불일치"
+        )
+        return False
+
+    artifact_floor = (artifact.get("floorDerivation") or {}).get("absoluteFloor")
+    if not _strict_number(artifact_floor) or float(artifact_floor) != float(floor):
+        details.append(
+            f"absoluteFloor 불일치: prereg={floor!r}, "
+            f"산출물 floorDerivation.absoluteFloor={artifact_floor!r}"
+        )
+        return False
+    return True
+
+
+def _validate_seq_hash_structure(
+    ssh: Any,
+    eval_fams: List[str],
+) -> Optional[str]:
+    """key arm 의 slateSequenceHashes 구조 검증.
+
+    요구: 키 == 평가 패밀리 집합 정확히, 패밀리당 정확히 7개 probe 키,
+    probe 키 집합은 패밀리 간 일치, 값은 비공백 문자열.
+    문제 발견 시 한국어 메시지 반환, 정상이면 None.
+    """
+    if not isinstance(ssh, dict) or not ssh:
+        return "slateSequenceHashes 누락 또는 객체가 아님 (key arm 필수, fail-closed)"
+    fams_expected = set(str(f) for f in eval_fams)
+    fams_actual = set(str(k) for k in ssh.keys())
+    if fams_actual != fams_expected:
+        return (
+            f"slateSequenceHashes 패밀리 키 집합 {sorted(fams_actual)} 이 "
+            f"평가 패밀리 {sorted(fams_expected)} 와 불일치"
+        )
+    ref_probes: Optional[set] = None
+    for fam in sorted(fams_actual):
+        probes = ssh.get(fam)
+        if not isinstance(probes, dict):
+            return f"패밀리 {fam!r} 의 slateSequenceHashes 가 객체가 아님"
+        if len(probes) != _V31_PROBE_COUNT:
+            return (
+                f"패밀리 {fam!r} 의 probe 키 수 {len(probes)} ≠ {_V31_PROBE_COUNT}"
+            )
+        probe_set = set(str(k) for k in probes.keys())
+        if ref_probes is None:
+            ref_probes = probe_set
+        elif probe_set != ref_probes:
+            return (
+                f"패밀리 {fam!r} 의 probe 키 집합이 다른 패밀리와 불일치 "
+                f"({sorted(probe_set ^ ref_probes)})"
+            )
+        for probe, h in probes.items():
+            if not isinstance(h, str) or not h.strip():
+                return f"패밀리 {fam!r} probe {probe!r} 의 해시가 비공백 문자열이 아님"
+    return None
+
+
+def _check_role_specific_guard(
+    prereg: Dict[str, Any],
+    reports: List[Dict[str, Any]],
+) -> tuple[Dict[str, Any], Dict[str, bool]]:
+    """검사 v3.1: role_specific_guard — 역할별 utility 가드 재계산.
+
+    자기 보고 플래그를 절대 신뢰하지 않고 원시 리포트 값으로 재계산한다.
+    - 하드코딩 armRoles/rho 를 prereg.utilityGuard 와 교차 검증 (불일치 → 실패).
+    - absoluteFloor 를 prereg 에서 읽되 커밋된 캘리브레이션 산출물과 대조 검증.
+    - control/intermediate: coverage_mean ≥ rho × live_default coverage_mean.
+    - key_manipulation: coverage_mean ≥ absoluteFloor AND 프로브 응답성
+      (정확한 패밀리/probe 키 집합 + 패밀리당 고유 해시 ≥2).
+    - 일관성 규칙: 자기 보고 degenerate 플래그가 재계산 결과와 모순(양방향)
+      → 검사 실패 (변조/오계산 리포트, fail-closed).
+    - 정직하게 보고된 가드 실패는 검사 실패가 아니라 트랙 강등.
+
+    Returns: (check_result, {experiment_id: 모든 arm 가드 통과 여부})
+    """
+    ok = True
+    details: List[str] = []
+    guard_pass: Dict[str, bool] = {exp: False for exp in _V31_GUARDED_EXPERIMENTS}
+
+    guard = prereg.get("utilityGuard")
+    if not isinstance(guard, dict):
+        return (
+            {
+                "check": "role_specific_guard",
+                "ok": False,
+                "detail": (
+                    "prereg 에 utilityGuard 없음 — RANDOM-parity 부활 불가, "
+                    "역할별 가드 정의 필수 (fail-closed)"
+                ),
+            },
+            guard_pass,
+        )
+
+    # 1. armRoles 교차 검증 (하드코딩 vs prereg — 정확 일치)
+    arm_roles = guard.get("armRoles")
+    if arm_roles != _V31_ARM_ROLES:
+        ok = False
+        details.append(
+            "utilityGuard.armRoles 가 게이트 하드코딩 역할 매핑과 불일치 — "
+            f"prereg={arm_roles!r} (fail-closed)"
+        )
+
+    # 2. rho 교차 검증
+    rho = (guard.get("controlIntermediateRule") or {}).get("rho")
+    if not _strict_number(rho) or float(rho) != _V31_RHO:
+        ok = False
+        details.append(
+            f"controlIntermediateRule.rho={rho!r} 가 게이트 하드코딩 "
+            f"{_V31_RHO} 와 불일치 (fail-closed)"
+        )
+
+    # 3. absoluteFloor (strict number) + 캘리브레이션 산출물 대조
+    key_rule = guard.get("keyManipulationRule") or {}
+    floor = key_rule.get("absoluteFloor")
+    if not _strict_number(floor):
+        ok = False
+        details.append(
+            f"keyManipulationRule.absoluteFloor={floor!r} 누락 또는 비숫자 (fail-closed)"
+        )
+    else:
+        if not _verify_floor_calibration(key_rule, float(floor), details):
+            ok = False
+
+    # 4. probeResponsiveness 파라미터 교차 검증
+    probe_resp = key_rule.get("probeResponsiveness") or {}
+    if probe_resp.get("probeCount") != _V31_PROBE_COUNT or (
+        probe_resp.get("minDistinctHashesPerFamily") != _V31_MIN_DISTINCT_HASHES
+    ):
+        ok = False
+        details.append(
+            "keyManipulationRule.probeResponsiveness 의 probeCount/"
+            "minDistinctHashesPerFamily 가 게이트 하드코딩 "
+            f"({_V31_PROBE_COUNT}/{_V31_MIN_DISTINCT_HASHES}) 과 불일치 (fail-closed)"
+        )
+
+    if not ok:
+        # 구조/파라미터 실패 시 arm 평가 생략 (기준값 신뢰 불가)
+        return (
+            {
+                "check": "role_specific_guard",
+                "ok": False,
+                "detail": "; ".join(details),
+            },
+            guard_pass,
+        )
+
+    floor_f = float(floor)
+    eval_fams = [str(f) for f in prereg.get("evaluationFamilies", [])]
+
+    reports_by_exp: Dict[str, Dict[str, Any]] = {}
+    for r in reports:
+        reports_by_exp[r.get("experimentId", "")] = r
+
+    for exp_id in _V31_GUARDED_EXPERIMENTS:
+        r = reports_by_exp.get(exp_id)
+        if r is None:
+            details.append(
+                f"{exp_id}: 리포트 미제출 — 가드 평가 불가 "
+                "(acceptance_recomputed 에서 별도 실패)"
+            )
+            continue
+        roles = _V31_ARM_ROLES[exp_id]
+        arms = r.get("arms") or {}
+
+        extra_arms = sorted(set(arms.keys()) - set(roles.keys()))
+        if extra_arms:
+            ok = False
+            details.append(
+                f"{exp_id}: 역할 미정의 arm {extra_arms} — armRoles 에 없는 arm (fail-closed)"
+            )
+
+        live_arm_id = next(a for a, role in roles.items() if role == "live_default")
+        live_cov = ((arms.get(live_arm_id) or {}).get("utility") or {}).get(
+            "coordinate_coverage_mean"
+        )
+        if not _strict_number(live_cov):
+            ok = False
+            details.append(
+                f"{exp_id} live_default arm {live_arm_id!r}: "
+                f"coordinate_coverage_mean 누락 또는 비숫자 (값: {live_cov!r}) — "
+                "기준값 없이 가드 평가 불가 (fail-closed)"
+            )
+            continue
+
+        exp_all_pass = True
+        for arm_id, role in roles.items():
+            arm = arms.get(arm_id)
+            if not isinstance(arm, dict):
+                ok = False
+                exp_all_pass = False
+                details.append(f"{exp_id} arm {arm_id!r}: 누락 — 가드 평가 불가")
+                continue
+            cov = (arm.get("utility") or {}).get("coordinate_coverage_mean")
+            if not _strict_number(cov):
+                ok = False
+                exp_all_pass = False
+                details.append(
+                    f"{exp_id} arm {arm_id!r}: coordinate_coverage_mean 누락 또는 "
+                    f"비숫자 (값: {cov!r})"
+                )
+                continue
+            cov_f = float(cov)
+
+            structural_fail = False
+            if role == "live_default":
+                arm_pass = True
+            elif role == "intermediate":
+                arm_pass = cov_f >= _V31_RHO * float(live_cov)
+                if not arm_pass:
+                    details.append(
+                        f"{exp_id} arm {arm_id!r}: intermediate 가드 실패 — "
+                        f"coverage {cov_f:.6f} < rho({_V31_RHO}) × live_default "
+                        f"{float(live_cov):.6f}"
+                    )
+            else:  # key_manipulation
+                ssh = arm.get("slateSequenceHashes")
+                struct_err = _validate_seq_hash_structure(ssh, eval_fams)
+                if struct_err is not None:
+                    ok = False
+                    exp_all_pass = False
+                    structural_fail = True
+                    arm_pass = False
+                    details.append(f"{exp_id} arm {arm_id!r}: {struct_err}")
+                else:
+                    non_responsive = sorted(
+                        str(fam)
+                        for fam, probes in ssh.items()
+                        if len(set(probes.values())) < _V31_MIN_DISTINCT_HASHES
+                    )
+                    floor_ok = cov_f >= floor_f
+                    arm_pass = floor_ok and not non_responsive
+                    if not floor_ok:
+                        details.append(
+                            f"{exp_id} arm {arm_id!r}: key 가드 실패 — "
+                            f"coverage {cov_f:.6f} < absoluteFloor {floor_f:.6f}"
+                        )
+                    if non_responsive:
+                        details.append(
+                            f"{exp_id} arm {arm_id!r}: key 가드 실패 — "
+                            f"프로브 비응답 패밀리 {non_responsive} "
+                            f"(고유 해시 <{_V31_MIN_DISTINCT_HASHES})"
+                        )
+
+            if structural_fail:
+                continue  # 구조 위반은 이미 검사 실패 — 일관성 비교 생략
+
+            # 일관성 규칙: 자기 보고 vs 재계산 (양방향 모순 → 검사 실패)
+            self_degenerate = arm.get("degenerate") is True
+            recomputed_fail = not arm_pass
+            if self_degenerate != recomputed_fail:
+                ok = False
+                details.append(
+                    f"{exp_id} arm {arm_id!r}: 자기 보고 degenerate={self_degenerate} 가 "
+                    f"재계산된 역할별 가드 결과(실패={recomputed_fail})와 모순 — "
+                    "변조/오계산 리포트 (fail-closed)"
+                )
+            elif recomputed_fail:
+                # 정직한 가드 실패 — 트리플 관례 검증 후 트랙 강등
+                reason = arm.get("degenerateReason")
+                if not isinstance(reason, str) or not reason.strip():
+                    ok = False
+                    details.append(
+                        f"{exp_id} arm {arm_id!r}: degenerateReason 이 비어 있거나 "
+                        f"문자열이 아님 ({reason!r})"
+                    )
+                if arm.get("includedInMechanismClaim") is not False:
+                    ok = False
+                    details.append(
+                        f"{exp_id} arm {arm_id!r}: includedInMechanismClaim="
+                        f"{arm.get('includedInMechanismClaim')!r} (False 여야 함)"
+                    )
+                details.append(
+                    f"{exp_id} arm {arm_id!r}: 역할별 가드 실패 (정직 보고) — 트랙 강등"
+                )
+
+            if not arm_pass:
+                exp_all_pass = False
+
+        guard_pass[exp_id] = exp_all_pass
+
+    detail = "; ".join(details) if details else "역할별 가드 재계산 전체 통과"
+    return (
+        {"check": "role_specific_guard", "ok": ok, "detail": detail},
+        guard_pass,
+    )
+
+
+def _check_alpha_m2_prohibition(prereg: Dict[str, Any]) -> Dict[str, Any]:
+    """검사 v3.1: alpha_m2_prohibition — AXS-ALPHA-EXP 의 M2 영구 금지.
+
+    - claimTransitions 의 어떤 M2-트랙 requiresPass/requiresTracks 에도
+      AXS-ALPHA-EXP 가 등장하면 안 됨.
+    - prereg.experiments['AXS-ALPHA-EXP'].m2Prohibited 가 정확히 True 여야 함
+      (키 누락/False → 실패).
+    - v3 에서 금지 선언은 필수: experiments 에 AXS-ALPHA-EXP 엔트리 자체가
+      없어도 실패 (엔트리 삭제 우회 차단, fail-closed).
+    """
+    ok = True
+    details: List[str] = []
+
+    transitions = prereg.get("claimTransitions", {}) or {}
+    for track, trans in transitions.items():
+        if not str(track).startswith("M2"):
+            continue
+        trans = trans or {}
+        for field in ("requiresPass", "requiresTracks"):
+            values = trans.get(field) or []
+            if isinstance(values, list) and "AXS-ALPHA-EXP" in values:
+                ok = False
+                details.append(
+                    f"claimTransitions['{track}'].{field} 에 AXS-ALPHA-EXP 포함 — "
+                    "알파 실험의 M2 기여는 영구 금지 (fail-closed)"
+                )
+
+    alpha_cfg = (prereg.get("experiments") or {}).get("AXS-ALPHA-EXP")
+    if not isinstance(alpha_cfg, dict):
+        # v3 에서 금지 선언은 필수 — 엔트리 자체의 부재(삭제 우회)도 fail-closed
+        ok = False
+        details.append(
+            "experiments['AXS-ALPHA-EXP'] 엔트리 누락 또는 객체가 아님 "
+            f"(값: {alpha_cfg!r}) — v3 사전등록은 알파 M2 영구 금지 선언"
+            "(m2Prohibited=True) 이 필수, 엔트리 삭제로 우회 불가 (fail-closed)"
+        )
+    elif alpha_cfg.get("m2Prohibited") is not True:
+        ok = False
+        details.append(
+            "experiments['AXS-ALPHA-EXP'].m2Prohibited 가 True 가 아님 "
+            f"(값: {alpha_cfg.get('m2Prohibited')!r}) — 영구 금지 선언 필수 (fail-closed)"
+        )
+
+    detail = "; ".join(details) if details else "알파 M2 영구 금지 확인"
+    return {"check": "alpha_m2_prohibition", "ok": ok, "detail": detail}
+
+
+def _check_canonical_sentences(prereg: Dict[str, Any]) -> Dict[str, Any]:
+    """검사 v3.1: canonical_sentences — 라이선스 문장 소스 무결성.
+
+    licensedSentences 는 prereg.canonicalSentences 에서만 발급되므로
+    M-IMP / M-NOISE / M2-COMBINED 가 비공백 문자열로 존재해야 한다.
+    """
+    cs = prereg.get("canonicalSentences")
+    if not isinstance(cs, dict):
+        return {
+            "check": "canonical_sentences",
+            "ok": False,
+            "detail": "prereg.canonicalSentences 누락 — 라이선스 문장 발급 불가 (fail-closed)",
+        }
+    missing = [
+        key for key in ("M-IMP", "M-NOISE", "M2-COMBINED")
+        if not isinstance(cs.get(key), str) or not cs.get(key, "").strip()
+    ]
+    if missing:
+        return {
+            "check": "canonical_sentences",
+            "ok": False,
+            "detail": (
+                f"canonicalSentences 누락/비공백 아님: {missing} — "
+                "라이선스 문장 발급 불가 (fail-closed)"
+            ),
+        }
+    return {
+        "check": "canonical_sentences",
+        "ok": True,
+        "detail": "canonicalSentences(M-IMP/M-NOISE/M2-COMBINED) 확인",
+    }
 
 
 def _check_ledger_registered(
@@ -1022,17 +1472,23 @@ def _check_pilot_disjoint(
 def _check_tiebreak_invariance(
     reports: List[Dict[str, Any]],
     experiment_id: str,
-) -> tuple[Dict[str, Any], bool, bool]:
+) -> tuple[Dict[str, Any], bool, bool, bool]:
     """tieBreak invariance 검사 (AXS-010 또는 AXS-TB-001).
 
     experiment_id 로 리포트를 조회한다. v1 = "AXS-010", v3 = "AXS-TB-001".
     check 키는 호출 컨텍스트에 따라 결정 ("axs010_invariance" 또는 "axstb001_invariance").
 
-    Returns: (check_result, caveat_required, present)
-    strict_pass → caveat_required=False
-    soft_pass  → caveat_required=True
-    fail       → ok=False
-    absent     → ok=True (M2=False 이지만 검사 자체는 fail 아님), caveat_required=False
+    정직 vs 구조 분리 (역할별 가드와 동일 아키텍처):
+    - well-formed 리포트의 정직한 invariance fail(부호/trackDecision 불일치)은
+      증거 결과 — 검사 위반이 아니라 라이선스 강등 (ok=True, tb_pass=False).
+    - 구조 위반(필수 필드 누락, 비숫자/불리언 값)은 검사 실패 (ok=False).
+
+    Returns: (check_result, caveat_required, present, tb_pass)
+    strict_pass → ok=True, tb_pass=True
+    soft_pass  → ok=True, caveat_required=True, tb_pass=True
+    fail (정직) → ok=True, tb_pass=False (증거 결과 — 트랙/M2 강등)
+    구조 위반   → ok=False, tb_pass=False
+    absent     → ok=True, present=False, tb_pass=False
     """
     check_name = (
         "axs010_invariance" if experiment_id == "AXS-010" else "axstb001_invariance"
@@ -1047,6 +1503,7 @@ def _check_tiebreak_invariance(
                 "ok": True,
                 "detail": f"{experiment_id} invariance 증거 없음",
             },
+            False,
             False,
             False,
         )
@@ -1074,6 +1531,23 @@ def _check_tiebreak_invariance(
             },
             False,
             True,
+            False,
+        )
+
+    # 구조 위반: baseline CI 경계는 strict number 여야 함 (불리언/문자열 위장 차단)
+    if not _strict_number(b_ci_lower) or not _strict_number(b_ci_upper):
+        return (
+            {
+                "check": check_name,
+                "ok": False,
+                "detail": (
+                    f"{experiment_id}: baseline ciLower/ciUpper 가 strict number 가 아님 "
+                    f"(ciLower={b_ci_lower!r}, ciUpper={b_ci_upper!r}) — fail closed"
+                ),
+            },
+            False,
+            True,
+            False,
         )
 
     all_signs_match = True
@@ -1098,6 +1572,23 @@ def _check_tiebreak_invariance(
                 },
                 False,
                 True,
+                False,
+            )
+
+        # 구조 위반: estimate 가 존재하면 strict number 여야 함
+        if v_est is not None and not _strict_number(v_est):
+            return (
+                {
+                    "check": check_name,
+                    "ok": False,
+                    "detail": (
+                        f"{experiment_id}: 변형 {var_id!r} estimate 가 strict number "
+                        f"가 아님 ({v_est!r}) — fail closed"
+                    ),
+                },
+                False,
+                True,
+                False,
             )
 
         if v_sign != b_sign:
@@ -1111,14 +1602,20 @@ def _check_tiebreak_invariance(
             all_within_ci = False
 
     if not all_signs_match or not all_tracks_match:
+        # 정직한 invariance fail — 증거 결과 (검사 위반 아님, 라이선스 강등)
         return (
             {
                 "check": check_name,
-                "ok": False,
-                "detail": f"{experiment_id}: 변형 부호 또는 trackDecision 불일치 (fail)",
+                "ok": True,
+                "detail": (
+                    f"{experiment_id} fail (정직한 증거 결과): 변형 부호 또는 "
+                    "trackDecision 불일치 — invariance 미충족, 게이트 무결성 위반 아님 "
+                    "(해당 라이선스 강등)"
+                ),
             },
             False,
             True,
+            False,
         )
     if all_within_ci:
         return (
@@ -1128,6 +1625,7 @@ def _check_tiebreak_invariance(
                 "detail": f"{experiment_id} strict_pass: 모든 변형 부호·추정치 CI 내 일치",
             },
             False,
+            True,
             True,
         )
     else:
@@ -1139,55 +1637,51 @@ def _check_tiebreak_invariance(
             },
             True,
             True,
+            True,
         )
 
 
 def _check_axs010_invariance(
     prereg: Dict[str, Any],
     reports: List[Dict[str, Any]],
-) -> tuple[Dict[str, Any], bool, bool]:
+) -> tuple[Dict[str, Any], bool, bool, bool]:
     """검사 9: axs010_invariance (v1 호환 래퍼).
 
-    Returns: (check_result, caveat_required, axs010_present)
+    Returns: (check_result, caveat_required, axs010_present, tb_pass)
     """
-    result, caveat, present = _check_tiebreak_invariance(reports, "AXS-010")
-    return result, caveat, present
+    result, caveat, present, tb_pass = _check_tiebreak_invariance(reports, "AXS-010")
+    return result, caveat, present, tb_pass
 
 
 def _check_branch_decision(
     checks_ok: bool,
-    delta_imp_pass: bool,
-    delta_noise_pass: bool,
-    imp_key_arm_degenerate: bool,
-    noise_key_arm_degenerate: bool,
+    m2_imp: bool,
+    m2_noise: bool,
 ) -> Dict[str, Any]:
-    """검사 10-v3: branch_decision.
+    """검사 10-v3.1: branch_decision — 5-브랜치 트리 (branchCountFrozen).
 
-    v3 사전등록에서만 실행. 결정 트리:
+    트랙 라이선스(M2-IMP/M2-NOISE)는 호출자가 계산:
+        트랙 = 검사 전체 통과 ∧ primary contrast 통과 ∧ 해당 실험의
+        역할별 가드 전 arm 통과 ∧ AXS-TB-001 ≥ soft_pass.
 
     1. 어떤 필수 검사 실패 → "integrity_fail"
-    2. delta_imp pass ∧ delta_noise pass ∧ 두 핵심 arm 모두 non-degenerate
-       → "imprint_washout_supported"
-    3. delta_imp pass ∧ delta_noise pass ∧ (핵심 arm 중 하나 degenerate)
-       → "degenerate_qualified"
-    4. delta_imp pass ∧ delta_noise fail → "imprint_only"
-       delta_imp fail ∧ delta_noise pass → "noise_only"
-    5. 그 외 → "no_claim_m1_only"
+    2. 두 트랙 라이선스      → "both_supported"
+    3. IMP 트랙만            → "imprint_only_supported"
+    4. NOISE 트랙만          → "noise_only_supported"
+    5. 그 외                 → "no_claim_m1_only"
     """
     if not checks_ok:
         branch = "integrity_fail"
-    elif delta_imp_pass and delta_noise_pass:
-        if imp_key_arm_degenerate or noise_key_arm_degenerate:
-            branch = "degenerate_qualified"
-        else:
-            branch = "imprint_washout_supported"
-    elif delta_imp_pass and not delta_noise_pass:
-        branch = "imprint_only"
-    elif not delta_imp_pass and delta_noise_pass:
-        branch = "noise_only"
+    elif m2_imp and m2_noise:
+        branch = "both_supported"
+    elif m2_imp:
+        branch = "imprint_only_supported"
+    elif m2_noise:
+        branch = "noise_only_supported"
     else:
         branch = "no_claim_m1_only"
 
+    assert branch in _V31_BRANCHES
     return {
         "check": "branch_decision",
         "ok": True,  # 브랜치 결정 자체는 항상 ok (결과는 branch 필드에)
@@ -1230,8 +1724,17 @@ def evaluate_mechanism_license(
         release: True 이면 원격 브랜치 ancestry 추가 확인.
 
     Returns:
-        rungs, checks, caveatRequired, consumedReports, familyHistory, provisional,
-        branch (v3 prereg 에만 존재) 포함 dict.
+        rungs, checks, caveatRequired, consumedReports, familyHistory, provisional
+        포함 dict. v3 prereg 에서는 추가로:
+        - rungs["M2-IMP"], rungs["M2-NOISE"]: 트랙별 라이선스 (bool)
+        - rungs["M2"]: 결합 라이선스 (두 트랙 모두 통과 시에만 True)
+        - branch: 5-브랜치 중 하나 (integrity_fail / both_supported /
+          imprint_only_supported / noise_only_supported / no_claim_m1_only)
+        - licensedSentences: prereg.canonicalSentences 에서 발급된 정확한
+          문장 목록 (M2-IMP → "M-IMP", M2-NOISE → "M-NOISE",
+          결합 → 추가로 "M2-COMBINED"; 미라이선스 시 빈 목록)
+        v1 prereg 경로는 branch/licensedSentences/트랙 키 없음 (하위 호환).
+        caveatRequired 의 의미 불변 (TB soft_pass → True; 모든 라이선스 문장에 적용).
 
     NON-NEGOTIABLE: licenses.json 은 절대 읽지 않음. 자가 증명 불리언 무시.
     """
@@ -1292,16 +1795,24 @@ def evaluate_mechanism_license(
     # 검사 5: v3 와 v1 분기
     delta_imp_pass = False
     delta_noise_pass = False
-    imp_key_arm_degenerate = True
-    noise_key_arm_degenerate = True
+    guard_pass: Dict[str, bool] = {exp: False for exp in _V31_GUARDED_EXPERIMENTS}
 
     if is_v3:
-        c5, delta_imp_pass, delta_noise_pass, imp_key_arm_degenerate, noise_key_arm_degenerate = (
-            _check_acceptance_recomputed_v3(prereg, reports)
+        c5, delta_imp_pass, delta_noise_pass = _check_acceptance_recomputed_v3(
+            prereg, reports
         )
     else:
         c5 = _check_acceptance_recomputed(prereg, reports)
     checks.append(c5)
+
+    # v3.1 전용 검사: 역할별 가드 + 알파 M2 금지 + canonical sentences
+    if is_v3:
+        c5b, guard_pass = _check_role_specific_guard(prereg, reports)
+        checks.append(c5b)
+        c5c = _check_alpha_m2_prohibition(prereg)
+        checks.append(c5c)
+        c5d = _check_canonical_sentences(prereg)
+        checks.append(c5d)
 
     c6, consumed_reports, family_history = _check_ledger_registered(
         prereg, reports, ledger, str_report_paths
@@ -1317,27 +1828,40 @@ def evaluate_mechanism_license(
     # 검사 9: tieBreak invariance
     if is_v3:
         # v3: AXS-TB-001
-        c9, caveat_required, tb_present = _check_tiebreak_invariance(reports, "AXS-TB-001")
+        c9, caveat_required, tb_present, tb_pass = _check_tiebreak_invariance(
+            reports, "AXS-TB-001"
+        )
         c9["check"] = "axs010_invariance"  # 하위 호환: check 이름 유지
     else:
         # v1: AXS-010
-        c9, caveat_required, tb_present = _check_axs010_invariance(prereg, reports)
+        c9, caveat_required, tb_present, tb_pass = _check_axs010_invariance(
+            prereg, reports
+        )
     checks.append(c9)
 
     # M0/M1 always True (가설은 항상 허용)
     # M3 always False (MVP; AXS-001 필요)
     all_ok = all(c["ok"] for c in checks)
 
-    # branch_decision (v3 전용)
+    # branch_decision + 트랙 라이선스 (v3.1 전용)
     branch: Optional[str] = None
+    m2_imp = False
+    m2_noise = False
     if is_v3:
-        c10 = _check_branch_decision(
-            all_ok,
-            delta_imp_pass,
-            delta_noise_pass,
-            imp_key_arm_degenerate,
-            noise_key_arm_degenerate,
+        # 트랙 라이선스: 검사 전체 통과 ∧ primary contrast ∧ 역할별 가드 ∧ TB ≥ soft_pass
+        # tb_pass: 정직한 invariance fail(부호/trackDecision 불일치)은 검사 위반이
+        # 아니라 여기서 트랙 비라이선스로 반영된다 (→ no_claim_m1_only).
+        tb_ok = tb_present and c9["ok"] and tb_pass
+        m2_imp = bool(
+            all_ok and delta_imp_pass and guard_pass.get("AXS-IMP-001", False) and tb_ok
         )
+        m2_noise = bool(
+            all_ok
+            and delta_noise_pass
+            and guard_pass.get("AXS-NOISE-001", False)
+            and tb_ok
+        )
+        c10 = _check_branch_decision(all_ok, m2_imp, m2_noise)
         checks.append(c10)
         branch = c10["branch"]
         # all_ok 재확인 (branch_decision 추가 후)
@@ -1345,19 +1869,33 @@ def evaluate_mechanism_license(
 
     # M2 계산
     if is_v3:
-        # v3: all checks ok ∧ branch == "imprint_washout_supported"
-        #     ∧ AXS-TB-001 present ∧ >= soft_pass (tb_present + c9["ok"])
-        m2 = all_ok and (branch == "imprint_washout_supported") and tb_present
+        # v3.1: 결합 M2 는 두 트랙이 모두 라이선스될 때만 (both_supported)
+        m2 = m2_imp and m2_noise
     else:
-        # v1: 모든 검사 통과 AND AXS-010 >= soft_pass (axs010_present + c9["ok"])
-        m2 = all_ok and tb_present
+        # v1: 모든 검사 통과 AND AXS-010 >= soft_pass
+        # (axs010_present + tb_pass — 정직한 fail 은 검사 위반 없이 M2 강등)
+        m2 = all_ok and tb_present and tb_pass
 
-    rungs = {
+    rungs: Dict[str, Any] = {
         "M0": True,
         "M1": True,
         "M2": m2,
         "M3": False,  # MVP: AXS-001 필요 — 현재 미구현
     }
+    if is_v3:
+        rungs["M2-IMP"] = m2_imp
+        rungs["M2-NOISE"] = m2_noise
+
+    # licensedSentences (v3.1 전용 — prereg.canonicalSentences 에서만 발급)
+    licensed_sentences: List[str] = []
+    if is_v3:
+        cs = prereg.get("canonicalSentences") or {}
+        if m2_imp and isinstance(cs.get("M-IMP"), str):
+            licensed_sentences.append(cs["M-IMP"])
+        if m2_noise and isinstance(cs.get("M-NOISE"), str):
+            licensed_sentences.append(cs["M-NOISE"])
+        if m2_imp and m2_noise and isinstance(cs.get("M2-COMBINED"), str):
+            licensed_sentences.append(cs["M2-COMBINED"])
 
     log_ko(
         _logger,
@@ -1375,6 +1913,7 @@ def evaluate_mechanism_license(
     }
     if is_v3:
         result["branch"] = branch
+        result["licensedSentences"] = licensed_sentences
 
     return result
 
@@ -1469,7 +2008,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     branch = result.get("branch")
     if branch is not None:
         m2_val = rungs["M2"]
-        print(f"심사 완료: branch={branch!r}, M2={m2_val}")
+        print(
+            f"심사 완료: branch={branch}, "
+            f"M2-IMP={rungs.get('M2-IMP')}, M2-NOISE={rungs.get('M2-NOISE')}, "
+            f"M2(combined)={m2_val}"
+        )
+        sentences = result.get("licensedSentences") or []
+        for s in sentences:
+            print(f"  licensed: {s}")
         if m2_val:
             print("ladder_gate 심사 완료: 증거 충분")
         else:

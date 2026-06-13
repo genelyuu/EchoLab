@@ -22,15 +22,18 @@ import yaml
 
 from echo_bench.env.horizon import default_h, load_horizon
 from echo_bench.experiments.axs_common import (
-    build_arm_entry,
+    build_arm_entry_v3,
     build_axs_report,
     dry_run_plan,
     load_default_configs,
+    load_prereg_doc,
     make_axs_arg_parser,
     parse_base_seeds,
     register_report,
     reportable_block,
     run_arm_family,
+    slate_sequence_hashes_from_block,
+    validate_v3_utility_guard,
     write_report,
 )
 from echo_bench.logging import get_logger, log_ko
@@ -125,6 +128,10 @@ def run_axs_imp_001(
     if reports_dir is None:
         reports_dir = _REPORTS_DIR
 
+    # v3.1 역할별 가드 파라미터 — 실행 전 fail-closed 검증 (한국어 ValueError)
+    prereg_doc = load_prereg_doc(eff_prereg)
+    validate_v3_utility_guard(prereg_doc, "AXS-IMP-001")
+
     bases, archive_cfg = load_default_configs()
     base_cfg = _load_yaml(_AXS_UCB_CFG_PATH)
 
@@ -204,6 +211,7 @@ def run_axs_imp_001(
                 arm_raw[arm_id][fam]["coordinate_coverage_mean"]
             )
             block[f"{arm_id}_traceHashes"] = arm_raw[arm_id][fam]["traceHashes"]
+            block[f"{arm_id}_slateHashes"] = arm_raw[arm_id][fam]["slateHashes"]
         family_blocks[fam] = block
 
     # ---- derive all report values exclusively from family_blocks ----
@@ -211,6 +219,12 @@ def run_axs_imp_001(
 
     random_coverage_mean = float(
         sum(family_blocks[fam]["random_coordinate_coverage_mean"] for fam in families)
+        / len(families)
+    )
+
+    # live_default (freeze_none) coverage 평균 — 역할별 가드 기준값
+    live_default_cov_mean = float(
+        sum(family_blocks[fam]["freeze_none_coordinate_coverage_mean"] for fam in families)
         / len(families)
     )
 
@@ -224,8 +238,19 @@ def run_axs_imp_001(
             sum(family_blocks[fam][f"{arm_id}_coordinate_coverage_mean"] for fam in families)
             / len(families)
         )
-        entry = build_arm_entry(
-            metric, nmi_by_fam, cov_mean, random_coverage_mean,
+        seq_hashes = {
+            fam: slate_sequence_hashes_from_block(
+                {"slateHashes": family_blocks[fam][f"{arm_id}_slateHashes"]}
+            )
+            for fam in families
+        }
+        entry = build_arm_entry_v3(
+            metric, nmi_by_fam, cov_mean,
+            prereg=prereg_doc,
+            experiment_id="AXS-IMP-001",
+            arm_id=arm_id,
+            live_default_coverage_mean=live_default_cov_mean,
+            slate_sequence_hashes=seq_hashes,
             degenerate_reason_prefix=arm_id,
         )
         arms_report[arm_id] = entry
@@ -249,6 +274,7 @@ def run_axs_imp_001(
             result[f"{arm_id}_slate_excess_nmi"] = float(raw["slate_excess_nmi"])
             result[f"{arm_id}_coordinate_coverage_mean"] = float(raw["coordinate_coverage_mean"])
             result[f"{arm_id}_traceHashes"] = raw["traceHashes"]
+            result[f"{arm_id}_slateHashes"] = raw["slateHashes"]
         r = run_arm_family(
             lambda: RandomPolicy({"k": k}),
             seed, H=H_eff, k=k, pool_size=pool_size, n_permutations=n_permutations,

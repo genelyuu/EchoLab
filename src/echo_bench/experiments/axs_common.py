@@ -65,6 +65,10 @@ __all__ = [
     "reportable_block",
     "bootstrap_block",
     "build_arm_entry",
+    "build_arm_entry_v3",
+    "slate_sequence_hashes_from_block",
+    "load_prereg_doc",
+    "validate_v3_utility_guard",
     "build_axs_report",
     "write_report",
     "register_report",
@@ -344,6 +348,206 @@ def build_arm_entry(
             f"{float(coverage_mean):.6f} below RANDOM baseline "
             f"{float(random_coverage_mean):.6f}"
         )
+        entry["degenerate"] = True
+        entry["degenerateReason"] = reason
+        entry["includedInMechanismClaim"] = False
+
+    return entry
+
+
+# ---------------------------------------------------------------------------
+# 4b. v3.1 — slateSequenceHashes + 역할별 degenerate 마킹 (N7-3 Part 1)
+# ---------------------------------------------------------------------------
+
+# v3 역할 어휘 (prereg utilityGuard.armRoles 값 집합)
+_V3_ARM_ROLES = ("live_default", "intermediate", "key_manipulation")
+
+
+def slate_sequence_hashes_from_block(family_block: Mapping[str, Any]) -> Dict[str, str]:
+    """run_arm_family 블록에서 {probe: slateSequenceHash} 매핑 추출.
+
+    계약 (prereg v3 utilityGuard.keyManipulationRule.probeResponsiveness):
+        hash = canonical_hash(라운드 순서의 selected-cardId 리스트들의 리스트)
+    run_arm_family 는 EXPANDED_PROBE_SET 순서로 정확히 이 해시를
+    slateHashes 에 기록하므로, 여기서 probe 이름과 zip 한다.
+
+    Raises:
+        ValueError: slateHashes 누락 또는 프로브 수 불일치 (fail-closed, 한국어).
+    """
+    hashes = family_block.get("slateHashes")
+    if not isinstance(hashes, list) or len(hashes) != len(EXPANDED_PROBE_SET):
+        raise ValueError(
+            "slateSequenceHashes 추출 실패: 블록의 slateHashes 가 누락되었거나 "
+            f"프로브 수({len(EXPANDED_PROBE_SET)})와 길이가 다릅니다 "
+            f"(실제: {hashes!r})"
+        )
+    return {probe: str(h) for probe, h in zip(EXPANDED_PROBE_SET, hashes)}
+
+
+def load_prereg_doc(prereg_path: Any) -> Dict[str, Any]:
+    """사전등록 JSON 문서 로드 (fail-closed, 한국어 오류).
+
+    러너가 역할별 가드 파라미터(armRoles/rho/absoluteFloor)를 읽기 위해
+    스탬프 대상 prereg 문서 자체를 로드할 때 사용한다.
+    """
+    p = Path(prereg_path)
+    try:
+        with open(p, "r", encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"사전등록 문서 로드 실패: {p} — {exc}") from exc
+    if not isinstance(doc, dict):
+        raise ValueError(
+            f"사전등록 문서가 JSON 객체(dict)가 아닙니다: {p} "
+            f"(타입: {type(doc).__name__})"
+        )
+    return doc
+
+
+def validate_v3_utility_guard(
+    prereg: Mapping[str, Any],
+    experiment_id: str,
+) -> Dict[str, Any]:
+    """v3 prereg 의 역할별 가드 파라미터 검증 + 추출 (fail-closed).
+
+    Returns:
+        {"roles": {arm_id: role}, "rho": float, "absolute_floor": float}
+
+    Raises:
+        ValueError: utilityGuard / armRoles[experiment_id] / rho / absoluteFloor
+        누락 또는 비숫자 (한국어 메시지, fail-closed).
+    """
+    guard = prereg.get("utilityGuard")
+    if not isinstance(guard, dict):
+        raise ValueError(
+            f"역할별 가드 적용 불가: 사전등록에 utilityGuard 가 없습니다 "
+            f"(experiment={experiment_id}) — fail-closed"
+        )
+    arm_roles_all = guard.get("armRoles")
+    if not isinstance(arm_roles_all, dict) or experiment_id not in arm_roles_all:
+        raise ValueError(
+            f"역할별 가드 적용 불가: utilityGuard.armRoles 에 "
+            f"{experiment_id} 항목이 없습니다 — fail-closed"
+        )
+    roles = arm_roles_all[experiment_id]
+    if not isinstance(roles, dict) or not roles:
+        raise ValueError(
+            f"역할별 가드 적용 불가: armRoles[{experiment_id}] 가 비어 있거나 "
+            "객체가 아닙니다 — fail-closed"
+        )
+    for arm_id, role in roles.items():
+        if role not in _V3_ARM_ROLES:
+            raise ValueError(
+                f"역할별 가드 적용 불가: arm {arm_id!r} 의 역할 {role!r} 이 "
+                f"허용 집합 {list(_V3_ARM_ROLES)} 에 없습니다 — fail-closed"
+            )
+
+    rho = (guard.get("controlIntermediateRule") or {}).get("rho")
+    if not isinstance(rho, (int, float)) or isinstance(rho, bool):
+        raise ValueError(
+            "역할별 가드 적용 불가: utilityGuard.controlIntermediateRule.rho 가 "
+            f"누락되었거나 숫자가 아닙니다 (값: {rho!r}) — fail-closed"
+        )
+    floor = (guard.get("keyManipulationRule") or {}).get("absoluteFloor")
+    if not isinstance(floor, (int, float)) or isinstance(floor, bool):
+        raise ValueError(
+            "역할별 가드 적용 불가: utilityGuard.keyManipulationRule.absoluteFloor 가 "
+            f"누락되었거나 숫자가 아닙니다 (값: {floor!r}) — fail-closed"
+        )
+    return {"roles": dict(roles), "rho": float(rho), "absolute_floor": float(floor)}
+
+
+def build_arm_entry_v3(
+    metric_name: str,
+    per_family_values: Mapping[str, float],
+    coverage_mean: float,
+    *,
+    prereg: Mapping[str, Any],
+    experiment_id: str,
+    arm_id: str,
+    live_default_coverage_mean: float,
+    slate_sequence_hashes: Mapping[str, Mapping[str, str]],
+    degenerate_reason_prefix: str,
+) -> Dict[str, Any]:
+    """v3.1 역할별 가드에 따른 arm 리포트 엔트리 조립.
+
+    RANDOM-parity 자동 마킹(build_arm_entry) 대신 prereg 의
+    utilityGuard.armRoles 역할에 따라 degenerate 를 마킹한다:
+
+    - live_default: parity 로 절대 degenerate 마킹하지 않음 (기준 arm).
+    - intermediate: coverage_mean < rho × live_default coverage → degenerate.
+    - key_manipulation: coverage_mean < absoluteFloor 또는 어느 패밀리든
+      slateSequenceHashes 고유값 <2 → degenerate.
+
+    모든 arm 엔트리는 slateSequenceHashes({family: {probe: hash}})를 싣는다.
+    degenerate 트리플 관례 불변: degenerate/degenerateReason(한국어 비공백)/
+    includedInMechanismClaim=False.
+    """
+    params = validate_v3_utility_guard(prereg, experiment_id)
+    roles = params["roles"]
+    if arm_id not in roles:
+        raise ValueError(
+            f"역할별 가드 적용 불가: arm {arm_id!r} 이 "
+            f"armRoles[{experiment_id}] 에 등재되어 있지 않습니다 — fail-closed"
+        )
+    role = roles[arm_id]
+    rho = params["rho"]
+    floor = params["absolute_floor"]
+
+    if not isinstance(live_default_coverage_mean, (int, float)) or isinstance(
+        live_default_coverage_mean, bool
+    ):
+        raise ValueError(
+            "역할별 가드 적용 불가: live_default coverage 가 숫자가 아닙니다 "
+            f"(값: {live_default_coverage_mean!r}) — fail-closed"
+        )
+
+    per_family: Dict[str, Dict[str, float]] = {
+        fam: {metric_name: float(v)} for fam, v in per_family_values.items()
+    }
+    bs = bootstrap_block(per_family_values, key=metric_name)
+
+    entry: Dict[str, Any] = {
+        "perFamily": per_family,
+        "bootstrap": {metric_name: bs},
+        "utility": {"coordinate_coverage_mean": float(coverage_mean)},
+        "slateSequenceHashes": {
+            str(fam): {str(p): str(h) for p, h in probes.items()}
+            for fam, probes in slate_sequence_hashes.items()
+        },
+    }
+
+    cov = float(coverage_mean)
+    reason: Optional[str] = None
+    if role == "intermediate":
+        threshold = rho * float(live_default_coverage_mean)
+        if cov < threshold:
+            reason = (
+                f"{degenerate_reason_prefix}: 역할별 가드 실패 (intermediate) — "
+                f"coordinate_coverage_mean {cov:.6f} < rho({rho}) × "
+                f"live_default {float(live_default_coverage_mean):.6f} = {threshold:.6f}"
+            )
+    elif role == "key_manipulation":
+        if cov < floor:
+            reason = (
+                f"{degenerate_reason_prefix}: 역할별 가드 실패 (key_manipulation) — "
+                f"coordinate_coverage_mean {cov:.6f} < absoluteFloor {floor:.6f}"
+            )
+        else:
+            non_responsive = [
+                str(fam)
+                for fam, probes in entry["slateSequenceHashes"].items()
+                if len(set(probes.values())) < 2
+            ]
+            if non_responsive:
+                reason = (
+                    f"{degenerate_reason_prefix}: 역할별 가드 실패 (key_manipulation) — "
+                    f"프로브 비응답: 패밀리 {sorted(non_responsive)} 에서 "
+                    "slateSequenceHashes 고유값 <2"
+                )
+    # live_default: parity 로 degenerate 마킹 금지 (기준 arm)
+
+    if reason is not None:
         entry["degenerate"] = True
         entry["degenerateReason"] = reason
         entry["includedInMechanismClaim"] = False

@@ -26,15 +26,18 @@ import yaml
 
 from echo_bench.env.horizon import default_h, load_horizon
 from echo_bench.experiments.axs_common import (
-    build_arm_entry,
+    build_arm_entry_v3,
     build_axs_report,
     dry_run_plan,
     load_default_configs,
+    load_prereg_doc,
     make_axs_arg_parser,
     parse_base_seeds,
     register_report,
     reportable_block,
     run_arm_family,
+    slate_sequence_hashes_from_block,
+    validate_v3_utility_guard,
     write_report,
 )
 from echo_bench.logging import get_logger, log_ko
@@ -118,6 +121,10 @@ def run_axs_alpha_exp(
     if reports_dir is None:
         reports_dir = _REPORTS_DIR
 
+    # v3.1 역할별 가드 파라미터 — 실행 전 fail-closed 검증 (한국어 ValueError)
+    prereg_doc = load_prereg_doc(eff_prereg)
+    validate_v3_utility_guard(prereg_doc, "AXS-ALPHA-EXP")
+
     bases, archive_cfg = load_default_configs()
     base_cfg = _load_yaml(_AXS_UCB_CFG_PATH)
 
@@ -197,6 +204,7 @@ def run_axs_alpha_exp(
             "axs_ucb_alpha0_archiveHash": a_raw["archiveHash"],
             "axs_ucb_alpha0_poolHash": a_raw["poolHash"],
             "axs_ucb_alpha0_traceHashes": a_raw["traceHashes"],
+            "axs_ucb_alpha0_slateHashes": a_raw["slateHashes"],
             "random_coordinate_coverage_mean": float(random_raw["coordinate_coverage_mean"]),
             "random_archiveHash": random_raw["archiveHash"],
             "random_poolHash": random_raw["poolHash"],
@@ -220,12 +228,35 @@ def run_axs_alpha_exp(
         / len(families)
     )
 
-    default_entry = build_arm_entry(
-        metric, default_nmi, default_cov_mean, random_coverage_mean,
+    default_seq_hashes = {
+        fam: slate_sequence_hashes_from_block(
+            {"slateHashes": family_blocks[fam]["slateHashes"]}
+        )
+        for fam in families
+    }
+    alpha0_seq_hashes = {
+        fam: slate_sequence_hashes_from_block(
+            {"slateHashes": family_blocks[fam]["axs_ucb_alpha0_slateHashes"]}
+        )
+        for fam in families
+    }
+
+    default_entry = build_arm_entry_v3(
+        metric, default_nmi, default_cov_mean,
+        prereg=prereg_doc,
+        experiment_id="AXS-ALPHA-EXP",
+        arm_id="axs_ucb_default",
+        live_default_coverage_mean=default_cov_mean,
+        slate_sequence_hashes=default_seq_hashes,
         degenerate_reason_prefix="axs_ucb_default",
     )
-    alpha0_entry = build_arm_entry(
-        metric, alpha0_nmi, alpha0_cov_mean, random_coverage_mean,
+    alpha0_entry = build_arm_entry_v3(
+        metric, alpha0_nmi, alpha0_cov_mean,
+        prereg=prereg_doc,
+        experiment_id="AXS-ALPHA-EXP",
+        arm_id="axs_ucb_alpha0",
+        live_default_coverage_mean=default_cov_mean,
+        slate_sequence_hashes=alpha0_seq_hashes,
         degenerate_reason_prefix="axs_ucb_alpha0",
     )
 
@@ -253,6 +284,7 @@ def run_axs_alpha_exp(
             "axs_ucb_alpha0_archiveHash": a["archiveHash"],
             "axs_ucb_alpha0_poolHash": a["poolHash"],
             "axs_ucb_alpha0_traceHashes": a["traceHashes"],
+            "axs_ucb_alpha0_slateHashes": a["slateHashes"],
             "random_coordinate_coverage_mean": float(r["coordinate_coverage_mean"]),
             "random_archiveHash": r["archiveHash"],
             "random_poolHash": r["poolHash"],
