@@ -909,12 +909,22 @@ class TestGateContract:
 
 class TestDraftRefusal:
     def test_draft_prereg_status_fails(self, gate_setup, module_tmp):
-        """v3 draft as-is (status=design-draft) → prereg_status 검사 실패."""
-        # Use the draft prereg directly (status = design-draft)
-        draft_path = _V3_DRAFT
-        # Build a ledger and report paths that use the draft prereg
-        with open(draft_path, "r", encoding="utf-8") as fh:
+        """status=design-draft → prereg_status 검사 실패.
+
+        커밋된 prereg는 N7-7에서 'registered'로 승격됐으므로, 거부 경로를
+        검증하려면 status를 명시적으로 강등한 사본을 써야 한다 (커밋 파일
+        상태에 의존하지 않는다). 러너도 이 강등 사본에 스탬프해야 해시가 맞는다.
+        """
+        # Load the committed prereg and downgrade status to design-draft on a copy
+        with open(_V3_DRAFT, "r", encoding="utf-8") as fh:
             draft_prereg = json.load(fh)
+        draft_prereg["status"] = "design-draft"
+        draft_prereg.pop("derivedFromDraftHash", None)
+        draft_prereg.pop("registeredAt", None)
+        draft_path = module_tmp / "prereg_v3_design_draft_copy.json"
+        draft_path.write_text(
+            json.dumps(draft_prereg, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
         draft_p_hash = prereg_hash(draft_prereg)
 
         rdir_draft = module_tmp / "draft_reports"

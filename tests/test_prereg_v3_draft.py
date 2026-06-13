@@ -144,14 +144,30 @@ def test_changeJustification_mentions_filename_collision_bug(v3: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# status 정확히 "design-draft"
+# status 정확히 "registered" (N7-7 등록 승격)
 # ---------------------------------------------------------------------------
 
 
-def test_status_is_design_draft(v3: dict) -> None:
-    """status가 정확히 'design-draft' 문자열이어야 한다."""
-    assert v3.get("status") == "design-draft", (
-        f"status가 'design-draft'가 아님: {v3.get('status')!r}"
+def test_status_is_registered(v3: dict) -> None:
+    """status가 정확히 'registered'여야 한다 (N7-7 등록 후)."""
+    assert v3.get("status") == "registered", (
+        f"status가 'registered'가 아님: {v3.get('status')!r}"
+    )
+
+
+def test_registration_metadata(v3: dict) -> None:
+    """등록 메타: derivedFromDraftHash(64-hex) + registeredAt + registrationNote 존재."""
+    h = v3.get("derivedFromDraftHash")
+    assert isinstance(h, str) and len(h) == 64 and all(
+        c in "0123456789abcdef" for c in h
+    ), f"derivedFromDraftHash가 64자리 hex가 아님: {h!r}"
+    assert v3.get("registeredAt"), "registeredAt 누락"
+    assert isinstance(v3.get("registrationNote"), str) and v3["registrationNote"], (
+        "registrationNote 누락"
+    )
+    # 등록본 bindingNote는 registered를 반영해야 함 (design-draft 잔재 금지)
+    assert "REGISTERED" in v3.get("bindingNote", ""), (
+        "bindingNote가 등록 상태를 반영하지 않음"
     )
 
 

@@ -2018,13 +2018,20 @@ def test_v3_branch_noise_only_supported(tmp_path):
 
 
 def test_v3_redteam_draft_status_prereg_fails(tmp_path):
-    """red-team: status='design-draft' prereg + 완벽한 리포트 → prereg_status 실패."""
-    # v3 draft 원본 (status='design-draft') 그대로 사용
+    """red-team: status='design-draft' prereg + 완벽한 리포트 → prereg_status 실패.
+
+    커밋된 prereg는 N7-7에서 'registered'로 승격됐으므로, 거부 로직 자체를
+    검증하려면 status를 명시적으로 'design-draft'로 강등한 사본을 써야 한다
+    (커밋 파일 상태에 의존하지 않는다).
+    """
     import copy as _copy
     with open(_REAL_PREREG_V3, "r", encoding="utf-8") as fh:
         v3_draft = json.load(fh)
 
-    # draft 그대로 저장 (status 변경 없음)
+    # 거부 경로 검증: status를 design-draft로 강등 (등록 메타는 제거)
+    v3_draft["status"] = "design-draft"
+    v3_draft.pop("derivedFromDraftHash", None)
+    v3_draft.pop("registeredAt", None)
     prereg_path = tmp_path / "prereg_v3_draft.json"
     prereg_path.write_text(
         json.dumps(v3_draft, indent=2, ensure_ascii=False), encoding="utf-8"
