@@ -370,8 +370,8 @@
   },
   "livenessCriteria": {
     "residualChecksBeforeRegistration": [
-      "H=16 spot check on one critic family preserves delta_imp and delta_noise signs",
-      "branch reachability: extract coverage/degenerate flags from post-fix reports to confirm strong branch is reachable"
+      "H=16 spot check on one critic family preserves delta_imp and delta_noise signs (DONE — N5: signs preserved on family 124)",
+      "branch reachability under the v3.1 role-specific guard: confirm the strong branch (both_supported) is structurally reachable, NOT degenerate-locked as it was under RANDOM-parity (DONE — N7-4, see branchReachabilityVerification)"
     ],
     "criticFamilies": [
       "123",
@@ -379,7 +379,70 @@
       "777",
       "55555"
     ],
-    "ledgerRegistration": false
+    "ledgerRegistration": false,
+    "branchReachabilityVerification": {
+      "verifiedUnder": "v3.1 role-specific utility guard (absoluteFloor 0.16964285714285715, rho 0.70, probe-responsiveness >=2 distinct slateSequenceHashes per family)",
+      "criticFamilies": [
+        "123",
+        "124",
+        "777",
+        "55555"
+      ],
+      "runParams": {
+        "H": 8,
+        "k": 4,
+        "pool_size": 64,
+        "n_permutations": 200,
+        "replay_mode": "none"
+      },
+      "reachedBranch": "both_supported",
+      "note": "Re-run of the three confirmatory runners through the v3.1 runners (slateSequenceHashes + role-specific marking) and re-evaluation through the real gate pure functions (role_specific_guard, acceptance_recomputed_v3, tiebreak_invariance) on critic families. This reverses the N5 finding: under the prior RANDOM-parity guard freeze_at_1 was degenerate 4/4 and the strong branch was structurally unreachable; under the dead-calibrated absolute floor it clears (cross-family mean coverage 0.2589 >= floor 0.1696) and is probe-responsive in every family (distinct slate-hash counts 3/5/5/6), so registration is no longer a predetermined no-M2 program. Evaluation families remain untouched; this is a critic-family liveness probe, not the registered production result.",
+      "guardOutcome": {
+        "AXS-IMP-001": {
+          "freeze_at_1_key_coverage_mean": 0.258928571,
+          "floor": 0.169642857,
+          "freeze_at_1_distinctHashesPerFamily": {
+            "123": 3,
+            "124": 5,
+            "777": 6,
+            "55555": 5
+          },
+          "guardPass": true
+        },
+        "AXS-NOISE-001": {
+          "yoked_key_coverage_mean": 0.589285714,
+          "default_live_default_coverage_mean": 0.459821429,
+          "yoked_distinctHashesPerFamily": {
+            "123": 6,
+            "124": 7,
+            "777": 6,
+            "55555": 5
+          },
+          "guardPass": true
+        }
+      },
+      "acceptance": {
+        "delta_imp_pass": true,
+        "delta_imp_mean": 0.284547,
+        "delta_imp_ci": [
+          0.178535,
+          0.396669
+        ],
+        "delta_noise_pass": true,
+        "delta_noise_mean": 0.1568,
+        "delta_noise_ci": [
+          0.125348,
+          0.1938
+        ]
+      },
+      "tieBreakInvariance": "strict_pass",
+      "reachabilityReportHashes": {
+        "AXS-IMP-001": "1c757d7bc9b9e865caad763517b6691e107e49663625f2256f0fb46663529746",
+        "AXS-NOISE-001": "0fb937f57cfe64083ab6cef049b08b4f74d408241b7b4daa37bb2478fc22f298",
+        "AXS-TB-001": "c654dbf8073e43ddd682ee59ceccf9a8b1c2e4f06e0e4cde10e72de2e2a62a04"
+      },
+      "evaluationFamiliesUntouched": true
+    }
   },
   "degenerateArmPolicy": {
     "mustReport": true,
