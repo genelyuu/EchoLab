@@ -3,7 +3,7 @@
   "version": 3,
   "title": "AXS mechanism preregistration v3 draft — imprint-washout",
   "status": "design-draft",
-  "draftRevision": 2,
+  "draftRevision": 3,
   "bindingNote": "DESIGN DRAFT — not a registered preregistration. The evidence gate must refuse any prereg whose status is not 'registered'. Committed only to hash-pin the design and liveness criteria.",
   "supersedes": "axs-mechanism v1 (registered, never consumed) and v2 design-draft (never registered)",
   "revisionJustification": [
@@ -12,7 +12,8 @@
     "Coverage contraction under early freezing is the registered mechanism signature (imprint), not degenerate behavior, so a parity guard on the key manipulation arm would fail the program on the very phenomenon under study.",
     "The dead-arm calibration artifact (configs/prereg/axs_dead_calibration_v1.json) grounds an absolute coverage floor empirically, between a provably dead constant policy and the minimum measured live key-arm coverage.",
     "The advisor approved a role-specific guard: control and intermediate arms keep rho=0.70 live-default parity, while key manipulation arms carry a different guard (dead-calibrated absolute floor plus probe-responsiveness), which is not an exemption.",
-    "M2 is split into M2-IMP and M2-NOISE tracks under a strong-or-M1 binary: any guard failure demotes the affected track to unsupported (M1 only); no weak or caveated M2 band exists."
+    "M2 is split into M2-IMP and M2-NOISE tracks under a strong-or-M1 binary: any guard failure demotes the affected track to unsupported (M1 only); no weak or caveated M2 band exists.",
+    "draftRevision 3 (integration alignment): the per-track canonical sentences (M-IMP, M-NOISE) are aligned to the registered scope-marker convention ('within the tested policy families' + 'in this controlled testbed') so that the gate-licensed sentences themselves satisfy the scanner's preregistered scope-marker requirement; meaning unchanged, only the scope prefix wording. Surfaced by the unpatched gate-to-scanner integration probe: with the previous singular-scope prefix, a licensed canonical sentence could never be published without a wrapper sentence."
   ],
   "changeJustification": [
     "The v1 pilot that motivated the v2 entry-point-ablation draft was invalidated by a config-drop harness bug: run_round passed per-call {\"k\": k} and AxsUcbPolicy/AxsYokedBonusPolicy.select resolved effective = config if config is not None else self.config, replacing constructor config; alpha/freeze/tie-break manipulations were therefore never applied; fixed in b7b64b42350bb424999569138b373b189c8704b1.",
@@ -151,7 +152,7 @@
   },
   "noPValues": true,
   "minSufficientFamilies": 3,
-  "tieBreakCaveatMarker": "subject to a tie-breaking sensitivity caveat (AXS-010 soft_pass)",
+  "tieBreakCaveatMarker": "subject to a tie-breaking sensitivity caveat (AXS-TB-001 soft_pass)",
   "yokedSchedule": {
     "pilotFamily": "999",
     "referenceArm": "axs_ucb_default",
@@ -276,12 +277,12 @@
     {
       "name": "imprint_only_supported",
       "condition": "M2-IMP track licensed AND M2-NOISE track not licensed",
-      "licensedClaim": "Within the tested policy family and controlled testbed, one-step trace imprinting amplifies above-null slate separability."
+      "licensedClaim": "Within the tested policy families in this controlled testbed, one-step trace imprinting amplifies above-null slate separability."
     },
     {
       "name": "noise_only_supported",
       "condition": "M2-NOISE track licensed AND M2-IMP track not licensed",
-      "licensedClaim": "Within the tested policy family and controlled testbed, schedule-yoked perturbation disrupts the structured separability pattern."
+      "licensedClaim": "Within the tested policy families in this controlled testbed, schedule-yoked perturbation disrupts the structured separability pattern."
     },
     {
       "name": "no_claim_m1_only",
@@ -291,8 +292,8 @@
   ],
   "branchCountFrozen": true,
   "canonicalSentences": {
-    "M-IMP": "Within the tested policy family and controlled testbed, one-step trace imprinting amplifies above-null slate separability.",
-    "M-NOISE": "Within the tested policy family and controlled testbed, schedule-yoked perturbation disrupts the structured separability pattern.",
+    "M-IMP": "Within the tested policy families in this controlled testbed, one-step trace imprinting amplifies above-null slate separability.",
+    "M-NOISE": "Within the tested policy families in this controlled testbed, schedule-yoked perturbation disrupts the structured separability pattern.",
     "M2-COMBINED": "Within the tested policy families in this controlled testbed, above-null slate separability is amplified when trace-conditioned policy state is frozen early in the horizon and is eliminated by trace-independent bonus randomization; continual trace-conditioned updates attenuate but do not eliminate it.",
     "ALPHA-EXPLORATORY": "Alpha effects were heterogeneous across critic families and are treated as exploratory."
   },

@@ -597,12 +597,17 @@ def test_v3_branchCountFrozen(v3: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_tieBreakCaveatMarker_identical_to_v1(v1: dict, v3: dict) -> None:
-    """tieBreakCaveatMarker가 v1과 동일해야 한다."""
-    assert v3["tieBreakCaveatMarker"] == v1["tieBreakCaveatMarker"], (
+def test_tieBreakCaveatMarker_v1_wording_tb001_target(v1: dict, v3: dict) -> None:
+    """TRD §2: caveat 마커는 v1 문구를 유지하되 대상 실험명만 AXS-TB-001.
+
+    (구버전 테스트는 v1과 완전 동일을 핀했으나, v3의 invariance 실험은
+    AXS-010이 아니라 AXS-TB-001이므로 실험명 치환이 스펙이다.)
+    """
+    expected = v1["tieBreakCaveatMarker"].replace("AXS-010", "AXS-TB-001")
+    assert expected != v1["tieBreakCaveatMarker"], "v1 마커에 AXS-010이 없음 — 전제 위반"
+    assert v3["tieBreakCaveatMarker"] == expected, (
         f"tieBreakCaveatMarker 불일치: "
-        f"v3={v3['tieBreakCaveatMarker']!r}, "
-        f"v1={v1['tieBreakCaveatMarker']!r}"
+        f"v3={v3['tieBreakCaveatMarker']!r}, 기대={expected!r}"
     )
 
 
@@ -662,13 +667,16 @@ def test_v3_contrastLivenessEvidence_matches_pilot_v3_reports(
 
 DEAD_CALIB_PATH = REPO / "configs/prereg/axs_dead_calibration_v1.json"
 
-# advisor 확정 정본 문장 (verbatim)
+# advisor 확정 정본 문장 — scope 접두부는 draftRevision 3에서 등록된 scope 마커
+# 규약('within the tested policy families' + 'in this controlled testbed')으로
+# 정렬 (무패치 게이트→스캐너 통합 프로브가 드러낸 '라이선스돼도 출판 불능' 구조의
+# 수정; 의미 불변, 접두부 문구만 변경).
 CANONICAL_M_IMP = (
-    "Within the tested policy family and controlled testbed, one-step trace "
+    "Within the tested policy families in this controlled testbed, one-step trace "
     "imprinting amplifies above-null slate separability."
 )
 CANONICAL_M_NOISE = (
-    "Within the tested policy family and controlled testbed, schedule-yoked "
+    "Within the tested policy families in this controlled testbed, schedule-yoked "
     "perturbation disrupts the structured separability pattern."
 )
 # 기존 v3 composite 문장 — 변경 금지 (both_supported 분기에 결박)
@@ -683,6 +691,19 @@ CANONICAL_ALPHA = (
     "Alpha effects were heterogeneous across critic families and are treated "
     "as exploratory."
 )
+# TRD §2: caveat 정본 마커는 v1 문구 유지, 대상 실험명만 AXS-TB-001
+CAVEAT_MARKER_V3 = (
+    "subject to a tie-breaking sensitivity caveat (AXS-TB-001 soft_pass)"
+)
+
+
+def test_n7_caveat_marker_targets_tb001(v3: dict) -> None:
+    """v3의 tieBreakCaveatMarker는 AXS-TB-001을 지목해야 한다 (v1 잔재 금지)."""
+    assert v3.get("tieBreakCaveatMarker") == CAVEAT_MARKER_V3, (
+        f"caveat 마커 불일치: {v3.get('tieBreakCaveatMarker')!r}"
+    )
+
+
 RANDOM_REFERENCE_DECLARATION = (
     "RANDOM is retained as a reference policy, but not used as the primary "
     "degeneracy guard for within-policy mechanism contrasts, because the "
@@ -697,14 +718,17 @@ def dead_calib() -> dict:
         return json.load(f)
 
 
-def test_n7_draftRevision_2_with_justification(v3: dict) -> None:
-    """draftRevision == 2 + revisionJustification 4~6문장 + 기존 changeJustification 보존."""
-    assert v3.get("draftRevision") == 2, (
-        f"draftRevision이 2가 아님: {v3.get('draftRevision')!r}"
+def test_n7_draftRevision_3_with_justification(v3: dict) -> None:
+    """draftRevision == 3 + revisionJustification(rev2 4~6 + rev3 정렬 1건) + changeJustification 보존."""
+    assert v3.get("draftRevision") == 3, (
+        f"draftRevision이 3이 아님: {v3.get('draftRevision')!r}"
     )
     rj = v3.get("revisionJustification")
-    assert isinstance(rj, list) and 4 <= len(rj) <= 6, (
-        f"revisionJustification은 4~6개 문장 배열이어야 함: {rj!r}"
+    assert isinstance(rj, list) and 5 <= len(rj) <= 7, (
+        f"revisionJustification은 5~7개 문장 배열이어야 함: {rj!r}"
+    )
+    assert any("scope-marker convention" in s for s in rj), (
+        "draftRevision 3의 scope 마커 정렬 사유가 revisionJustification에 없음"
     )
     assert all(isinstance(s, str) and s for s in rj), (
         "revisionJustification 항목이 비어 있거나 문자열이 아님"
