@@ -1542,3 +1542,591 @@ def test_fix3b_amplify_pattern_verb_first_still_catches_freeze():
     assert findings, (
         "verb-first amplif...freez must still be caught after Fix 3b"
     )
+
+
+# ---------------------------------------------------------------------------
+# N7-4 (claim scanner v3.1): alpha/bonus suppression coupling + per-track
+# M2 sentence licensing.
+# ---------------------------------------------------------------------------
+
+from echo_bench.tools.claim_check import (  # noqa: E402
+    MECHANISM_CLAIM_PATTERNS_V3_1,
+)
+
+# Canonical per-track sentences are pulled FROM the committed prereg v3 draft
+# (data-derived — no hardcoded sentence literals).
+_PREREG_V3_DRAFT_PATH = (
+    _REPO_ROOT / "configs" / "prereg" / "axs_mechanism_prereg_v3_draft.json"
+)
+_PREREG_V3_DRAFT = json.loads(_PREREG_V3_DRAFT_PATH.read_text(encoding="utf-8"))
+_CANONICAL_SENTENCES = _PREREG_V3_DRAFT["canonicalSentences"]
+_M_IMP = _CANONICAL_SENTENCES["M-IMP"]
+_M_NOISE = _CANONICAL_SENTENCES["M-NOISE"]
+
+# Scope-marker wrapper: since draftRevision 3 the per-track canonical
+# sentences themselves carry BOTH registered scope markers, so the wrapper is
+# no longer required for publication — it remains here to pin that an embedded
+# verbatim canonical inside a larger scoped sentence is ALSO licensed (the
+# substring rule), independent of the bare-canonical path.
+_SCOPE_PREFIX = (
+    "Within the tested policy families in this controlled testbed, "
+    "the gate-licensed claim is recorded verbatim: "
+)
+_M_IMP_SCOPED = _SCOPE_PREFIX + _M_IMP
+_M_NOISE_SCOPED = _SCOPE_PREFIX + _M_NOISE
+
+# Same with the canonical caveat marker spliced in BEFORE the embedded
+# canonical sentence (the canonical's own final period ends the sentence, so
+# the caveat cannot follow it within the same sentence).
+_M_IMP_SCOPED_CAVEAT = (
+    "Within the tested policy families in this controlled testbed, "
+    + _CAVEAT
+    + ", the gate-licensed claim is recorded verbatim: "
+    + _M_IMP
+)
+
+# v3.1 pattern constants (pin the exact strings, mirroring the V3 convention).
+_SEP_NOUNS = (
+    r"(?:separabilit(?:y|ies)|probe[-\s]separability|slate[-\s]separability"
+    r"|trajectory\s+distinction)"
+)
+_PAT_V31_AGENT_FIRST = (
+    r"(?:alpha|exploration\s+bonus|bonus)[^.\n]{0,80}"
+    r"(?:suppress(?:es|ed)?|reduc(?:es|ed)|attenuat(?:es|ed))[^.\n]{0,80}"
+    + _SEP_NOUNS
+)
+_PAT_V31_NOUN_PASSIVE = (
+    _SEP_NOUNS
+    + r"[^.\n]{0,80}(?:is|are|was|were)\s+(?:suppressed|reduced|attenuated)\s+by"
+    r"[^.\n]{0,80}(?:alpha|exploration\s+bonus|bonus)"
+)
+_PAT_V31_NOUN_ACTIVE = (
+    _SEP_NOUNS
+    + r"[^.\n]{0,80}(?:suppress(?:es|ed)?|reduc(?:es|ed)|attenuat(?:es|ed))"
+    r"[^.\n]{0,80}(?:alpha|exploration\s+bonus|bonus)"
+)
+_PAT_V31_DISRUPT = r"disrupt(?:s|ed|ing)?[^.\n]{0,80}" + _SEP_NOUNS
+_PAT_V31_DISRUPT_REV = _SEP_NOUNS + r"[^.\n]{0,80}disrupt(?:s|ed|ing)?"
+
+
+def test_v31_pattern_tuple_exists_and_pins_patterns():
+    """MECHANISM_CLAIM_PATTERNS_V3_1 must exist and contain the new patterns."""
+    assert isinstance(MECHANISM_CLAIM_PATTERNS_V3_1, tuple)
+    for required in (
+        _PAT_V31_AGENT_FIRST,
+        _PAT_V31_NOUN_PASSIVE,
+        _PAT_V31_NOUN_ACTIVE,
+        _PAT_V31_DISRUPT,
+        _PAT_V31_DISRUPT_REV,
+    ):
+        assert required in MECHANISM_CLAIM_PATTERNS_V3_1, (
+            f"v3.1 pattern missing from MECHANISM_CLAIM_PATTERNS_V3_1: {required!r}"
+        )
+    for p in MECHANISM_CLAIM_PATTERNS_V3_1:
+        assert isinstance(p, str)
+        assert ".{0," not in p.replace("[^.\\n]{0,", ""), (
+            f"unbounded-class gap forbidden in v3.1 pattern: {p!r}"
+        )
+
+
+def test_v31_does_not_touch_pinned_tuples():
+    """v1 and V3 tuples remain byte-identical (re-assert the pins)."""
+    assert MECHANISM_CLAIM_PATTERNS == (
+        _PAT_REQUIRES,
+        _PAT_ATTRIBUTABLE,
+        _PAT_DRIVEN,
+        _PAT_CAUSES,
+        _PAT_NOT_ADAPTIVITY,
+    )
+    assert len(MECHANISM_CLAIM_PATTERNS_V3) == 15
+    # No overlap: v3.1 patterns are NEW, not relabeled v1/V3 patterns.
+    assert not (
+        set(MECHANISM_CLAIM_PATTERNS_V3_1)
+        & (set(MECHANISM_CLAIM_PATTERNS) | set(MECHANISM_CLAIM_PATTERNS_V3))
+    )
+
+
+# --- Part 1 mandatory fixtures ---
+
+
+def test_v31_alpha_suppresses_separability_flagged():
+    """MEASURED GAP: 'Alpha suppresses separability.' must now be a finding."""
+    findings = scan_text("Alpha suppresses separability.")
+    assert findings, "'Alpha suppresses separability.' must be flagged"
+    assert all(f.phrase in MECHANISM_CLAIM_PATTERNS_V3_1 for f in findings), (
+        f"expected only v3.1 patterns to fire: {[f.phrase for f in findings]}"
+    )
+
+
+def test_v31_heterogeneous_alpha_observation_passes():
+    """No suppression-verb/separability coupling → pass."""
+    text = "We observed heterogeneous alpha effects in critic pilots."
+    assert scan_text(text) == [], f"observation sentence wrongly flagged: {text!r}"
+
+
+def test_v31_alpha_hypothesis_licensed_as_m1():
+    """Hypothesis marker licenses the alpha-suppression coupling as M1.
+
+    The regex itself MUST match (so the pass is the M1 path, not a pattern
+    hole): 'hypothesize' is in MECHANISM_HYPOTHESIS_MARKERS.
+    """
+    import re as _re
+
+    from echo_bench.tools.claim_check import MECHANISM_HYPOTHESIS_MARKERS
+
+    text = "We hypothesize that alpha may suppress separability."
+    assert any(
+        _re.search(p, text, _re.IGNORECASE)
+        for p in MECHANISM_CLAIM_PATTERNS_V3_1
+    ), "the v3.1 coupling regex must match the hypothesis sentence"
+    assert "hypothesize" in MECHANISM_HYPOTHESIS_MARKERS
+    assert scan_text(text) == [], f"M1 hypothesis form wrongly flagged: {text!r}"
+
+
+def test_v31_exploration_bonus_agent_flagged():
+    findings = scan_text(
+        "The exploration bonus suppresses probe separability in long horizons."
+    )
+    assert findings, "exploration-bonus agent coupling must be flagged"
+
+
+def test_v31_noun_first_passive_flagged():
+    findings = scan_text(
+        "Probe separability was reduced by the exploration bonus."
+    )
+    assert findings, "noun-first passive (suppressed/reduced by agent) must be flagged"
+
+
+def test_v31_noun_first_active_flagged():
+    findings = scan_text(
+        "Separability dropped when the schedule reduced the bonus contribution."
+    )
+    assert findings, "noun-first active order (noun..verb..agent) must be flagged"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # No separability noun → plain technical prose.
+        "The alpha parameter reduces the exploration bonus magnitude.",
+        "We reduced the bonus schedule length.",
+        # Identifier / backtick contexts.
+        "Set `alpha=0.0` to disable the bonus term in the config.",
+        "alpha=0.0 disables the bonus term",
+        # Agent without any suppression verb.
+        "The bonus term is added to the per-card score before ranking.",
+    ],
+)
+def test_v31_plain_technical_prose_passes(text):
+    assert scan_text(text) == [], f"technical prose wrongly flagged: {text!r}"
+
+
+def test_v31_backtick_straddle_in_is_flagged():
+    """Straddle-IN is DELIBERATE anti-evasion (controller-pinned, N7-4 review).
+
+    A match that STARTS in prose and whose bounded ``[^.\\n]{0,N}`` gap walks
+    INTO a backtick span IS a finding: only matches that start inside an open
+    backtick span are suppressed. Otherwise wrapping just the noun in backticks
+    ('alpha suppresses `separability`.') becomes an evasion channel.
+    """
+    evasion = "alpha suppresses `separability`."
+    findings = scan_text(evasion)
+    assert findings, (
+        f"backtick-noun evasion attempt must remain a finding: {evasion!r}"
+    )
+    assert any(
+        f.phrase in MECHANISM_CLAIM_PATTERNS_V3_1 for f in findings
+    ), f"expected a v3.1 coupling pattern to fire: {[f.phrase for f in findings]}"
+
+
+def test_v31_alpha_attenuates_separability_fires_both_layers():
+    """attenuate↔separability already fires V3 (agent-free); v3.1 adds the
+    agent-coupled finding — the sentence honestly yields findings from BOTH
+    tuples (one Finding per matching pattern; no dedup across tuples)."""
+    findings = scan_text("Alpha attenuates probe separability.")
+    phrases = {f.phrase for f in findings}
+    assert any(p in MECHANISM_CLAIM_PATTERNS_V3 for p in phrases), (
+        f"V3 attenuation coupling must still fire: {phrases}"
+    )
+    assert any(p in MECHANISM_CLAIM_PATTERNS_V3_1 for p in phrases), (
+        f"v3.1 agent-coupled attenuation must also fire: {phrases}"
+    )
+
+
+def test_v31_regression_v1_and_v3_still_caught():
+    # v1 exploration vocabulary still caught.
+    assert scan_text(
+        "Amplification generally requires history-dependent exploration."
+    ), "v1 exploration-vocabulary sentence must still be caught"
+    # V3 imprint/washout vocabulary still caught.
+    assert scan_text(
+        "Slate separability is driven by early imprinting of the learned state."
+    ), "V3 imprint sentence must still be caught"
+    assert scan_text(
+        "Slate separability requires update washout."
+    ), "V3 washout sentence must still be caught"
+
+
+def test_v31_cli_alpha_suppression_korean_guidance(tmp_path, capsys):
+    """CLI: a v3.1 hit exits 1 and prints the Track M Korean guidance."""
+    doc = tmp_path / "alpha.md"
+    doc.write_text("Alpha suppresses separability.\n", encoding="utf-8")
+    rc = main([str(doc)])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "[Track M]" in out
+    assert "가설형(M1)" in out
+
+
+# --- Per-track canonical-sentence visibility ---
+
+
+def test_v31_m_noise_canonical_unlicensed_flagged():
+    """The M-NOISE canonical sentence must be scanner-visible: licensing it is
+    meaningless if the unlicensed sentence silently passes."""
+    findings = scan_text(_M_NOISE)
+    assert findings, (
+        f"M-NOISE canonical sentence must be flagged without license: {_M_NOISE!r}"
+    )
+
+
+def test_v31_m_imp_canonical_unlicensed_flagged():
+    findings = scan_text(_M_IMP)
+    assert findings, (
+        f"M-IMP canonical sentence must be flagged without license: {_M_IMP!r}"
+    )
+
+
+# --- Part 2: per-track M2 sentence licensing (gate-team contract) ---
+
+
+def _v3_gate_result(licensed, branch, caveat_required=False):
+    """Synthetic v3-shaped ladder_gate result per the gate-team contract."""
+    return {
+        "rungs": {
+            "M0": True,
+            "M1": True,
+            "M2-IMP": _M_IMP in licensed,
+            "M2-NOISE": _M_NOISE in licensed,
+            "M2": (_M_IMP in licensed) and (_M_NOISE in licensed),
+            "M3": False,
+        },
+        "branch": branch,
+        "caveatRequired": caveat_required,
+        "licensedSentences": list(licensed),
+    }
+
+
+def test_v31_per_track_imp_only_licensed(tmp_path, capsys, monkeypatch):
+    """(a) M2-IMP only: M-IMP scoped sentence passes; M-NOISE is a finding."""
+    import echo_bench.tools.ladder_gate as lg
+
+    monkeypatch.setattr(
+        lg,
+        "evaluate_mechanism_license",
+        lambda *a, **k: _v3_gate_result([_M_IMP], "imprint_only_supported"),
+    )
+    prereg, report, ledger = _write_gate_evidence(tmp_path)
+
+    ok_doc = tmp_path / "imp.md"
+    ok_doc.write_text(_M_IMP_SCOPED + "\n", encoding="utf-8")
+    rc = main([str(ok_doc)] + _gate_args(prereg, report, ledger))
+    assert rc == 0, capsys.readouterr().out
+
+    bad_doc = tmp_path / "noise.md"
+    bad_doc.write_text(_M_NOISE_SCOPED + "\n", encoding="utf-8")
+    rc = main([str(bad_doc)] + _gate_args(prereg, report, ledger))
+    assert rc == 1, "M-NOISE sentence must be a finding when only M2-IMP is licensed"
+
+
+def test_v31_per_track_both_licensed(tmp_path, capsys, monkeypatch):
+    """(b) both tracks licensed → both scoped canonical sentences pass."""
+    import echo_bench.tools.ladder_gate as lg
+
+    monkeypatch.setattr(
+        lg,
+        "evaluate_mechanism_license",
+        lambda *a, **k: _v3_gate_result([_M_IMP, _M_NOISE], "both_supported"),
+    )
+    prereg, report, ledger = _write_gate_evidence(tmp_path)
+    doc = tmp_path / "both.md"
+    doc.write_text(
+        _M_IMP_SCOPED + "\n\n" + _M_NOISE_SCOPED + "\n", encoding="utf-8"
+    )
+    rc = main([str(doc)] + _gate_args(prereg, report, ledger))
+    assert rc == 0, capsys.readouterr().out
+
+
+def test_v31_empty_licensed_sentences_fail_closed(tmp_path, capsys, monkeypatch):
+    """(c) licensedSentences=[] → nothing licensed, even with rungs M2 True
+    (boolean disguise must not reopen the v1 path)."""
+    import echo_bench.tools.ladder_gate as lg
+
+    result = _v3_gate_result([_M_IMP, _M_NOISE], "both_supported")
+    result["licensedSentences"] = []  # rungs stay True — must still fail
+    monkeypatch.setattr(
+        lg, "evaluate_mechanism_license", lambda *a, **k: result
+    )
+    prereg, report, ledger = _write_gate_evidence(tmp_path)
+    doc = tmp_path / "both.md"
+    doc.write_text(
+        _M_IMP_SCOPED + "\n\n" + _M_NOISE_SCOPED + "\n", encoding="utf-8"
+    )
+    rc = main([str(doc)] + _gate_args(prereg, report, ledger))
+    assert rc == 1, "empty licensedSentences must license nothing (fail closed)"
+
+
+def test_v31_explicit_null_licensed_sentences_fail_closed(
+    tmp_path, capsys, monkeypatch
+):
+    """(c2) EXPLICIT ``licensedSentences: null`` (present-but-None) is MALFORMED.
+
+    A gate result that CARRIES the ``licensedSentences`` key with a None value
+    must NOT route to the v1 m2-boolean path (that would fail open: m2=True
+    would license every M2-form sentence). Present-but-None is treated like any
+    other malformed value: empty list, licenses nothing, Korean warning, fail
+    closed. Only a genuinely ABSENT key selects the v1 behavior.
+    """
+    import echo_bench.tools.ladder_gate as lg
+
+    monkeypatch.setattr(
+        lg,
+        "evaluate_mechanism_license",
+        lambda *a, **k: {
+            "rungs": {"M2": True},
+            "caveatRequired": False,
+            "licensedSentences": None,  # present-but-None: malformed, NOT v1
+        },
+    )
+    prereg, report, ledger = _write_gate_evidence(tmp_path)
+    doc = tmp_path / "m2.md"
+    doc.write_text(_M2_CANONICAL + "\n", encoding="utf-8")
+    rc = main([str(doc)] + _gate_args(prereg, report, ledger))
+    out = capsys.readouterr().out
+    assert rc == 1, (
+        "explicit licensedSentences=None must fail closed (v3 path, empty "
+        "list), not reopen the v1 m2-boolean path"
+    )
+    assert "[경고]" in out, (
+        f"Korean malformed-licensedSentences warning expected: {out!r}"
+    )
+
+
+def test_v31_v1_shaped_result_preserves_old_behavior(tmp_path, capsys, monkeypatch):
+    """(d) v1-shaped gate result WITHOUT licensedSentences → m2-boolean rule."""
+    import echo_bench.tools.ladder_gate as lg
+
+    monkeypatch.setattr(
+        lg,
+        "evaluate_mechanism_license",
+        lambda *a, **k: {"rungs": {"M2": True}, "caveatRequired": False},
+    )
+    prereg, report, ledger = _write_gate_evidence(tmp_path)
+    doc = tmp_path / "m2.md"
+    doc.write_text(_M2_CANONICAL + "\n", encoding="utf-8")
+    rc = main([str(doc)] + _gate_args(prereg, report, ledger))
+    assert rc == 0, capsys.readouterr().out
+
+
+def test_v31_caveat_required_interacts_with_sentence_license(
+    tmp_path, capsys, monkeypatch
+):
+    """caveatRequired=True: the licensed sentence passes only WITH the marker."""
+    import echo_bench.tools.ladder_gate as lg
+
+    monkeypatch.setattr(
+        lg,
+        "evaluate_mechanism_license",
+        lambda *a, **k: _v3_gate_result(
+            [_M_IMP], "imprint_only_supported", caveat_required=True
+        ),
+    )
+    prereg, report, ledger = _write_gate_evidence(tmp_path)
+
+    ok_doc = tmp_path / "ok.md"
+    ok_doc.write_text(_M_IMP_SCOPED_CAVEAT + "\n", encoding="utf-8")
+    rc = main([str(ok_doc)] + _gate_args(prereg, report, ledger))
+    assert rc == 0, capsys.readouterr().out
+
+    bad_doc = tmp_path / "bad.md"
+    bad_doc.write_text(_M_IMP_SCOPED + "\n", encoding="utf-8")
+    rc = main([str(bad_doc)] + _gate_args(prereg, report, ledger))
+    assert rc == 1, "caveatRequired without the marker must remain a finding"
+
+
+def test_v31_licensed_sentence_wrapped_across_lines():
+    """A canonical sentence wrapped across doc lines still matches: whitespace
+    runs are normalized to single spaces on BOTH sides before the exact
+    (case-sensitive) substring comparison."""
+    words = _M_IMP_SCOPED.split()
+    wrapped = "\n".join(
+        " ".join(words[i : i + 8]) for i in range(0, len(words), 8)
+    )
+    findings = scan_text(
+        wrapped,
+        mechanism_license={
+            "m2": False,
+            "caveatRequired": False,
+            "licensedSentences": [_M_IMP],
+        },
+    )
+    assert findings == [], (
+        f"line-wrapped licensed canonical sentence wrongly flagged: {findings}"
+    )
+
+
+def test_v31_licensed_sentence_match_is_case_sensitive():
+    lowered = _SCOPE_PREFIX + _M_IMP.lower()
+    findings = scan_text(
+        lowered,
+        mechanism_license={
+            "m2": False,
+            "caveatRequired": False,
+            "licensedSentences": [_M_IMP],
+        },
+    )
+    assert findings, "case-mangled canonical sentence must NOT be licensed"
+
+
+def test_v31_paraphrase_not_licensed():
+    """Near-paraphrase of the canonical sentence must NOT be licensed."""
+    paraphrase = (
+        "Within the tested policy families in this controlled testbed, "
+        "one-step trace imprinting strongly amplifies above-null slate "
+        "separability."
+    )
+    findings = scan_text(
+        paraphrase,
+        mechanism_license={
+            "m2": False,
+            "caveatRequired": False,
+            "licensedSentences": [_M_IMP],
+        },
+    )
+    assert findings, "paraphrased canonical sentence must NOT be licensed"
+
+
+def test_v31_malformed_licensed_sentences_fail_closed():
+    """licensedSentences as a bare string must license NOTHING (a string would
+    otherwise iterate per-character and fail open on 1-char substrings)."""
+    findings = scan_text(
+        _M_IMP_SCOPED,
+        mechanism_license={
+            "m2": True,
+            "caveatRequired": False,
+            "licensedSentences": _M_IMP,  # malformed: str, not list
+        },
+    )
+    assert findings, "malformed (non-list) licensedSentences must fail closed"
+
+
+def test_v31_malformed_gate_licensed_sentences_cli_fail_closed(
+    tmp_path, capsys, monkeypatch
+):
+    """Gate returning a malformed licensedSentences value → fail closed in CLI."""
+    import echo_bench.tools.ladder_gate as lg
+
+    monkeypatch.setattr(
+        lg,
+        "evaluate_mechanism_license",
+        lambda *a, **k: {
+            "rungs": {"M2": True},
+            "caveatRequired": False,
+            "licensedSentences": _M_IMP,  # malformed: str, not list
+        },
+    )
+    prereg, report, ledger = _write_gate_evidence(tmp_path)
+    doc = tmp_path / "imp.md"
+    doc.write_text(_M_IMP_SCOPED + "\n", encoding="utf-8")
+    rc = main([str(doc)] + _gate_args(prereg, report, ledger))
+    assert rc == 1, "malformed gate licensedSentences must fail closed"
+
+
+def test_v31_scope_markers_still_required_even_when_licensed():
+    """A licensed sentence stripped of the scope markers is a finding.
+
+    draftRevision 3 정렬 후 정본 문장 자체가 두 scope 마커를 포함하므로,
+    마커 부재 케이스는 접두부를 구식 단수형으로 강등시켜 합성한다 — 라이선스
+    문자열에 마커 없는 변형이 들어 있어도 scope 마커 요구는 우회 불가.
+    """
+    degraded = _M_IMP.replace(
+        "Within the tested policy families in this controlled testbed, ",
+        "Within the tested policy family and controlled testbed, ",
+    )
+    assert degraded != _M_IMP, "접두부 강등이 적용되지 않음 — 픽스처 무효"
+    findings = scan_text(
+        degraded,
+        mechanism_license={
+            "m2": True,
+            "caveatRequired": False,
+            "licensedSentences": [degraded],
+        },
+    )
+    assert findings, "scope markers stay mandatory for M2-form licensing"
+
+
+def test_v31_aligned_bare_canonical_passes_when_licensed():
+    """draftRevision 3 정렬 후: 정본 문장 단독이 라이선스 하에 그대로 통과.
+
+    이 정렬의 존재 이유 — 정본 문장이 자체적으로 두 scope 마커를 갖춰
+    wrapper 문장 없이 출판 가능해야 한다 (무패치 통합 프로브의 수정 사항).
+    """
+    findings = scan_text(
+        _M_IMP,
+        mechanism_license={
+            "m2": True,
+            "caveatRequired": False,
+            "licensedSentences": [_M_IMP],
+        },
+    )
+    assert not findings, f"정렬된 정본 문장이 라이선스 하에 통과해야 함: {findings}"
+
+
+def test_v31_natural_caveated_form_passes():
+    """caveatRequired 하의 자연 출판형: 정본(말미 마침표 제거) + ', <caveat>.'
+
+    caveat 마커는 같은 문장 안에 있어야 하므로 정본 문장의 마침표 앞에 붙는
+    형태가 유일한 자연형이다. 매칭은 정본의 말미 마침표 1개를 벗기고 비교
+    (무패치 통합 프로브가 드러낸 caveat-출판 불능 구조의 수정).
+    """
+    natural = _M_IMP[:-1] + ", " + _CAVEAT + "."
+    findings = scan_text(
+        natural,
+        mechanism_license={
+            "m2": True,
+            "caveatRequired": True,
+            "licensedSentences": [_M_IMP],
+        },
+    )
+    assert not findings, f"자연 caveat 출판형이 통과해야 함: {findings}"
+    # caveat 마커 누락 시에는 여전히 finding (caveat 의무는 불변)
+    findings_no_marker = scan_text(
+        _M_IMP,
+        mechanism_license={
+            "m2": True,
+            "caveatRequired": True,
+            "licensedSentences": [_M_IMP],
+        },
+    )
+    assert findings_no_marker, "caveatRequired인데 마커 없는 정본이 통과하면 안 됨"
+
+
+# --- Regression: the local TRD v3 working doc stays scanner-clean ---
+
+_TRD_V3_PATH = _REPO_ROOT / "tasks" / "TRD_MECHANISM_V3.md"
+
+
+def test_trd_mechanism_v3_scans_clean():
+    """tasks/TRD_MECHANISM_V3.md must produce zero findings (when present).
+
+    The TRD is a gitignored local working doc; skip when absent. Its N7-4
+    bullet cites the measured-gap example sentence — the citation must keep a
+    sentence boundary between prose and the backticked example so the
+    deliberate straddle-IN anti-evasion rule does not (correctly) fire on it.
+    """
+    if not _TRD_V3_PATH.exists():
+        pytest.skip("tasks/TRD_MECHANISM_V3.md not present (gitignored local file)")
+    findings = scan_path(_TRD_V3_PATH)
+    assert findings == [], (
+        f"tasks/TRD_MECHANISM_V3.md must scan clean: {findings}"
+    )

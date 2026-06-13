@@ -96,8 +96,34 @@ lines; backtick/identifier mentions are suppressed as elsewhere):
    NEVER from licenses.json). When the license carries ``caveatRequired``,
    the sentence must ALSO contain the canonical caveat marker from the
    prereg (``tieBreakCaveatMarker``) as an EXACT, case-sensitive substring.
+   The licensing rule is two-generation (N7-4):
+
+   - v1-prereg gate results carry NO ``licensedSentences`` key → the legacy
+     boolean ``m2`` grant licenses every M2-form sentence (caveat rule
+     unchanged) — exactly the pre-N7-4 behavior. Only a genuinely ABSENT key
+     selects this path: a gate result carrying the key with an explicit
+     ``null`` value is MALFORMED and licenses nothing (fail closed);
+   - v3-prereg gate results carry ``licensedSentences``, the list of EXACT
+     canonical-sentence strings for the licensed tracks (``rungs["M2-IMP"]``
+     / ``rungs["M2-NOISE"]`` / combined ``rungs["M2"]``, ``branch``). An
+     M2-form sentence is then allowed ONLY IF at least one licensed
+     canonical sentence is an exact (case-sensitive) substring of the
+     reassembled sentence, with whitespace runs normalized to single spaces
+     on BOTH sides before the comparison (canonical sentences may be wrapped
+     across lines in docs). An EMPTY list licenses nothing — fail closed —
+     regardless of any boolean rung.
 3. Else → finding (fail closed; rewrite as M1 hypothesis or obtain the two
    scope markers + a ladder_gate M2 license).
+
+N7-4 — v3.1 suppression-coupling patterns
+------------------------------------------
+:data:`MECHANISM_CLAIM_PATTERNS_V3_1` extends the mechanism layer (v1 and V3
+tuples stay byte-identical) with alpha/exploration-bonus suppression
+couplings — e.g. ``Alpha suppresses separability.`` — in agent-first,
+noun-first-passive, and noun-first-active orders, plus the
+disrupt↔separability coupling that makes the prereg v3 per-track canonical
+sentences scanner-visible. See the tuple's header comment for the full
+rationale and over-suppression guards.
 
 A sentence containing a mechanism pattern AND ``user``/``users``/``privacy``
 additionally emits a Korean WARNING line (stdout only — never a finding,
@@ -138,6 +164,7 @@ __all__ = [
     "FORBIDDEN_CLAIM_PATTERNS",
     "MECHANISM_CLAIM_PATTERNS",
     "MECHANISM_CLAIM_PATTERNS_V3",
+    "MECHANISM_CLAIM_PATTERNS_V3_1",
     "MECHANISM_HYPOTHESIS_MARKERS",
     "MECHANISM_SCOPE_MARKERS",
     "DEFAULT_TIE_BREAK_CAVEAT_MARKER",
@@ -344,9 +371,91 @@ _MECHANISM_PATTERN_RES_V3: tuple[tuple[str, "re.Pattern[str]"], ...] = tuple(
     for pattern in MECHANISM_CLAIM_PATTERNS_V3
 )
 
-# Union of v1 + v3 compiled patterns — used by _scan_mechanism_claims.
+# N7-4 (claim scanner v3.1): alpha/bonus suppression-coupling patterns. Added
+# as a NEW tuple so that MECHANISM_CLAIM_PATTERNS (v1) and
+# MECHANISM_CLAIM_PATTERNS_V3 remain BYTE-IDENTICAL (existing tests pin both
+# exactly). All patterns use bounded gaps [^.\n]{0,N} only — never .{0,N}.
+#
+# Rationale (measured gap, verified by the controller): the sentence
+# "Alpha suppresses separability." passed the scanner because neither v1 nor
+# V3 couples suppression verbs (suppress / reduce / attenuate) with the
+# alpha / exploration-bonus agents. Alpha is M2-permanently-prohibited in the
+# prereg v3 draft (AXS-ALPHA-EXP m2Prohibited), so an unlicensed
+# alpha-suppression claim must be a finding.
+#
+# Pattern design notes:
+#   - Agent group (?:alpha|exploration\s+bonus|bonus) and suppression verbs
+#     (?:suppress(?:es|ed)?|reduc(?:es|ed)|attenuat(?:es|ed)) are coupled with
+#     the separability noun group in three reachable English orders:
+#     agent-verb-noun (active), noun-passive-agent ("... is suppressed by
+#     alpha"), and noun-verb-agent (advisor-suggested active noun-first order,
+#     e.g. "Separability dropped when the schedule reduced the bonus").
+#   - attenuate↔separability is ALREADY coupled bidirectionally by V3 WITHOUT
+#     an agent; a sentence like "Alpha attenuates probe separability." fires
+#     both layers (one Finding per matching pattern — accepted, no dedup
+#     across tuples; tests pin this honestly).
+#   - Plain technical prose passes: no separability noun ("The alpha parameter
+#     reduces the exploration bonus magnitude."), identifier/backtick contexts
+#     ("`alpha=0.0`"), verb-agent without a separability noun ("We reduced the
+#     bonus schedule length.").
+#   - disrupt↔separability coupling (both orders): required for per-track
+#     canonical-sentence VISIBILITY — the prereg v3 draft M-NOISE canonical
+#     sentence ("schedule-yoked perturbation disrupts the structured
+#     separability pattern") matches no v1/V3 pattern, and per-track sentence
+#     licensing is vacuous if the unlicensed canonical sentence silently
+#     passes the scanner.
+#   - Straddle-IN is DELIBERATE anti-evasion (N7-4 review, controller-pinned):
+#     a match that STARTS in prose and whose bounded [^.\n]{0,N} gap walks
+#     INTO a backtick span IS a finding — only matches that start inside an
+#     open backtick span (odd backtick count before the match start) are
+#     suppressed. Otherwise wrapping just the noun in backticks
+#     ("alpha suppresses `separability`.") would become an evasion channel.
+#     Do NOT weaken the gap class or the open-span check. Prose that cites an
+#     example claim sentence must put a sentence boundary (. or newline)
+#     between the prose and the backticked example (see the regression
+#     fixture on tasks/TRD_MECHANISM_V3.md).
+MECHANISM_CLAIM_PATTERNS_V3_1: tuple[str, ...] = (
+    # agent-first: alpha/bonus agent → suppression verb → separability noun
+    r"(?:alpha|exploration\s+bonus|bonus)[^.\n]{0,80}"
+    r"(?:suppress(?:es|ed)?|reduc(?:es|ed)|attenuat(?:es|ed))[^.\n]{0,80}"
+    r"(?:separabilit(?:y|ies)|probe[-\s]separability|slate[-\s]separability"
+    r"|trajectory\s+distinction)",
+    # noun-first passive: separability noun → is/are/was/were V-ed by → agent
+    r"(?:separabilit(?:y|ies)|probe[-\s]separability|slate[-\s]separability"
+    r"|trajectory\s+distinction)"
+    r"[^.\n]{0,80}(?:is|are|was|were)\s+(?:suppressed|reduced|attenuated)\s+by"
+    r"[^.\n]{0,80}(?:alpha|exploration\s+bonus|bonus)",
+    # noun-first active: separability noun → suppression verb → agent
+    r"(?:separabilit(?:y|ies)|probe[-\s]separability|slate[-\s]separability"
+    r"|trajectory\s+distinction)"
+    r"[^.\n]{0,80}(?:suppress(?:es|ed)?|reduc(?:es|ed)|attenuat(?:es|ed))"
+    r"[^.\n]{0,80}(?:alpha|exploration\s+bonus|bonus)",
+    # disrupt coupling (verb-first) — M-NOISE canonical-sentence visibility
+    r"disrupt(?:s|ed|ing)?[^.\n]{0,80}"
+    r"(?:separabilit(?:y|ies)|probe[-\s]separability|slate[-\s]separability"
+    r"|trajectory\s+distinction)",
+    # disrupt coupling (noun-first)
+    r"(?:separabilit(?:y|ies)|probe[-\s]separability|slate[-\s]separability"
+    r"|trajectory\s+distinction)"
+    r"[^.\n]{0,80}disrupt(?:s|ed|ing)?",
+)
+
+_MECHANISM_PATTERN_RES_V3_1: tuple[tuple[str, "re.Pattern[str]"], ...] = tuple(
+    (
+        pattern,
+        re.compile(
+            r"(?<![A-Za-z0-9])(?:" + pattern + r")(?![A-Za-z0-9])",
+            re.IGNORECASE,
+        ),
+    )
+    for pattern in MECHANISM_CLAIM_PATTERNS_V3_1
+)
+
+# Union of v1 + v3 + v3.1 compiled patterns — used by _scan_mechanism_claims.
 _MECHANISM_PATTERN_RES: tuple[tuple[str, "re.Pattern[str]"], ...] = (
-    _MECHANISM_PATTERN_RES_V1 + _MECHANISM_PATTERN_RES_V3
+    _MECHANISM_PATTERN_RES_V1
+    + _MECHANISM_PATTERN_RES_V3
+    + _MECHANISM_PATTERN_RES_V3_1
 )
 
 # M1 hypothesis markers: any ONE licenses the sentence as hypothesis-form
@@ -607,11 +716,20 @@ def _label_order(label: str) -> int:
             + len(MECHANISM_CLAIM_PATTERNS)
             + MECHANISM_CLAIM_PATTERNS_V3.index(label)
         )
+    if label in MECHANISM_CLAIM_PATTERNS_V3_1:
+        return (
+            len(FORBIDDEN_PHRASES)
+            + len(FORBIDDEN_CLAIM_PATTERNS)
+            + len(MECHANISM_CLAIM_PATTERNS)
+            + len(MECHANISM_CLAIM_PATTERNS_V3)
+            + MECHANISM_CLAIM_PATTERNS_V3_1.index(label)
+        )
     return (
         len(FORBIDDEN_PHRASES)
         + len(FORBIDDEN_CLAIM_PATTERNS)
         + len(MECHANISM_CLAIM_PATTERNS)
         + len(MECHANISM_CLAIM_PATTERNS_V3)
+        + len(MECHANISM_CLAIM_PATTERNS_V3_1)
     )
 
 
@@ -753,6 +871,49 @@ def _split_sentences_with_offsets(joined: str) -> List[tuple[int, str]]:
     return out
 
 
+def _sentence_carries_licensed_canonical(
+    sentence: str, licensed_sentences: object
+) -> bool:
+    """True if a licensed canonical sentence is an exact substring of ``sentence``.
+
+    N7-4 per-track M2 sentence licensing. Comparison rules:
+
+    - The comparison is EXACT and CASE-SENSITIVE (no folding) — paraphrases
+      and case-mangled copies are NOT licensed.
+    - Whitespace runs are normalized to single spaces on BOTH sides first:
+      canonical sentences may be wrapped across source lines in docs, and the
+      sentence reassembly joins lines with single spaces, so internal
+      multi-space runs (on either side) must not defeat an otherwise
+      byte-exact match. ``sentence`` here is the reassembled sentence text.
+    - Fail closed on malformed input: a non-list/tuple value (notably a bare
+      ``str``, which would iterate per-character and fail OPEN on one-char
+      substrings), non-string entries, and empty/whitespace-only entries
+      license nothing.
+    - ONE trailing sentence terminator (``.``) of the canonical is stripped
+      before comparison: when ``caveatRequired`` is active the canonical
+      caveat marker must live in the SAME sentence, so the natural licensed
+      form is "<canonical minus final period>, <caveat marker>." — matching
+      the canonical period-inclusive would make every caveated publication
+      structurally impossible (surfaced by the unpatched gate→scanner
+      integration probe). Only the final period is stripped; the canonical
+      body remains exact and case-sensitive.
+    """
+    if isinstance(licensed_sentences, str) or not isinstance(
+        licensed_sentences, (list, tuple)
+    ):
+        return False
+    norm_sentence = " ".join(sentence.split())
+    for canonical in licensed_sentences:
+        if not isinstance(canonical, str):
+            continue  # fail closed on malformed entries
+        norm_canonical = " ".join(canonical.split())
+        if norm_canonical.endswith("."):
+            norm_canonical = norm_canonical[:-1]
+        if norm_canonical and norm_canonical in norm_sentence:
+            return True
+    return False
+
+
 def _scan_mechanism_claims(
     text: str,
     *,
@@ -764,10 +925,20 @@ def _scan_mechanism_claims(
 
     Per sentence containing a mechanism pattern (identifier/backtick mentions
     suppressed): a hypothesis marker licenses it as M1 (always allowed); BOTH
-    scope markers qualify it as M2-form, allowed only when ``mechanism_license``
-    carries an active M2 grant (and, when ``caveatRequired``, the canonical
-    caveat marker as an exact case-sensitive substring); everything else is a
-    finding. ``mechanism_license=None`` means NO license (fail closed).
+    scope markers qualify it as M2-form. An M2-form sentence is allowed only
+    when the caveat rule holds (when ``caveatRequired``, the canonical caveat
+    marker must appear as an exact case-sensitive substring) AND one of:
+
+    - v1 path — ``mechanism_license`` has NO ``licensedSentences`` key
+      (``None``): the legacy boolean ``m2`` grant applies, exactly as before;
+    - v3 path (N7-4) — ``licensedSentences`` is present: at least one licensed
+      canonical sentence must be an exact (case-sensitive, whitespace-run
+      normalized) substring of the sentence
+      (:func:`_sentence_carries_licensed_canonical`). An empty list licenses
+      NOTHING, regardless of the ``m2`` boolean (fail closed).
+
+    Everything else is a finding. ``mechanism_license=None`` means NO license
+    (fail closed).
 
     When ``warnings`` is a list, a Korean warning string is appended for every
     mechanism-pattern sentence that also carries user/users/privacy vocabulary
@@ -779,6 +950,9 @@ def _scan_mechanism_claims(
     # treated as caveat-required.
     caveat_required = bool(lic.get("caveatRequired", True))
     caveat_marker = lic.get("caveatMarker") or DEFAULT_TIE_BREAK_CAVEAT_MARKER
+    # N7-4: per-track sentence licensing. None (key absent) selects the v1
+    # m2-boolean path; any other value selects the v3 exact-sentence path.
+    licensed_sentences = lic.get("licensedSentences")
 
     findings: List[Finding] = []
     for chunk in _iter_sentence_chunks(text):
@@ -861,9 +1035,19 @@ def _scan_mechanism_claims(
             # 2. M2 form (BOTH scope markers): allowed only under an active
             #    M2 license (+ exact caveat marker when caveatRequired).
             if all(s in low for s in MECHANISM_SCOPE_MARKERS):
-                if m2_granted and (
-                    not caveat_required or caveat_marker in sentence
+                caveat_ok = not caveat_required or caveat_marker in sentence
+                if licensed_sentences is None:
+                    # v1 path (no licensedSentences key): legacy m2 boolean —
+                    # behavior EXACTLY as before N7-4.
+                    if m2_granted and caveat_ok:
+                        continue
+                elif caveat_ok and _sentence_carries_licensed_canonical(
+                    sentence, licensed_sentences
                 ):
+                    # v3 path (N7-4): the sentence must embed a licensed
+                    # canonical sentence verbatim. Empty/malformed lists
+                    # license nothing (fail closed), even when the legacy
+                    # m2 boolean is True.
                     continue
             # 3. Unlicensed mechanism claim: finding (fail closed).
             for pattern, m in matches:
@@ -945,9 +1129,14 @@ def scan_text(
         text: the document text to scan.
         file: label recorded on each :class:`Finding` (defaults to ``<text>``).
         mechanism_license: G-022a Track M license, a dict
-            ``{"m2": bool, "caveatRequired": bool, "caveatMarker": str}``.
-            ``None`` (default) means NO license is active — M2-form mechanism
-            sentences are findings (fail closed).
+            ``{"m2": bool, "caveatRequired": bool, "caveatMarker": str,
+            "licensedSentences": list[str] | None}``. ``None`` (default)
+            means NO license is active — M2-form mechanism sentences are
+            findings (fail closed). When ``licensedSentences`` is absent or
+            ``None`` the legacy ``m2`` boolean applies (v1 path); when it is
+            a list, an M2-form sentence must embed one of the licensed
+            canonical sentences verbatim (N7-4 v3 path; empty list licenses
+            nothing).
         warnings: optional list; Korean Track M warning strings are appended
             (mechanism pattern + user/privacy vocabulary). Warnings are never
             findings and never affect the exit code.
@@ -1161,6 +1350,16 @@ def _resolve_mechanism_license(args: argparse.Namespace) -> Optional[dict]:
     of ``--prereg`` / ``--reports`` / ``--ledger`` are provided. Any other
     state — args missing, gate error — returns ``None`` (no license, fail
     closed). licenses.json is NEVER read.
+
+    N7-4: when the gate result carries ``licensedSentences`` (v3-prereg
+    evaluations), the list of exact canonical-sentence strings is passed
+    through to the scanner (per-track M2 sentence licensing). v1-prereg
+    results have no such key — ONLY a genuinely ABSENT key maps to ``None``,
+    which preserves the legacy m2-boolean behavior downstream. A malformed
+    value — any present-but-non-list value, INCLUDING an explicit ``None`` /
+    JSON ``null`` — is replaced by an empty list: the v3 path stays selected
+    and licenses NOTHING (fail closed) — falling back to ``None`` would
+    reopen the m2-boolean path.
     """
     if not (args.prereg and args.reports and args.ledger):
         if args.prereg or args.reports or args.ledger:
@@ -1197,10 +1396,34 @@ def _resolve_mechanism_license(args: argparse.Namespace) -> Optional[dict]:
     except (OSError, json.JSONDecodeError, AttributeError):
         pass
 
+    # N7-4: pass licensedSentences through. ONLY a genuinely ABSENT key
+    # selects the v1 m2-boolean path (None sentinel). A key that is PRESENT
+    # with a None value (explicit JSON null) is MALFORMED — routing it to the
+    # v1 path would fail open (m2=True would license every M2-form sentence),
+    # so it falls through to the malformed branch: empty list, licenses
+    # nothing (fail closed), Korean warning.
+    if "licensedSentences" not in gate:
+        licensed_sentences = None  # v1-shaped result: legacy m2-boolean path
+    else:
+        raw_licensed = gate.get("licensedSentences")
+        if isinstance(raw_licensed, (list, tuple)):
+            licensed_sentences = [
+                s for s in raw_licensed if isinstance(s, str)
+            ]
+        else:
+            # Malformed value (including explicit None/null): keep the v3
+            # path but license nothing (fail closed).
+            print(
+                "[경고] ladder_gate 결과의 licensedSentences 형식 불량 — "
+                "문장 라이선스 0건으로 처리 (fail closed)"
+            )
+            licensed_sentences = []
+
     return {
         "m2": bool((gate.get("rungs") or {}).get("M2", False)),
         "caveatRequired": bool(gate.get("caveatRequired", True)),
         "caveatMarker": caveat_marker,
+        "licensedSentences": licensed_sentences,
     }
 
 
@@ -1275,9 +1498,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             for sentence in _G010_APPROVED_REPLACEMENTS:
                 print(f"  - {sentence}")
-        # G-022a: Korean guidance for Track M mechanism-claim hits (v1 + v3).
-        _all_mechanism_patterns = set(MECHANISM_CLAIM_PATTERNS) | set(
-            MECHANISM_CLAIM_PATTERNS_V3
+        # G-022a: Korean guidance for Track M mechanism-claim hits
+        # (v1 + v3 + v3.1).
+        _all_mechanism_patterns = (
+            set(MECHANISM_CLAIM_PATTERNS)
+            | set(MECHANISM_CLAIM_PATTERNS_V3)
+            | set(MECHANISM_CLAIM_PATTERNS_V3_1)
         )
         track_m_hits = [
             f for f in findings if f.phrase in _all_mechanism_patterns
